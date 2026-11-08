@@ -64,6 +64,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             overlay == OVERLAY_SETTINGS -> "settings"
             overlay == OVERLAY_PAUSE -> "paused"
             overlay == OVERLAY_MAP -> "map"
+            overlay == OVERLAY_DOCKED -> "docked"
             state == STATE_FLIGHT -> "flight"
             else -> "menu"
         }
@@ -111,6 +112,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val settingsScreen = SettingsScreen(this)
     private val pause = PauseScreen(this)
     private val map = MapScreen(this, system)
+    private val dockedScreen = com.starwake.core.ui.DockedScreen(this)
     private var time = 0f
     private var lastFrameNanos = 0L
     private var flightTime = 0f
@@ -135,6 +137,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val fwdV = Vec3()
     private val rightV = Vec3()
     private val landRot = Quat()
+
+    // docking (K): automatic approach into the slot, then the docked screen
+    private var docking = false
+    private var dockStation = -1
+    private var dockPhase = 0 // 0 approach point, 1 slide into the slot
+    private val dockPos = com.starwake.core.math.DVec3()
+    private val dockDir = Vec3()
+    private val portLocal = Vec3()
+    private val portDirLocal = Vec3()
     private var aimIndex = -1
     private var padZeroHold = false
 
@@ -226,6 +237,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         settingsScreen.layout(frame)
         pause.layout(frame)
         map.layout(frame)
+        dockedScreen.layout(frame)
         touch.layout(frame.w, frame.h, frame.u, frame.sl, frame.st, frame.sr, frame.sb)
     }
 
@@ -324,6 +336,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 "lock" -> if (state == STATE_FLIGHT) toggleLock()
                 "action" -> if (state == STATE_FLIGHT) doAction()
                 "teleport-low" -> if (state == STATE_FLIGHT) debugTeleportLow()
+                "dock" -> if (state == STATE_FLIGHT) requestDocking(0)
+                "docked" -> if (state == STATE_FLIGHT) {
+                    requestDocking(0)
+                    stationPort(0)
+                    ship.pos.set(dockPos)
+                    dockPhase = 1
+                }
                 "livery" -> settings.livery = (settings.livery + 1) % Liveries.all.size
             }
         }
@@ -352,6 +371,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         when {
             overlay == OVERLAY_SETTINGS -> closeSettings()
             overlay == OVERLAY_MAP -> closeMap()
+            overlay == OVERLAY_DOCKED -> openPause()
             overlay == OVERLAY_PAUSE -> resume()
             state == STATE_FLIGHT -> openPause()
             else -> exitApp()
@@ -366,6 +386,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             overlay == OVERLAY_SETTINGS -> settingsScreen.group.down(id, x, y)
             overlay == OVERLAY_PAUSE -> pause.group.down(id, x, y)
             overlay == OVERLAY_MAP -> map.down(id, x, y)
+            overlay == OVERLAY_DOCKED -> dockedScreen.group.down(id, x, y)
             state == STATE_MENU -> {
                 if (!menu.group.down(id, x, y) && orbitPointer < 0) {
                     orbitPointer = id
@@ -380,6 +401,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     override fun onPointerMove(id: Int, x: Float, y: Float) {
         if (settingsScreen.group.move(id, x, y)) return
         if (pause.group.move(id, x, y)) return
+        if (dockedScreen.group.move(id, x, y)) return
         if (overlay == OVERLAY_MAP) {
             map.move(id, x, y)
             return
@@ -401,6 +423,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     override fun onPointerUp(id: Int, x: Float, y: Float, cancelled: Boolean) {
         settingsScreen.group.up(id, x, y, cancelled)
         pause.group.up(id, x, y, cancelled)
+        dockedScreen.group.up(id, x, y, cancelled)
         if (overlay == OVERLAY_MAP) map.up(id, x, y, cancelled)
         menu.group.up(id, x, y, cancelled)
         if (id == orbitPointer) {
@@ -467,6 +490,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun screenChanged() {
         settingsScreen.group.releaseAll()
         pause.group.releaseAll()
+        dockedScreen.group.releaseAll()
         map.releaseAll()
         menu.group.releaseAll()
         orbitPointer = -1
@@ -527,6 +551,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         padZeroHold = false
         landing = false
         landed = false
+        docking = false
         gear = 0f
         message = null
         screenChanged()
@@ -602,11 +627,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
             updateGear(dt)
             if (landed) holdLanded(dt)
+            if (docking) {
+                updateDocking(dt)
+                if (docking && (abs(touch.pitch) > 0.5f || abs(touch.roll) > 0.5f || abs(touch.yaw) > 0.5f)) {
+                    docking = false
+                    showMessage("DOCKING CANCELLED")
+                }
+            }
             val limit = if (landing) minOf(here.speedLimit, LANDING_SPEED) else here.speedLimit
             val steps = clamp(ceil(dt / MAX_STEP).toInt().toFloat(), 1f, 8f).toInt()
             val h = dt / steps
             for (i in 0 until steps) {
-                if (landed) break
+                if (landed || docking || overlay != OVERLAY_NONE) break
                 if (flight.step(ship, controls, h, limit)) {
                     haptic(Haptics.HEAVY)
                     chase.addShake(0.8f)
@@ -769,6 +801,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             OVERLAY_SETTINGS -> settingsScreen.draw(ui, frame, 1f)
             OVERLAY_PAUSE -> pause.draw(ui, frame, 1f)
             OVERLAY_MAP -> map.draw(ui, 1f, ship.pos, ship.rot, time)
+            OVERLAY_DOCKED -> dockedScreen.draw(ui, frame, 1f, system.stations[dockStation].name)
         }
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
@@ -896,7 +929,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     private fun actionLabel(): String = when {
         landed -> "TAKE OFF"
-        landing -> "CANCEL"
+        landing || docking -> "CANCEL"
+        here.zone == StarSystem.Zone.STATION_ZONE -> "DOCK"
         here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> "LAND"
         else -> ""
     }
@@ -904,10 +938,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun doAction() {
         when {
             landed -> takeOff()
+            docking -> {
+                docking = false
+                showMessage("DOCKING CANCELLED")
+            }
             landing -> {
                 landing = false
                 showMessage("LANDING CANCELLED")
             }
+            here.zone == StarSystem.Zone.STATION_ZONE -> requestDocking(here.nearestStation)
             here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> {
                 landing = true
                 showMessage("LANDING MODE  ·  GEAR DOWN")
@@ -1087,6 +1126,91 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ui.textCentered(label, x, y - 12f * u, 10f * u, col, tracking = 0.25f, shadow = 0.6f)
         ui.rect(x - 50f * u, y, 100f * u, 4f * u, withAlpha(Theme.PANEL, a), 2f * u)
         ui.rect(x - 50f * u, y, 100f * u * gear, 4f * u, col, 2f * u)
+    }
+
+    // ================================================================== docking (K)
+
+    /**
+     * Docking port of station [i] in world space: [dockPos] = slot entrance, [dockDir] = outward
+     * direction a ship approaches along.
+     */
+    private fun stationPort(i: Int) {
+        val st = system.stations[i]
+        stationPortLocal(st.model, portLocal, portDirLocal)
+        st.rot.rotate(portLocal, tmp)
+        dockPos.set(st.pos.x + tmp.x, st.pos.y + tmp.y, st.pos.z + tmp.z)
+        st.rot.rotate(portDirLocal, dockDir)
+        dockDir.normalize()
+    }
+
+    private fun stationPortLocal(model: Int, outPos: Vec3, outDir: Vec3) {
+        // provisional until StationMesh provides the real slot: front of the hub, facing -Z
+        outPos.set(0f, 0f, if (model == 0) -160f else -60f)
+        outDir.set(0f, 0f, -1f)
+    }
+
+    private fun requestDocking(i: Int) {
+        if (i < 0) return
+        docking = true
+        dockStation = i
+        dockPhase = 0
+        landing = false
+        showMessage("DOCKING GRANTED  ·  AUTO-DOCK ENGAGED")
+        haptic(Haptics.TICK)
+    }
+
+    /** Auto-dock: fly to a point in front of the slot, line up, then slide in. */
+    private fun updateDocking(dt: Float) {
+        stationPort(dockStation)
+        val standOff = if (dockPhase == 0) DOCK_STANDOFF else 0.0
+        val tx = dockPos.x + dockDir.x * standOff
+        val ty = dockPos.y + dockDir.y * standOff
+        val tz = dockPos.z + dockDir.z * standOff
+        val dx = tx - ship.pos.x
+        val dy = ty - ship.pos.y
+        val dz = tz - ship.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        // nose into the slot (against the outward direction)
+        landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, 0f, 1f, 0f)
+        val turn = if (dockPhase == 0) 1.5f else 3f
+        ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
+        val speed = if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 2f)
+        if (d > 0.5) {
+            val k = minOf(1.0, speed * dt / d)
+            ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
+            ship.pos.set(ship.pos.x + dx * k, ship.pos.y + dy * k, ship.pos.z + dz * k)
+        }
+        ship.speed = speed
+        ship.forwardSpeed = speed
+        ship.angVel.zero()
+        ship.engineOutput += (0.3f - ship.engineOutput) * expApproach(4f, dt)
+        if (dockPhase == 0 && d < 15.0) {
+            dockPhase = 1
+            showMessage("ENTERING SLOT")
+        } else if (dockPhase == 1 && d < 2.0) {
+            docking = false
+            ship.vel.zero()
+            touch.throttle = 0f
+            overlay = OVERLAY_DOCKED
+            touch.releaseAll()
+            screenChanged()
+            haptic(Haptics.BUMP)
+            message = null
+        }
+    }
+
+    override fun launchFromStation() {
+        if (overlay != OVERLAY_DOCKED) return
+        stationPort(dockStation)
+        // out of the slot, nose outward, at a gentle push
+        ship.pos.set(dockPos.x + dockDir.x * 40.0, dockPos.y + dockDir.y * 40.0, dockPos.z + dockDir.z * 40.0)
+        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, 0f, 1f, 0f)
+        ship.vel.set(dockDir).scale(60f)
+        touch.throttle = 0.3f
+        chase.snapTo(ship)
+        overlay = OVERLAY_NONE
+        screenChanged()
+        showMessage("LAUNCHED  ·  " + system.stations[dockStation].name)
     }
 
     // ================================================================== targets, lock and markers
@@ -1401,6 +1525,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val OVERLAY_SETTINGS = 1
         private const val OVERLAY_PAUSE = 2
         private const val OVERLAY_MAP = 3
+        private const val OVERLAY_DOCKED = 4
         private const val ACTION_NONE = 0
         private const val ACTION_LAUNCH = 1
         private const val ACTION_MENU = 2
@@ -1419,5 +1544,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val TOUCHDOWN_SPEED = 8f
         private const val GEAR_LEGS = 1.6f
         private const val GEAR_TIME = 2.2f
+        private const val DOCK_STANDOFF = 300.0
+        private const val DOCK_APPROACH_SPEED = 180f
     }
 }

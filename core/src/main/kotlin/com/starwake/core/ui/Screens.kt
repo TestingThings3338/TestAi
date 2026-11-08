@@ -23,6 +23,9 @@ interface GameActions : UiHost {
 
     /** A setting changed. [display] = render scale / frame rate, [renderer] = quality (GPU rebuild). */
     fun settingsChanged(display: Boolean, renderer: Boolean)
+
+    /** Leave the station the ship is docked at. */
+    fun launchFromStation()
 }
 
 /** Screen geometry shared by all screens. */
@@ -209,5 +212,33 @@ class PauseScreen(private val game: GameActions) {
         ui.rect(0f, 0f, f.w, f.h, withAlpha(Theme.BLACK, alpha * 0.5f))
         ui.textCentered("PAUSED", cx, top - 34f * u, 26f * u, withAlpha(Theme.TEXT, alpha), tracking = 0.3f, shadow = 0.6f, face = FontData.TITLE)
         group.draw(ui, u, alpha)
+    }
+}
+
+/** Shown while docked at a station. Services arrive with the economy port. */
+class DockedScreen(private val host: GameActions) {
+    val group = WidgetGroup(host)
+    private val launch = group.add(Button("LAUNCH", primary = true) { host.launchFromStation() })
+    private val panel = Rect()
+
+    fun layout(f: Frame) {
+        val u = f.u
+        val pw = minOf(f.w - f.sl - f.sr - 40f * u, 420f * u)
+        val ph = 210f * u
+        panel.set(f.sl + 24f * u, f.h - f.sb - 24f * u - ph, pw, ph)
+        launch.r.set(panel.x + 20f * u, panel.y + ph - 20f * u - 46f * u, 200f * u, 46f * u)
+        group.slop = 6f * u
+    }
+
+    fun draw(ui: UiRenderer, f: Frame, a: Float, stationName: String) {
+        val u = f.u
+        val p = panel
+        ui.rect(p.x, p.y, p.w, p.h, withAlpha(Theme.PANEL, a * 0.95f), -12f * u)
+        ui.rect(p.x, p.y, p.w, p.h, withAlpha(Theme.ACCENT, a * 0.45f), -12f * u, 1.2f * u)
+        ui.text("DOCKED", p.x + 20f * u, p.y + 30f * u, 10f * u, withAlpha(Theme.OK, a), tracking = 0.3f)
+        ui.text(stationName, p.x + 20f * u, p.y + 58f * u, 22f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f, face = FontData.TITLE)
+        ui.text("WELCOME, PILOT.", p.x + 20f * u, p.y + 82f * u, 11f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
+        ui.text("SHIPYARD, MARKET AND REPAIRS ARRIVE WITH THE ECONOMY PORT.", p.x + 20f * u, p.y + 102f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f), tracking = 0.08f)
+        group.draw(ui, u, a)
     }
 }
