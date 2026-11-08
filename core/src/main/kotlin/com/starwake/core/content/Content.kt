@@ -20,8 +20,8 @@ class Content(fontMetrics: String, val fontAtlas: ByteArray, val system: StarSys
     }
     val stars: FloatArray = StarField.build(MAX_STARS)
     val dust: Pair<FloatArray, ShortArray> = DustField.build(MAX_DUST)
-    val sphere: Pair<FloatArray, ShortArray> = Primitives.uvSphere(72, 44)
-    val ring: Pair<FloatArray, ShortArray> = Primitives.annulus(180, 1.40f, 2.34f)
+    val stationMeshes: Array<FloatArray> = Array(StationMesh.MODELS) { StationMesh.build(it) }
+    val stationLights: Array<FloatArray> = Array(StationMesh.MODELS) { StationMesh.lights(it) }
 
     companion object {
         const val ROCK_VARIANTS = 3

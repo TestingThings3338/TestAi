@@ -340,7 +340,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 "docked" -> if (state == STATE_FLIGHT) {
                     requestDocking(0)
                     stationPort(0)
-                    ship.pos.set(dockPos)
+                    ship.pos.set(dockPos.x + dockDir.x * 20.0, dockPos.y + dockDir.y * 20.0, dockPos.z + dockDir.z * 20.0)
                     dockPhase = 1
                 }
                 "livery" -> settings.livery = (settings.livery + 1) % Liveries.all.size
@@ -1144,9 +1144,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     private fun stationPortLocal(model: Int, outPos: Vec3, outDir: Vec3) {
-        // provisional until StationMesh provides the real slot: front of the hub, facing -Z
-        outPos.set(0f, 0f, if (model == 0) -160f else -60f)
-        outDir.set(0f, 0f, -1f)
+        com.starwake.core.content.StationMesh.dockPort(model, outPos, outDir)
+    }
+
+    /** How far inside the slot entrance the ship parks (half the tunnel depth). */
+    private fun slotParkDepth(i: Int): Double {
+        com.starwake.core.content.StationMesh.slotSize(system.stations[i].model, tmp2)
+        return tmp2.z * 0.5
     }
 
     private fun requestDocking(i: Int) {
@@ -1162,7 +1166,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     /** Auto-dock: fly to a point in front of the slot, line up, then slide in. */
     private fun updateDocking(dt: Float) {
         stationPort(dockStation)
-        val standOff = if (dockPhase == 0) DOCK_STANDOFF else 0.0
+        // phase 0: hold in front of the slot; phase 1: glide in and park inside the tunnel
+        val standOff = if (dockPhase == 0) DOCK_STANDOFF else -slotParkDepth(dockStation)
         val tx = dockPos.x + dockDir.x * standOff
         val ty = dockPos.y + dockDir.y * standOff
         val tz = dockPos.z + dockDir.z * standOff
@@ -1170,11 +1175,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val dy = ty - ship.pos.y
         val dz = tz - ship.pos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
-        // nose into the slot (against the outward direction)
-        landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, 0f, 1f, 0f)
+        // nose into the slot (against the outward direction), roll matched to the station's up
+        system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
+        landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
         val turn = if (dockPhase == 0) 1.5f else 3f
         ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
-        val speed = if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 2f)
+        val speed = if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
         if (d > 0.5) {
             val k = minOf(1.0, speed * dt / d)
             ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
@@ -1204,7 +1210,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         stationPort(dockStation)
         // out of the slot, nose outward, at a gentle push
         ship.pos.set(dockPos.x + dockDir.x * 40.0, dockPos.y + dockDir.y * 40.0, dockPos.z + dockDir.z * 40.0)
-        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, 0f, 1f, 0f)
+        system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
+        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
         ship.vel.set(dockDir).scale(60f)
         touch.throttle = 0.3f
         chase.snapTo(ship)
@@ -1359,6 +1366,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (x < -50f || y < -50f || x > frame.w + 50f || y > frame.h + 50f) return
         val locked = kind == lockKind && i == lockIndex
         val shown = kind == showKind && i == showIndex
+        // hidden behind a planet: no marker (the lock brackets still show where it is)
+        if (!locked && hiddenBehindBody(kind, i)) return
         val dist = targetDistance(kind, i)
         val pxPerUnit = frame.h * 0.5f / cam.tanHalfY / screenPt.z
         val screenR = (targetRadius(kind, i) * pxPerUnit).toFloat()
@@ -1394,6 +1403,33 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             val tw = ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
             ui.text(unit, x + tw * 0.5f + 4f * u, y + 14f * u, 8.5f * u, col, shadow = 0.7f)
         }
+    }
+
+    /** True if a body other than the target itself blocks the line of sight from the camera. */
+    private fun hiddenBehindBody(kind: Int, i: Int): Boolean {
+        val eye = sceneFrame.camera.pos
+        val p = when (kind) {
+            LOCK_STATION -> system.stations[i].pos
+            LOCK_BODY -> system.bodies[i].pos
+            else -> return false
+        }
+        val dx = p.x - eye.x
+        val dy = p.y - eye.y
+        val dz = p.z - eye.z
+        val len = sqrt(dx * dx + dy * dy + dz * dz)
+        if (len < 1.0) return false
+        for (j in system.bodies.indices) {
+            if (kind == LOCK_BODY && j == i) continue
+            val b = system.bodies[j]
+            val cx = b.pos.x - eye.x
+            val cy = b.pos.y - eye.y
+            val cz = b.pos.z - eye.z
+            val t = (cx * dx + cy * dy + cz * dz) / len
+            if (t <= 0.0 || t >= len) continue
+            val c2 = cx * cx + cy * cy + cz * cz
+            if (c2 - t * t < b.radius * b.radius) return true
+        }
+        return false
     }
 
     /** True when [p] is close enough to the asteroid field to draw and collide with it. */

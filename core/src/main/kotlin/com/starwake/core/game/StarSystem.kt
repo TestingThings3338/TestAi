@@ -74,7 +74,7 @@ class StarSystem {
         val tilt = Quat().setAxisAngle(1f, 0f, -0.45f, -0.42f)
         val roll = Quat().setAxisAngle(giantDirFromHome.x, giantDirFromHome.y, giantDirFromHome.z, 0.32f)
         bodies += Body(
-            "PLANET III", BodyType.GAS, giantR, giant, Quat().mul(roll, tilt), 0.0025f, true,
+            "PLANET III", BodyType.GAS, giantR, giant, Quat().mul(roll, tilt), 1e-4f, true,
             1.42 * giantR, 2.32 * giantR, floatArrayOf(0.55f, 0.6f, 0.75f), 0.015f, 3,
         )
         bodies += planet("PLANET I", BodyType.LAVA, 3.2e6, 4.0e8, 0.6, 0.05, 1, floatArrayOf(0.9f, 0.4f, 0.2f), 0.01f)
@@ -85,12 +85,12 @@ class StarSystem {
         stations += Station(
             "HOME STATION", 0,
             DVec3(home.x + HOME_STATION_X, home.y + HOME_STATION_Y, home.z + HOME_STATION_Z),
-            Quat().setAxisAngle(0f, 1f, 0f, 0.9f), 950.0, 1,
+            Quat().setAxisAngle(0f, 1f, 0f, 0.9f), 915.0, 1,
         )
         val p2 = bodies[3]
-        stations += Station("OUTPOST II", 1, offsetFrom(p2, 1.6), Quat().setAxisAngle(0f, 1f, 0f, 1.1f), 260.0, 3)
+        stations += Station("OUTPOST II", 1, offsetFrom(p2, 1.6), Quat().setAxisAngle(0f, 1f, 0f, 1.1f), 257.0, 3)
         val p4 = bodies[4]
-        stations += Station("OUTPOST IV", 1, offsetFrom(p4, 1.8), Quat().setAxisAngle(1f, 0f, 0f, 0.3f), 260.0, 4)
+        stations += Station("OUTPOST IV", 1, offsetFrom(p4, 1.8), Quat().setAxisAngle(1f, 0f, 0f, 0.3f), 257.0, 4)
 
         fieldOrigin = DVec3(home.x, home.y, home.z - 1500.0)
     }
@@ -101,7 +101,8 @@ class StarSystem {
     ): Body {
         val pos = DVec3(orbit * kotlin.math.cos(angle), orbit * incl, orbit * kotlin.math.sin(angle))
         val rot = Quat().setAxisAngle(0.3f, 0f, 1f, 0.2f + seed * 0.1f)
-        return Body(name, type, r, pos, rot, 0.01f / (1 + seed), false, atmo = atmo, atmoThickness = thick, seed = seed)
+        // solid worlds don't spin visually: a landed ship would otherwise slide over the ground
+        return Body(name, type, r, pos, rot, 0f, false, atmo = atmo, atmoThickness = thick, seed = seed)
     }
 
     /** A point [radii] planet radii above [b]'s surface on the side facing the star. */

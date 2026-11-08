@@ -7,6 +7,7 @@ import com.starwake.core.content.KiteShip
 import com.starwake.core.content.Liveries
 import com.starwake.core.content.Primitives
 import com.starwake.core.content.StarField
+import com.starwake.core.content.StationMesh
 import com.starwake.core.game.ShipState
 import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Mat4
@@ -72,8 +73,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val litInst = LitProgram(gl, true)
     private val sky = ShaderProgram(gl, "sky", Shaders.skyVs, Shaders.skyFs)
     private val star = ShaderProgram(gl, "stars", Shaders.starVs, Shaders.starFs)
-    private val planet = ShaderProgram(gl, "planet", Shaders.planetVs, Shaders.planetFs)
-    private val ring = ShaderProgram(gl, "ring", Shaders.planetVs, Shaders.ringFs)
     private val dust = ShaderProgram(gl, "dust", Shaders.dustVs, Shaders.dustFs)
     private val glow = ShaderProgram(gl, "glow", Shaders.glowVs, Shaders.glowFs)
 
@@ -90,13 +89,13 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val dustMesh = GpuMesh(gl, content.dust.first, intArrayOf(3, 2), content.dust.second)
     private var starCount = 0
     private var dustCount = 0
-    private val sphereMesh = GpuMesh(gl, content.sphere.first, intArrayOf(3), content.sphere.second)
-    private val ringMesh = GpuMesh(gl, content.ring.first, intArrayOf(3), content.ring.second)
+    private val stationMeshes = Array(StationMesh.MODELS) { GpuMesh(gl, content.stationMeshes[it], intArrayOf(3, 3, 2)) }
+    private val stationLit = LitProgram(gl, false)
     private val glowStream = QuadStream(gl, 48, intArrayOf(3, GL.FLOAT, 3, GL.FLOAT, 4, GL.FLOAT))
 
     private val envSize = if (quality == 0) 256 else 512
     private val envTex = bakeEnvironment(envSize)
-    private val planetTex = bakePlanet(if (quality == 0) 1024 else 2048, if (quality == 0) 512 else 1024)
+    private val bodies = BodyRenderer(gl, content.system, quality, fullscreen)
     private val envLod = ln(envSize.toFloat()) / ln(2f) - 1.5f
     var quality = quality
         private set
@@ -125,7 +124,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     /** True when [q] needs differently sized baked textures (then rebuild the renderer). */
-    fun needsRebake(q: Int): Boolean = (q == 0) != (envSize == 256)
+    fun needsRebake(q: Int): Boolean = (q == 0) != (envSize == 256) || bodies.needsRebake(q)
 
     /** Cheap quality switch: star/dust counts (asteroid counts come from the field's active mask). */
     fun setQuality(q: Int) {
@@ -184,20 +183,23 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
         drawBackground(f)
         drawStars(f)
-        drawSun(f)
-        drawPlanet(f)
+        // star and planets: ray-cast impostors at true scale, drawn back to front without depth
+        bodies.render(cam, f.time, f.exposure)
+        gl.viewport(0, 0, w, h)
 
-        // near scene uses depth [0, 0.999); the sky-space planet sits in [0.999, 1] – no second clear
-        gl.depthRange(0f, 0.999f)
+        // the near scene draws over the bodies (planets use no depth), so a single clear suffices
+        gl.depthRange(0f, 1f)
         gl.depthMask(true)
         gl.enable(GL.DEPTH_TEST)
         gl.depthFunc(GL.LEQUAL)
         gl.enable(GL.CULL_FACE)
         gl.cullFace(GL.BACK)
         drawAsteroids(f)
+        drawStations(f)
         val ship = f.ship
         if (ship != null) drawShip(f, ship)
         drawDust(f)
+        drawStationLights(f)
         if (ship != null) drawShipGlows(f, ship)
         gl.depthMask(true)
         gl.depthRange(0f, 1f)
@@ -231,68 +233,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.uniform1f(star.u("u_bright"), 1f)
         starMesh.drawRange(GL.POINTS, starCount)
         gl.disable(GL.BLEND)
-    }
-
-    private fun drawSun(f: SceneFrame) {
-        val c = f.camera
-        val s = Environment.sunDir
-        val d = 1000f
-        val size = 150f
-        glowStream.begin()
-        billboard(s.x * d, s.y * d, s.z * d, size, c, 2f, 1f, 0.96f, 0.88f, 1f)
-        gl.enable(GL.BLEND)
-        gl.blendFunc(GL.ONE, GL.ONE)
-        glow.use()
-        gl.uniformMatrix4fv(glow.u("u_viewProj"), c.skyViewProj.m, 0)
-        gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
-        glowStream.flush()
-        gl.disable(GL.BLEND)
-    }
-
-    private fun drawPlanet(f: SceneFrame) {
-        val c = f.camera
-        val p = Environment.planetDir
-        val d = Environment.PLANET_DISTANCE
-        val r = d * sin(Environment.PLANET_ANGULAR_RADIUS)
-        val rot = Environment.planetRot
-        skyModel.setTRS(p.x * d, p.y * d, p.z * d, rot, r)
-        rot.rotateInverse(Environment.sunDir, sunObj)
-        val sc = Environment.sunColor
-
-        gl.depthRange(0.999f, 1f)
-        gl.enable(GL.DEPTH_TEST)
-        gl.depthFunc(GL.LEQUAL)
-        gl.depthMask(true)
-        gl.enable(GL.CULL_FACE)
-        gl.cullFace(GL.BACK)
-        planet.use()
-        gl.uniformMatrix4fv(planet.u("u_viewProj"), c.skyViewProj.m, 0)
-        gl.uniformMatrix4fv(planet.u("u_model"), skyModel.m, 0)
-        gl.uniform3f(planet.u("u_sunDir"), Environment.sunDir.x, Environment.sunDir.y, Environment.sunDir.z)
-        gl.uniform3f(planet.u("u_sunObj"), sunObj.x, sunObj.y, sunObj.z)
-        gl.uniform3f(planet.u("u_sunColor"), sc[0], sc[1], sc[2])
-        gl.uniform3f(planet.u("u_atmo"), 0.35f, 0.5f, 0.75f)
-        gl.uniform1f(planet.u("u_spin"), f.time * 0.0025f)
-        gl.uniform1f(planet.u("u_exposure"), f.exposure)
-        gl.activeTexture(GL.TEXTURE0)
-        gl.bindTexture(GL.TEXTURE_2D, planetTex)
-        gl.uniform1i(planet.u("u_tex"), 0)
-        sphereMesh.draw()
-
-        gl.disable(GL.CULL_FACE)
-        gl.depthMask(false)
-        gl.enable(GL.BLEND)
-        gl.blendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
-        ring.use()
-        gl.uniformMatrix4fv(ring.u("u_viewProj"), c.skyViewProj.m, 0)
-        gl.uniformMatrix4fv(ring.u("u_model"), skyModel.m, 0)
-        gl.uniform3f(ring.u("u_sunObj"), sunObj.x, sunObj.y, sunObj.z)
-        gl.uniform3f(ring.u("u_sunColor"), sc[0], sc[1], sc[2])
-        gl.uniform1f(ring.u("u_exposure"), f.exposure)
-        ringMesh.draw()
-        gl.disable(GL.BLEND)
-        gl.depthMask(true)
-        gl.disable(GL.DEPTH_TEST)
     }
 
     // ------------------------------------------------------------------ near scene
@@ -437,6 +377,100 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         glowStream.cursor = o
     }
 
+    // ------------------------------------------------------------------ stations
+
+    /**
+     * Stations within [STATION_DRAW_RANGE]. Beyond [STATION_NEAR] they are drawn scaled towards the
+     * camera (same apparent size) so depth precision stays good. Stations hidden behind a planet
+     * are skipped (planets don't write depth).
+     */
+    private fun drawStations(f: SceneFrame) {
+        val c = f.camera
+        val stations = content.system.stations
+        var begun = false
+        for (i in stations.indices) {
+            val st = stations[i]
+            st.pos.relativeTo(c.pos, rel)
+            val d = rel.length()
+            if (d > STATION_DRAW_RANGE || occludedByBody(st.pos, c.pos)) continue
+            val k = if (d > STATION_NEAR) STATION_NEAR / d else 1f
+            model.setTRS(rel.x * k, rel.y * k, rel.z * k, st.rot, k)
+            if (!begun) {
+                stationLit.begin(c, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
+                begun = true
+            } else {
+                stationLit.setModel(model)
+            }
+            stationMeshes[st.model].draw()
+        }
+    }
+
+    private fun drawStationLights(f: SceneFrame) {
+        val c = f.camera
+        val stations = content.system.stations
+        glowStream.begin()
+        val blink = (f.time % 1.6f) < 0.8f
+        for (i in stations.indices) {
+            val st = stations[i]
+            st.pos.relativeTo(c.pos, rel)
+            val d = rel.length()
+            if (d > STATION_DRAW_RANGE || occludedByBody(st.pos, c.pos)) continue
+            val k = if (d > STATION_NEAR) STATION_NEAR / d else 1f
+            val lights = content.stationLights[st.model]
+            var o = 0
+            while (o < lights.size) {
+                val red = lights[o + 3] > 0.9f && lights[o + 4] < 0.3f
+                if (red && !blink) {
+                    o += 6
+                    continue
+                }
+                st.rot.rotate(lights[o], lights[o + 1], lights[o + 2], tmp)
+                val lx = (rel.x + tmp.x) * k
+                val ly = (rel.y + tmp.y) * k
+                val lz = (rel.z + tmp.z) * k
+                // keep lights readable from afar: grow with distance up to a cap
+                val dist = d * k
+                val size = maxOf(6f, minOf(dist * 0.012f, 60f)) * if (d > STATION_NEAR) 1f else 1f
+                billboard(lx, ly, lz, size, c, 0f, lights[o + 3], lights[o + 4], lights[o + 5], 0.9f)
+                o += 6
+            }
+        }
+        if (glowStream.quads == 0) return
+        gl.enable(GL.BLEND)
+        gl.blendFunc(GL.ONE, GL.ONE)
+        gl.depthMask(false)
+        gl.enable(GL.DEPTH_TEST)
+        gl.disable(GL.CULL_FACE)
+        glow.use()
+        gl.uniformMatrix4fv(glow.u("u_viewProj"), c.viewProj.m, 0)
+        gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
+        glowStream.flush()
+        gl.enable(GL.CULL_FACE)
+        gl.depthMask(true)
+        gl.disable(GL.BLEND)
+    }
+
+    /** True if a planet blocks the line of sight from [eye] to [p]. */
+    private fun occludedByBody(p: com.starwake.core.math.DVec3, eye: com.starwake.core.math.DVec3): Boolean {
+        val dx = p.x - eye.x
+        val dy = p.y - eye.y
+        val dz = p.z - eye.z
+        val len = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        if (len < 1.0) return false
+        val bodies = content.system.bodies
+        for (i in bodies.indices) {
+            val b = bodies[i]
+            val cx = b.pos.x - eye.x
+            val cy = b.pos.y - eye.y
+            val cz = b.pos.z - eye.z
+            val t = (cx * dx + cy * dy + cz * dz) / len
+            if (t <= 0.0 || t >= len) continue
+            val c2 = cx * cx + cy * cy + cz * cz
+            if (c2 - t * t < b.radius * b.radius) return true
+        }
+        return false
+    }
+
     // ------------------------------------------------------------------ one-time bakes
 
     private fun bakeEnvironment(size: Int): Int {
@@ -477,42 +511,23 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         return tex
     }
 
-    private fun bakePlanet(w: Int, h: Int): Int {
-        val tex = gl.genTexture()
-        gl.bindTexture(GL.TEXTURE_2D, tex)
-        gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, w, h, GL.RGBA, GL.UNSIGNED_BYTE, null)
-        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR)
-        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR)
-        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.REPEAT)
-        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE)
-        val prog = ShaderProgram(gl, "gasgiant", Shaders.bakeVs, Shaders.gasGiantFs)
-        val fbo = gl.genFramebuffer()
-        gl.bindFramebuffer(GL.FRAMEBUFFER, fbo)
-        gl.framebufferTexture2D(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, tex, 0)
-        gl.viewport(0, 0, w, h)
-        gl.disable(GL.DEPTH_TEST)
-        gl.disable(GL.BLEND)
-        prog.use()
-        fullscreen.draw()
-        gl.bindFramebuffer(GL.FRAMEBUFFER, gl.screenFramebuffer)
-        gl.deleteFramebuffer(fbo)
-        prog.dispose()
-        return tex
-    }
-
     fun dispose() {
         lit.dispose(); litInst.dispose()
-        for (p in arrayOf(sky, star, planet, ring, dust, glow)) p.dispose()
+        for (p in arrayOf(sky, star, dust, glow)) p.dispose()
+        stationLit.dispose()
+        for (m in stationMeshes) m.dispose()
+        bodies.dispose()
         fullscreen.dispose(); shipMesh.dispose(); starMesh.dispose(); dustMesh.dispose()
-        sphereMesh.dispose(); ringMesh.dispose(); glowStream.dispose()
+        glowStream.dispose()
         for (m in rockMeshes) m.dispose()
         gl.deleteTexture(envTex)
-        gl.deleteTexture(planetTex)
     }
 
     companion object {
         /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
         private const val GLOW_PERIOD = TAU_F / 61f
+        private const val STATION_NEAR = 20_000f
+        private const val STATION_DRAW_RANGE = 3.0e6f
 
         /** Cube face basis (faceZ, faceX, faceY) matching GL's cube map face orientation. */
         private val FACE_BASIS = arrayOf(
@@ -569,6 +584,8 @@ private class LitProgram(private val gl: Gl, instanced: Boolean) {
         gl.bindTexture(GL.TEXTURE_CUBE_MAP, env)
         gl.uniform1i(uEnv, 0)
     }
+
+    fun setModel(model: Mat4) = gl.uniformMatrix4fv(uModel, model.m, 0)
 
     fun dispose() = prog.dispose()
 }

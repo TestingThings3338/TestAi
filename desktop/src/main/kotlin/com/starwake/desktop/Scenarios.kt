@@ -41,6 +41,16 @@ object Scenarios {
             "Engine renderers without Game: every shader, scene (ship, sky, planet, stars, dust) + UI primitives/text",
         ) { Smoke.run(it) },
 
+        "bodies" to Scenario(
+            "bodies",
+            "Real-scale BodyRenderer without Game: gas giant from home, PLANET II from orbit and 20 km, the star, dots, all surface types",
+        ) { Bodies.run(it) },
+
+        "stations" to Scenario(
+            "stations",
+            "Every StationMesh model through the lit shader + light glows, from several angles (no Game)",
+        ) { StationsScenario.run(it) },
+
         "menu" to gameScenario("menu", "Main menu after 2 s") {
             frames(120)
             shot("menu")
@@ -80,6 +90,32 @@ object Scenarios {
             right.up()
             frames(60)
             shot("flight-5") // stick released, cruising
+        },
+
+        "system" to gameScenario("system", "Star system milestone: spawn, map, landing, docking") {
+            cmd("launch")
+            frames(90)
+            shot("sys-spawn")
+            cmd("map")
+            frames(20)
+            shot("sys-map")
+            cmd("resume")
+            cmd("teleport-low")
+            frames(40)
+            shot("sys-lowalt")
+            cmd("action") // LAND -> landing mode, gear sequence
+            frames(150)
+            shot("sys-landing")
+            cmd("menu")
+            frames(5)
+            cmd("launch")
+            frames(5)
+            cmd("dock")
+            frames(240)
+            shot("sys-docking")
+            cmd("docked")
+            frames(200)
+            shot("sys-docked")
         },
 
         "boost" to gameScenario("boost", "Flight with throttle up, then boost") {
