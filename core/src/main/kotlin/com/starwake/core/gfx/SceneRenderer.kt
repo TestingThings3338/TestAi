@@ -207,7 +207,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.uniform3f(sky.u("u_right"), c.right.x * c.tanHalfX, c.right.y * c.tanHalfX, c.right.z * c.tanHalfX)
         gl.uniform3f(sky.u("u_up"), c.up.x * c.tanHalfY, c.up.y * c.tanHalfY, c.up.z * c.tanHalfY)
         gl.uniform2f(sky.u("u_shift"), c.shiftX, c.shiftY)
-        gl.uniform1f(sky.u("u_exposure"), f.exposure)
+        // under a daylight sky the nebula fades out (skyFade is from the previous frame's bodies pass)
+        gl.uniform1f(sky.u("u_exposure"), f.exposure * (1f - bodies.skyFade()))
         gl.activeTexture(GL.TEXTURE0)
         gl.bindTexture(GL.TEXTURE_CUBE_MAP, envTex)
         gl.uniform1i(sky.u("u_env"), 0)
@@ -220,7 +221,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         star.use()
         gl.uniformMatrix4fv(star.u("u_viewProj"), f.camera.viewProj.m, 0)
         gl.uniform1f(star.u("u_pxScale"), f.pxScale)
-        gl.uniform1f(star.u("u_bright"), 1f)
+        gl.uniform1f(star.u("u_bright"), 1f - bodies.skyFade())
         starMesh.drawRange(GL.POINTS, starCount)
         gl.disable(GL.BLEND)
     }

@@ -117,6 +117,75 @@ class BodyRendererMathTest {
     }
 
     @Test
+    fun spinAngleIsWrappedInDouble() {
+        val tau = 2 * PI
+        // a long session: float spin * time would keep ~3 digits of the angle
+        val a = BodyMath.spinAngle(0.0025f, 3.0e6f)
+        assertTrue(a >= 0.0 && a < tau, "angle $a")
+        assertEquals((0.0025f.toDouble() * 3.0e6f.toDouble()).mod(tau), a, 1e-9)
+        val n = BodyMath.spinAngle(-0.01f, 1234.5f)
+        assertTrue(n >= 0.0 && n < tau, "negative spin $n")
+        assertEquals((-0.01f.toDouble() * 1234.5).mod(tau), n, 1e-9)
+        assertEquals(0.0, BodyMath.spinAngle(0f, Float.POSITIVE_INFINITY))
+        assertEquals(0.0, BodyMath.spinAngle(1e-4f, Float.NaN))
+        assertEquals(0.0, BodyMath.spinAngle(0f, 0f))
+    }
+
+    /** PLANET II-like atmosphere (thickness 0.025, tint (0.35, 0.55, 1)^2, ground depth 0.1). */
+    private fun zenith(altitude: Double, sunElevationDeg: Double): Double {
+        val r = 6.0e6
+        return BodyMath.zenithSkyAlpha(
+            1.0 + altitude / r, 0.025, 0.1225, 0.3025, 1.0, 0.1, sin(sunElevationDeg * PI / 180),
+            2.6, 2.45, 2.25, 1.0, 8,
+        )
+    }
+
+    @Test
+    fun zenithSkyFadesWithAltitudeAndNight() {
+        val ground = zenith(0.0, 60.0)
+        assertTrue(ground > 0.85, "daylight at the ground: $ground")
+        assertTrue(zenith(0.0, 90.0) > ground, "noon")
+        val high = zenith(60_000.0, 60.0)
+        assertTrue(high < ground && high > 0.0, "60 km: $high")
+        assertTrue(zenith(140_000.0, 60.0) < 0.1, "near the top of the shell")
+        assertEquals(0.0, zenith(160_000.0, 60.0), "above the shell (150 km)")
+        val night = zenith(0.0, -20.0)
+        assertTrue(night < 0.15, "night: $night")
+        // monotonic in sun height
+        var last = -1.0
+        for (e in -20..90 step 10) {
+            val v = zenith(10_000.0, e.toDouble())
+            assertTrue(v >= last - 1e-9, "sun $e deg: $v < $last")
+            last = v
+        }
+    }
+
+    @Test
+    fun anythingCompiledOrBakedChangesTheConfig() {
+        assertTrue(BodyRenderer.configKey(0) != BodyRenderer.configKey(1), "texture size / steps / octaves")
+        assertTrue(BodyRenderer.configKey(1) != BodyRenderer.configKey(2), "detail octaves 3 vs 4")
+        assertEquals(BodyRenderer.configKey(2), BodyRenderer.configKey(3))
+    }
+
+    @Test
+    fun shaderSourcesArePureAscii() {
+        val sources = mapOf(
+            "vs" to BodyShaders.vs,
+            "planet q0" to BodyShaders.planetFs(BodyRenderer.atmoSteps(0), BodyRenderer.detailOctaves(0)),
+            "planet q2" to BodyShaders.planetFs(BodyRenderer.atmoSteps(2), BodyRenderer.detailOctaves(2)),
+            "ring" to BodyShaders.ringFs,
+            "star" to BodyShaders.starFs,
+            "glow" to BodyShaders.glowFs,
+            "bakeVs" to BodyShaders.bakeVs,
+            "bakeFs" to BodyShaders.bakeFs,
+        )
+        for ((name, src) in sources) {
+            val bad = src.indexOfFirst { it.code > 0x7E || (it.code < 0x20 && it != '\n') }
+            assertEquals(-1, bad, "$name: non-ASCII character at $bad: '${if (bad >= 0) src[bad] else ' '}'")
+        }
+    }
+
+    @Test
     fun sortsFarToNear() {
         val rng = Rng(7L)
         for (n in intArrayOf(0, 1, 2, 6, 17)) {

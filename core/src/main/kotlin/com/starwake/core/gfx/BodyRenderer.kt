@@ -6,9 +6,11 @@ import com.starwake.core.math.Quat
 import com.starwake.core.math.Rng
 import com.starwake.core.math.Vec3
 import kotlin.math.PI
+import kotlin.math.acos
 import kotlin.math.asin
 import kotlin.math.atan
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -23,8 +25,12 @@ import kotlin.math.tan
  * double and handed to the shader as a unit direction plus distance and |c|²/r² - 1 in units of
  * the body radius, so there is no depth buffer and no float precision problem at any distance or
  * altitude. Coverage geometry is a camera-facing quad in "scaled space" (1000 units from the
- * camera, only the direction matters) or, when the body fills a large part of the view or the
- * camera is inside its atmosphere, the fullscreen triangle.
+ * camera, only the direction matters) or, when the body covers the whole view or the camera is
+ * inside its atmosphere, the fullscreen triangle.
+ *
+ * A daylight sky is opaque (it hides the stars and the star disc drawn behind it); the planet
+ * shader puts the star back through the sky's transmittance, and [skyFade] tells the caller how
+ * much to dim its own star field / nebula.
  *
  * Surface textures are baked once per planet at construction (equirect RGBA8: sqrt-encoded albedo,
  * A = emission). They are mipmapped, but the shader picks the LOD from the pixel footprint
@@ -40,6 +46,9 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val type = IntArray(count) { typeCode(bodies[it].type) }
     private val star = type.indexOfFirst { it == T_STAR }
 
+    /** Everything [quality] decides at construction (bake size, compiled loop counts); see [needsRebake]. */
+    private val config = configKey(quality)
+    private val atmoSteps = atmoSteps(quality)
     private val texW = bakeWidth(quality)
     private val texH = texW / 2
     private val textures = IntArray(count)
@@ -49,7 +58,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val refDistance: Double
     private val refStarAngle: Double
 
-    private val planetProg = BodyProgram(gl, "bodyPlanet", BodyShaders.planetFs(if (quality == 0) 5 else 8, detailOctaves(quality)))
+    private val planetProg = BodyProgram(gl, "bodyPlanet", BodyShaders.planetFs(atmoSteps, detailOctaves(quality)))
     private val ringProg = BodyProgram(gl, "bodyRing", BodyShaders.ringFs)
     private val starProg = BodyProgram(gl, "bodyStar", BodyShaders.starFs)
     private val glowProg = BodyProgram(gl, "bodyGlow", BodyShaders.glowFs)
@@ -67,6 +76,11 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val pType = planetProg.p.u("u_type")
     private val pTex = planetProg.p.u("u_tex")
     private val pTexScale = planetProg.p.u("u_texScale")
+    private val pSunCam = planetProg.p.u("u_sunCam")
+    private val pSunGlare = planetProg.p.u("u_sunGlare")
+    private val pGlareColor = planetProg.p.u("u_glareColor")
+    private val pCoronaColor = planetProg.p.u("u_coronaColor")
+    private val pStarBehind = planetProg.p.u("u_starBehind")
 
     private val rToBody = ringProg.p.u("u_toBody")
     private val rSunBody = ringProg.p.u("u_sunBody")
@@ -100,6 +114,24 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private var sunAng = 0f
     private var sunScale = 1f
 
+    // atmosphere of the current planet (atmoParams)
+    private var atmoThick = 0f
+    private var betaR = 1f
+    private var betaG = 1f
+    private var betaB = 1f
+    private var atmoK = 0.02f
+
+    // the star as seen from the camera this frame (starView); starDisc = 0 when inside it
+    private var starX = 0f
+    private var starY = 0f
+    private var starZ = -1f
+    private var starDisc = 0.0
+    private var starGlare = 0.0
+    private var starFade = 0.0
+    private var starIntensity = 1f
+    private var fade = 0f
+    private var starDrawn = true
+
     init {
         val home = system.home
         if (star >= 0) {
@@ -123,8 +155,18 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         bake()
     }
 
-    /** True if [quality] needs differently sized baked textures (then rebuild the renderer). */
-    fun needsRebake(quality: Int): Boolean = bakeWidth(quality) != texW
+    /**
+     * True if this renderer was built for something [quality] changes: baked texture size or the
+     * compiled atmosphere steps / detail octaves (then rebuild the renderer).
+     */
+    fun needsRebake(quality: Int): Boolean = configKey(quality) != config
+
+    /**
+     * How much daylight sky surrounds the camera, from the last [render]: 0 in space or at night,
+     * 1 under a full daylight sky (the sky's opacity straight up). Dim background stars / nebula
+     * by it; the bodies themselves are already handled.
+     */
+    fun skyFade(): Float = fade
 
     /**
      * Draws star glow, star and all planets (+rings) back-to-front with premultiplied alpha
@@ -154,6 +196,10 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
             order[i] = i
         }
         BodyMath.sortFarToNear(order, dist, count)
+        starView()
+        fade = skyAlphaAtCamera(exposure)
+        // under an opaque sky the planet shader draws the star (and its glare) on its own
+        starDrawn = fade < STAR_HIDDEN_FADE
 
         gl.disable(GL.DEPTH_TEST)
         gl.depthMask(false)
@@ -162,7 +208,8 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         gl.blendFunc(GL.ONE, GL.ONE_MINUS_SRC_ALPHA)
         for (k in 0 until count) {
             val i = order[k]
-            if (type[i] == T_STAR) drawStar(i, c, exposure) else drawPlanet(i, c, time, exposure)
+            if (type[i] != T_STAR) drawPlanet(i, c, time, exposure)
+            else if (starDrawn) drawStar(i, c, exposure)
         }
         gl.disable(GL.BLEND)
         gl.depthMask(true)
@@ -174,8 +221,9 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         val b = bodies[i]
         BodyMath.impostor(relX[i], relY[i], relZ[i], dist[i], b.radius, MIN_PLANET_PX * pxAngle, imp)
         sunFor(i)
+        atmoParams(i)
         bodyMatrix(b.rot)
-        val thick = if (b.atmoThickness > 1e-4f) b.atmoThickness else 0f
+        val thick = atmoThick
         val shell = 1.0 + thick
         val inside = imp.d <= shell
         val angle = if (inside) PI else asin(shell / imp.d) + MARGIN_PX * pxAngle
@@ -188,28 +236,32 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
 
         if (coverage(planetProg, c, angle, inside, exposure)) {
             gl.uniformMatrix4fv(pToBody, toBody, 0)
-            val spin = (b.spin.toDouble() * time) % TAU
+            // angle wrapped in double; the shader gets its cos/sin
+            val spin = BodyMath.spinAngle(b.spin, time)
             gl.uniform2f(pSpin, cos(spin).toFloat(), sin(spin).toFloat())
             gl.uniform3f(pSunDir, sunX, sunY, sunZ)
             gl.uniform3f(pSunBody, sunBody.x, sunBody.y, sunBody.z)
             gl.uniform3f(pSunColor, scR, scG, scB)
-            val a = b.atmo
-            // scattering colour: the tint squared (normalised) is closer to a λ⁻⁴ law than the tint itself
-            val am = max(a[0], max(a[1], max(a[2], 1e-3f)))
-            val br = a[0] / am
-            val bg = a[1] / am
-            val bb = a[2] / am
-            gl.uniform4f(pAtmo, br * br, bg * bg, bb * bb, thick)
-            // lava worlds: keep the haze thin so the dark crust and the glow read
-            val haze = if (type[i] == BodyShaders.T_LAVA) 0.4f else 1f
-            gl.uniform2f(pAtmoK, (thick * 4f).coerceIn(0.02f, 0.15f) * haze, 1f)
-            gl.uniform4f(pRing, ringIn, ringOut, if (ringed) 1f else 0f, 0f)
+            gl.uniform4f(pAtmo, betaR, betaG, betaB, thick)
+            gl.uniform2f(pAtmoK, atmoK, 1f)
+            gl.uniform4f(pRing, ringIn, ringOut, if (ringed) 1f else 0f, sunAng)
             gl.uniform4f(pSeed, seeds[i * 4], seeds[i * 4 + 1], seeds[i * 4 + 2], seeds[i * 4 + 3])
             gl.uniform1i(pType, type[i])
             gl.activeTexture(GL.TEXTURE0)
             gl.bindTexture(GL.TEXTURE_2D, textures[i])
             gl.uniform1i(pTex, 0)
             gl.uniform1f(pTexScale, (texH / PI).toFloat())
+            // the star, for the part of it this planet's sky hides
+            gl.uniform4f(pSunCam, starX, starY, starZ, starDisc.toFloat())
+            gl.uniform4f(pSunGlare, starGlare.toFloat(), starFade.toFloat(), cos(starFade).toFloat(), STAR_INTENSITY)
+            gl.uniform3f(pGlareColor, GLOW_R * starIntensity, GLOW_G * starIntensity, GLOW_B * starIntensity)
+            gl.uniform1f(pStarBehind, if (inside && !starDrawn) 0f else 1f)
+            if (star >= 0) {
+                val ca = bodies[star].atmo
+                gl.uniform3f(pCoronaColor, ca[0] * starIntensity, ca[1] * starIntensity, ca[2] * starIntensity)
+            } else {
+                gl.uniform3f(pCoronaColor, 0f, 0f, 0f)
+            }
             drawCoverage()
         }
 
@@ -248,6 +300,65 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         sunScale = (refDistance / d).pow(0.35).toFloat().coerceIn(0.7f, 1.45f)
     }
 
+    /** Scattering colour, shell thickness and ground optical depth of planet [i]. */
+    private fun atmoParams(i: Int) {
+        val b = bodies[i]
+        atmoThick = if (b.atmoThickness > 1e-4f) b.atmoThickness else 0f
+        val a = b.atmo
+        // scattering colour: the tint squared (normalised) is closer to a λ⁻⁴ law than the tint itself
+        val am = max(a[0], max(a[1], max(a[2], 1e-3f)))
+        val br = a[0] / am
+        val bg = a[1] / am
+        val bb = a[2] / am
+        betaR = br * br
+        betaG = bg * bg
+        betaB = bb * bb
+        // lava worlds: keep the haze thin so the dark crust and the glow read
+        val haze = if (type[i] == BodyShaders.T_LAVA) 0.4f else 1f
+        atmoK = (atmoThick * 4f).coerceIn(0.02f, 0.15f) * haze
+    }
+
+    /**
+     * Opacity of the sky straight above the camera (the planet shader's formula, see
+     * [BodyMath.zenithSkyAlpha]) when it is inside a planet's atmosphere, else 0.
+     */
+    private fun skyAlphaAtCamera(exposure: Float): Float {
+        for (i in 0 until count) {
+            if (type[i] == T_STAR) continue
+            val b = bodies[i]
+            atmoParams(i)
+            if (atmoThick <= 0f) continue
+            val d = dist[i] / b.radius
+            if (d >= 1.0 + atmoThick) continue
+            sunFor(i)
+            // straight up = away from the centre (relX.. point from the camera to the centre)
+            val mu = if (dist[i] > 1e-6) -(relX[i] * sunX + relY[i] * sunY + relZ[i] * sunZ) / dist[i] else 1.0
+            return BodyMath.zenithSkyAlpha(
+                max(d, 1.0), atmoThick.toDouble(), betaR.toDouble(), betaG.toDouble(), betaB.toDouble(), atmoK.toDouble(), mu,
+                (SUN_COLOR_R * sunScale).toDouble(), (SUN_COLOR_G * sunScale).toDouble(), (SUN_COLOR_B * sunScale).toDouble(),
+                exposure.toDouble(), atmoSteps,
+            ).toFloat()
+        }
+        return 0f
+    }
+
+    /** Direction, drawn size, glare width, fade-out angle and intensity of the star seen from the camera. */
+    private fun starView() {
+        starDisc = 0.0
+        if (star < 0) return
+        val r = bodies[star].radius
+        val d = dist[star]
+        if (d <= r * (1.0 + 1e-6)) return
+        starX = (relX[star] / d).toFloat()
+        starY = (relY[star] / d).toFloat()
+        starZ = (relZ[star] / d).toFloat()
+        val trueAngle = asin(r / d)
+        starDisc = max(trueAngle, MIN_STAR_PX * pxAngle)
+        starGlare = max(trueAngle, GLARE_MIN_PX * pxAngle)
+        starFade = glowFadeOut(starDisc, starGlare)
+        starIntensity = sqrt(trueAngle / refStarAngle).toFloat().coerceIn(0.6f, 1.4f)
+    }
+
     /** World -> body rotation (inverse of [rot]) as a column-major mat4, plus the body-space sun. */
     private fun bodyMatrix(rot: Quat) {
         val m = toBody
@@ -268,12 +379,12 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         val inside = imp.d <= 1.0 + 1e-6
         val disc = if (inside) PI / 2 else asin(1.0 / imp.d)
         val glare = max(imp.trueAngle, GLARE_MIN_PX * pxAngle)
-        val fadeOut = min(disc * 2.0 + glare * 10.0, 1.45)
+        val fadeOut = glowFadeOut(disc, glare)
         val intensity = sqrt(imp.trueAngle / refStarAngle).toFloat().coerceIn(0.6f, 1.4f)
         val a = b.atmo
         if (coverage(glowProg, c, fadeOut, inside, exposure)) {
             gl.uniform4f(gGlow, disc.toFloat(), glare.toFloat(), intensity, fadeOut.toFloat())
-            gl.uniform3f(gColor, 1.0f, 0.92f, 0.78f)
+            gl.uniform3f(gColor, GLOW_R, GLOW_G, GLOW_B)
             gl.uniform3f(gCorona, a[0], a[1], a[2])
             drawCoverage()
         }
@@ -288,16 +399,19 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
 
     /**
      * Binds [p] and its shared uniforms for the current body ([imp]) seen under [angle] radians
-     * (silhouette + margins). Picks the fullscreen triangle when [inside] or the angle is large,
-     * otherwise a quad around the body's direction. Returns false when it is off-screen.
+     * (silhouette + margins). Picks the fullscreen triangle when [inside], when the angle is too
+     * large for a quad or when the body's cone contains the whole view anyway; otherwise a quad
+     * around the body's direction, which never shades more pixels than the fullscreen triangle
+     * (fill rate: the star glow is wide, but rarely covers the screen). Returns false when it is
+     * off-screen.
      */
     private fun coverage(p: BodyProgram, c: Camera, angle: Double, inside: Boolean, exposure: Float): Boolean {
         val dx = imp.dirX
         val dy = imp.dirY
         val dz = imp.dirZ
-        val full = inside || angle > FULLSCREEN_ANGLE
+        val cosFwd = (dx * c.forward.x + dy * c.forward.y + dz * c.forward.z).toDouble()
+        val full = inside || angle > MAX_QUAD_ANGLE || acos(cosFwd.coerceIn(-1.0, 1.0)) + halfDiag <= angle
         if (!full) {
-            val cosFwd = dx * c.forward.x + dy * c.forward.y + dz * c.forward.z
             val lim = angle + halfDiag
             if (lim < PI && cosFwd < cos(lim)) return false
         }
@@ -410,20 +524,37 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         private const val GLARE_MIN_PX = 7.0
         private const val MARGIN_PX = 3.0
         private const val SCALED_DISTANCE = 1000.0
-        private val FULLSCREEN_ANGLE = 35.0 * PI / 180.0
-        private const val TAU = 2.0 * PI
+
+        /** Largest cone (half angle, rad) drawn with a quad; tan() makes wider quads impractical. */
+        private const val MAX_QUAD_ANGLE = 1.3
         private const val BAKE_STRIPS = 8
         private const val SUN_COLOR_R = 2.6f
         private const val SUN_COLOR_G = 2.45f
         private const val SUN_COLOR_B = 2.25f
         private const val STAR_INTENSITY = 4f
+        private const val GLOW_R = 1.0f
+        private const val GLOW_G = 0.92f
+        private const val GLOW_B = 0.78f
+
+        /**
+         * From this [skyFade] on the star (glow: often most of the screen) is not drawn behind the
+         * sky: the sky around it is nearly opaque, and the planet shader draws it in full instead.
+         */
+        private const val STAR_HIDDEN_FADE = 0.9f
 
         fun bakeWidth(quality: Int) = if (quality == 0) 512 else 1024
+        fun atmoSteps(quality: Int) = if (quality == 0) 5 else 8
         fun detailOctaves(quality: Int) = when (quality) {
             0 -> 0
             1 -> 3
             else -> 4
         }
+
+        /** Packs everything [quality] decides at construction; equal keys share programs and bakes. */
+        internal fun configKey(quality: Int): Int = (bakeWidth(quality) * 100 + atmoSteps(quality)) * 100 + detailOctaves(quality)
+
+        /** Angle from the star's centre where its glow has faded out (rad). */
+        private fun glowFadeOut(disc: Double, glare: Double) = min(disc * 2.0 + glare * 10.0, 1.45)
 
         fun typeCode(t: StarSystem.BodyType): Int = when (t) {
             StarSystem.BodyType.STAR -> T_STAR
@@ -498,6 +629,76 @@ internal object BodyMath {
         out.rEff = r
         out.d = d / r
         out.cc = (d - r) * (d + r) / (r * r)
+    }
+
+    private const val TAU = 2.0 * PI
+
+    /**
+     * Spin angle [spin] (rad/s) * [time] (s) wrapped to [0, 2π) in double; 0 when the product is
+     * not finite (e.g. a zero spin at an infinite time).
+     */
+    fun spinAngle(spin: Float, time: Float): Double {
+        val a = spin.toDouble() * time.toDouble()
+        if (!a.isFinite()) return 0.0
+        val w = a % TAU
+        val p = if (w < 0.0) w + TAU else w
+        return if (p >= TAU) 0.0 else p
+    }
+
+    /**
+     * Opacity of the sky straight up from [d] planet radii (CPU copy of the planet shader:
+     * atmosphere() along the zenith ray with [steps] samples, without the sun's halo, then
+     * 1 - T + 2.5 * luminance after the tonemap): shell [thick] radii, scattering colour [br],
+     * [bg], [bb], ground optical depth [k0], sun elevation sine [mu], sun colour [sr], [sg], [sb].
+     * 0 above the shell.
+     */
+    fun zenithSkyAlpha(
+        d: Double, thick: Double, br: Double, bg: Double, bb: Double, k0: Double, mu: Double,
+        sr: Double, sg: Double, sb: Double, exposure: Double, steps: Int,
+    ): Double {
+        val top = 1.0 + thick
+        if (thick <= 0.0 || d >= top) return 0.0
+        val h = thick * 0.18
+        val k = k0 / h
+        val dx = (top - d) / steps
+        var sumR = 0.0
+        var sumG = 0.0
+        var sumB = 0.0
+        var tau = 0.0
+        for (i in 0 until steps) {
+            // along the zenith ray the closest-approach point is the centre: r = x, mu constant
+            val r = d + (i + 0.5) * dx
+            val rho = exp(min((1.0 - r) / h, 0.0))
+            val dt = rho * dx * k
+            val muH = -sqrt(max(1.0 - 1.0 / (r * r), 0.0))
+            val vis = smoothstep(muH - 0.02, muH + 0.05, mu)
+            val am = min(1.0 / (max(mu - muH, 0.0) + 0.035), 40.0)
+            val o = k0 * rho * am + tau + 0.5 * dt
+            val w = vis * dt
+            sumR += exp(-br * o) * w
+            sumG += exp(-bg * o) * w
+            sumB += exp(-bb * o) * w
+            tau += dt
+        }
+        // Rayleigh part only: the forward-scattering halo is the sun's, not the sky's
+        val phase = 0.75 * (1.0 + mu * mu)
+        val lum = 0.3 * tonemap(sumR * br * phase * sr, exposure) +
+            0.59 * tonemap(sumG * bg * phase * sg, exposure) +
+            0.11 * tonemap(sumB * bb * phase * sb, exposure)
+        val t = (exp(-br * tau) + exp(-bg * tau) + exp(-bb * tau)) * 0.3333
+        return (1.0 - t + 2.5 * lum).coerceIn(0.0, 1.0)
+    }
+
+    /** One channel of the shaders' tonemap (ACES fit + gamma). */
+    fun tonemap(c: Double, exposure: Double): Double {
+        val x = c * exposure
+        val t = ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).coerceIn(0.0, 1.0)
+        return t.pow(0.4545)
+    }
+
+    private fun smoothstep(e0: Double, e1: Double, x: Double): Double {
+        val t = ((x - e0) / (e1 - e0)).coerceIn(0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
     }
 
     /** Sorts [order] (first [n] entries) by descending [dist] of the body indices; insertion sort, no allocation. */

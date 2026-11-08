@@ -6,7 +6,7 @@ package com.starwake.core.gfx
  *
  * Every body is described relative to the camera in units of its own radius: the uniform
  * `u_center` holds the unit direction to the centre (xyz) and the distance in radii (w), `u_cc` the
- * value |c|²/r² - 1 computed in double on the CPU. The fragment shaders then work relative to the
+ * value |c|^2/r^2 - 1 computed in double on the CPU. The fragment shaders then work relative to the
  * ray's closest-approach point, so nothing cancels catastrophically, whether the camera hangs a few
  * kilometres above a 6000 km planet or the planet is a dot a billion kilometres away.
  *
@@ -74,8 +74,37 @@ float fbm(vec3 p) {
 """
 
     /**
+     * Value noise with one PCG hash per lattice corner (8 per call; [NOISE]'s vnoise needs 24): the
+     * corner keys are a linear combination of the cell coordinates. Runtime surface detail only;
+     * the bakes keep the noise shared with [Shaders].
+     */
+    private const val NOISE_FAST = """
+float vnoiseFast(vec3 p) {
+    vec3 fl = floor(p);
+    ivec3 i = ivec3(fl);
+    vec3 f = p - fl;
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    const uint KX = 0x8DA6B343u;
+    const uint KY = 0xD8163841u;
+    const uint KZ = 0xCB1AB31Fu;
+    uint h = uint(i.x) * KX + uint(i.y) * KY + uint(i.z) * KZ;
+    float a = float(pcg(h));
+    float b = float(pcg(h + KX));
+    float c = float(pcg(h + KY));
+    float d = float(pcg(h + KX + KY));
+    float e = float(pcg(h + KZ));
+    float g = float(pcg(h + KX + KZ));
+    float k = float(pcg(h + KY + KZ));
+    float l = float(pcg(h + KX + KY + KZ));
+    float v = mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, g, u.x), mix(k, l, u.x), u.y), u.z);
+    return v * (1.0 / 4294967295.0);
+}
+"""
+
+    /**
      * Ring density profile of the menu ring (Shaders.ringDensity), re-parametrised so that
-     * x = 0 at u_ring.x (inner radius, in planet radii) and 1 at u_ring.y (outer radius).
+     * x = 0 at u_ring.x (inner radius, in planet radii) and 1 at u_ring.y (outer radius), and
+     * filtered by the footprint of a pixel (or of the star's penumbra, for shadows).
      */
     private const val RING_DENSITY = """
 float hash1(float x) {
@@ -88,18 +117,28 @@ float noise1(float x) {
     float u = f * f * (3.0 - 2.0 * f);
     return mix(hash1(i), hash1(i + 1.0), u);
 }
-/** [fine] = 0 drops the narrowest ringlets (shadows are blurred by the star's size anyway). */
-float ringProfile(float x, float fine) {
-    if (x < 0.0 || x > 1.0) return 0.0;
-    float d = 0.55 + 0.45 * noise1(x * 34.2);
-    d *= mix(0.8, 0.6 + 0.4 * noise1(x * 126.0), fine);
-    d *= smoothstep(0.0, 0.05, x) * (1.0 - smoothstep(0.92, 1.0, x));
-    d *= 1.0 - 0.9 * (smoothstep(0.56, 0.58, x) - smoothstep(0.63, 0.65, x));
+/**
+ * Weight of a feature with [freq] cycles per unit of x under a footprint [fp] (x units): 1 while
+ * a cycle spans 4 or more footprints, 0 at 2 or fewer (then the feature shows its mean instead).
+ */
+float aaFade(float freq, float fp) {
+    return clamp(0.5 / (freq * max(fp, 1e-6)) - 1.0, 0.0, 1.0);
+}
+/**
+ * Every noise band fades to its mean once its period drops below ~2 footprints [fp], and the
+ * gap's edges widen by [fp] around their midpoints, which keeps its mean (area). The ramps at the
+ * inner and outer edge widen by [fpEdge] (0 when the caller anti-aliases the annulus itself).
+ */
+float ringProfile(float x, float fp, float fpEdge) {
+    if (x < -fpEdge || x > 1.0 + fpEdge) return 0.0;
+    float d = 0.55 + 0.45 * mix(0.5, noise1(x * 34.2), aaFade(34.2, fp));
+    d *= 0.8 + 0.4 * (noise1(x * 126.0) - 0.5) * aaFade(126.0, fp);
+    // the finest ringlets
+    d *= 1.0 + 0.3 * (0.5 - noise1(x * 520.0)) * aaFade(520.0, fp);
+    d *= smoothstep(-fpEdge, 0.05 + fpEdge, x) * (1.0 - smoothstep(0.92 - fpEdge, 1.0 + fpEdge, x));
+    d *= 1.0 - 0.9 * (smoothstep(0.56 - fp, 0.58 + fp, x) - smoothstep(0.63 - fp, 0.65 + fp, x));
     d *= mix(0.35, 1.0, smoothstep(0.0, 0.45, x));
     return d;
-}
-float ringDensityX(float x) {
-    return ringProfile(x, 1.0);
 }
 float ringX(float r) {
     return (r - u_ring.x) / (u_ring.y - u_ring.x);
@@ -111,7 +150,7 @@ float ringX(float r) {
      * b = distance along the ray to the closest-approach point, h2 = squared closest-approach
      * distance, disc = 1 - h2 (passed separately: it is tiny near the horizon), pca =
      * closest-approach point relative to the sphere centre. Far away disc comes from cross(d, cd),
-     * which stays accurate for nearly parallel vectors; close by from b² - cc, where both terms
+     * which stays accurate for nearly parallel vectors; close by from b^2 - cc, where both terms
      * are small near the horizon (D itself only resolves ~1 m of altitude as a float).
      */
     private const val RAY = """
@@ -193,11 +232,16 @@ uniform vec3 u_sunBody;   // the same in body space
 uniform vec3 u_sunColor;
 uniform vec4 u_atmo;      // rgb scattering colour (max component 1), a = shell thickness in radii
 uniform vec2 u_atmoK;     // x = vertical optical depth at the ground, y = brightness
-uniform vec4 u_ring;      // inner, outer radius (planet radii), z = 1 when ringed
+uniform vec4 u_ring;      // inner, outer radius (planet radii), z = 1 when ringed, w = star radius seen from the planet (rad)
 uniform vec4 u_seed;
 uniform int u_type;
 uniform sampler2D u_tex;
 uniform float u_texScale;  // texels per radian (texture height / pi)
+uniform vec4 u_sunCam;     // camera -> star unit direction, w = drawn angular radius (0 = no star)
+uniform vec4 u_sunGlare;   // x = glare width, y = fade-out angle, z = cos(fade-out), w = disc radiance
+uniform vec3 u_glareColor;
+uniform vec3 u_coronaColor;
+uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -228,22 +272,47 @@ vec3 atmosphere(vec3 d, vec3 pca, float h2, float x0, float x1, out vec3 trans) 
         float mu = (sunPca + x * sunD) / r;
         float muH = -sqrt(max(1.0 - 1.0 / (r * r), 0.0));
         float vis = smoothstep(muH - 0.02, muH + 0.05, mu);
-        vec3 sunT = exp(-beta * (u_atmoK.x * rho * airmass(mu, muH)));
-        vec3 camT = exp(-beta * (tau + 0.5 * dt));
-        sum += sunT * camT * (vis * dt);
+        // sun -> sample and sample -> camera transmittance in one exp
+        sum += exp(-beta * (u_atmoK.x * rho * airmass(mu, muH) + tau + 0.5 * dt)) * (vis * dt);
         tau += dt;
     }
     trans = exp(-beta * tau);
     float phase = 0.75 * (1.0 + sunD * sunD) + 0.5 * pow(max(sunD, 0.0), 24.0);
     return sum * beta * phase * u_atmoK.y * u_sunColor;
 }
+/**
+ * The star as the star and glow shaders draw it (limb-darkened disc, corona, glare), for a sky
+ * that hides the real one. Zero beyond the glow's fade-out angle.
+ */
+vec3 starLight(vec3 d) {
+    float c = dot(d, u_sunCam.xyz);
+    if (u_sunCam.w <= 0.0 || c < u_sunGlare.z) return vec3(0.0);
+    float th = atan(length(cross(d, u_sunCam.xyz)), c);
+    float R = u_sunCam.w;
+    float w = u_sunGlare.x;
+    float x = max(th / R - 1.0, 0.0);
+    float e = max(th - R, 0.0);
+    float corona = 0.30 * exp(-x * 7.0) + 0.08 * exp(-x * 1.8);
+    float glare = 0.35 * exp(-e / (w * 0.22)) + 0.09 * exp(-e / (w * 1.1)) + 0.012 * exp(-e / (w * 4.0));
+    float fade = 1.0 - smoothstep(u_sunGlare.y * 0.45, u_sunGlare.y, th);
+    vec3 col = (u_coronaColor * corona + u_glareColor * glare) * fade;
+    float cov = clamp(0.5 + (R - th) / u_pxAngle, 0.0, 1.0);
+    if (cov > 0.0) {
+        float s = min(sin(th) / sin(R), 1.0);
+        float mu = sqrt(1.0 - s * s);
+        float m = 1.0 - mu;
+        float limb = 1.0 - 0.40 * m - 0.15 * m * m;
+        col = mix(col, u_sunGlare.w * limb * mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.88), sqrt(mu)), cov);
+    }
+    return col;
+}
 """
 
     private const val DETAIL = """
 /**
  * Fractal albedo detail for close range. Octave j has features of 2^-j radii; only the octaves
- * whose features cover ~4..4*2^N pixels are evaluated, with the finest faded in and the coarsest
- * faded out, so detail grows smoothly while descending instead of popping.
+ * whose features cover ~4..4*2^N footprints [fp] (radii) are evaluated, with the finest faded in
+ * and the coarsest faded out, so detail grows smoothly while descending instead of popping.
  */
 float detail(vec3 ns, float fp) {
 #if DETAIL_OCTAVES > 0
@@ -257,7 +326,7 @@ float detail(vec3 ns, float fp) {
         float j = fl - float(k);
         float w = k == 0 ? fr : (k == DETAIL_OCTAVES ? 1.0 - fr : 1.0);
         w *= step(7.0, j);
-        s += (vnoise(q * exp2(j) + u_seed.xyz) - 0.5) * w;
+        s += (vnoiseFast(q * exp2(j) + u_seed.xyz) - 0.5) * w;
     }
     return s * (1.3 / sqrt(float(DETAIL_OCTAVES)));
 #else
@@ -270,17 +339,23 @@ float detail(vec3 ns, float fp) {
 vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
     vec3 nb = mat3(u_toBody) * N;
     vec3 ns = vec3(nb.x * u_spin.x - nb.z * u_spin.y, nb.y, nb.x * u_spin.y + nb.z * u_spin.x);
-    vec2 uv = vec2(atan(ns.z, ns.x) * 0.15915494 + 0.5, asin(clamp(ns.y, -1.0, 1.0)) * 0.31830989 + 0.5);
-    // explicit LOD from the pixel footprint (radii -> texels): screen-space derivatives of atan()
-    // jump at the seam and would pick the smallest mip there; this never does, and small/far
-    // planets get a properly filtered texture instead of shimmering
+    // atan(0, 0) is undefined: the exact poles get longitude 0
+    float lon = abs(ns.x) + abs(ns.z) < 1e-7 ? 0.0 : atan(ns.z, ns.x);
+    vec2 uv = vec2(lon * 0.15915494 + 0.5, asin(clamp(ns.y, -1.0, 1.0)) * 0.31830989 + 0.5);
+    // pixel footprint on the ground (radii), stretched by 1 / cos(incidence) at grazing angles.
+    // Explicit LOD from it (radii -> texels): screen-space derivatives of atan() jump at the seam
+    // and would pick the smallest mip there; this never does, and small/far planets get a properly
+    // filtered texture instead of shimmering
     float fp = max(tHit * u_pxAngle, 1e-12);
-    float lod = log2(max(fp * u_texScale / max(dot(N, -d), 0.25), 1.0));
+    float fpS = fp / max(dot(N, -d), 0.05);
+    float lod = log2(max(fpS * u_texScale, 1.0));
     vec4 tx = textureLod(u_tex, uv, lod);
     vec3 alb = tx.rgb * tx.rgb;
-    // open water (blue-dominant, dark) gets no ground detail
-    float water = u_type == T_TERRAN ? clamp((tx.b - tx.r) * 4.0 - 0.3, 0.0, 1.0) : 0.0;
-    float det = detail(ns, fp) * (1.0 - water);
+    // open water (blue-dominant, dark: b - r is 0.19..0.25 in the sqrt-encoded bake, land, ice
+    // and clouds stay below 0.06) gets no ground detail, and skips evaluating it
+    float water = u_type == T_TERRAN ? clamp((tx.b - tx.r) * 8.0 - 0.45, 0.0, 1.0) : 0.0;
+    // gas bands are noise stretched 5x in y: 5x smaller footprint-relative features
+    float det = water < 1.0 ? detail(ns, u_type == T_GAS ? fpS * 5.0 : fpS) * (1.0 - water) : 0.0;
     alb *= clamp(1.0 + det * vec3(1.0, 0.92, 0.8), 0.25, 2.0);
 
     float ndl = dot(N, u_sunDir);
@@ -291,17 +366,21 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
         float t = -nb.y / u_sunBody.y;
         if (t > 0.0) {
             vec3 q = nb + u_sunBody * t;
-            shadow = 1.0 - 0.8 * ringProfile(ringX(length(q.xz)), 0.0);
+            // blurred by the star's disc (penumbra) and by the pixel
+            float blur = max(2.0 * u_ring.w * t, fpS) / (u_ring.y - u_ring.x);
+            shadow = 1.0 - 0.8 * ringProfile(ringX(length(q.xz)), blur, blur);
         }
     }
     vec3 sun = u_sunColor * (diff * shadow);
     if (u_atmo.a > 0.0) sun *= exp(-u_atmo.rgb * (u_atmoK.x * airmass(ndl, 0.0)));
     vec3 col = alb * (sun + vec3(0.004));
     float night = 1.0 - smoothstep(-0.06, 0.14, ndl);
-    vec3 H = normalize(u_sunDir - d);
+    // half vector; u_sunDir - d vanishes when looking straight away from the star
+    vec3 H = u_sunDir - d;
+    H *= inversesqrt(max(dot(H, H), 1e-12));
     float ndh = max(dot(N, H), 0.0);
     if (u_type == T_LAVA) {
-        float e = tx.a * tx.a * (1.0 + 2.0 * det);
+        float e = tx.a * tx.a * max(1.0 + 2.0 * det, 0.0);
         col += vec3(3.0, 0.85, 0.20) * e * (0.3 + 0.7 * night);
     } else if (u_type == T_TERRAN) {
         col += sun * (pow(ndh, 80.0) * 2.5 + pow(ndh, 12.0) * 0.06) * water;
@@ -321,37 +400,43 @@ void main() {
     rayInfo(d, b, h2, disc, pca);
     float cov = coverage(b, h2, disc);
     bool atmo = u_atmo.a > 0.0;
-    float discA = u_atmo.a * (2.0 + u_atmo.a) + disc;   // A² - h2 without rounding A² - 1
+    float discA = u_atmo.a * (2.0 + u_atmo.a) + disc;   // A^2 - h2 without rounding A^2 - 1
     if (cov <= 0.0 && (!atmo || discA <= 0.0)) discard;
     float xa = sqrt(max(discA, 0.0));
     float x0 = max(-xa, -b);
-    vec3 surf = vec3(0.0);
-    vec3 sky = vec3(0.0);
-    vec3 skyT = vec3(1.0);
+    vec3 ts = vec3(0.0);
+    vec3 tk = vec3(0.0);
+    float skyA = 0.0;
     if (cov > 0.0) {
         float sq = sqrt(max(disc, 0.0));
         vec3 N = normalize(pca - d * sq);
         float tHit = u_cc / (b + sq);
-        surf = shadeSurface(N, d, tHit);
+        vec3 surf = shadeSurface(N, d, tHit);
         if (atmo && -sq > x0) {
             vec3 T;
             vec3 ins = atmosphere(d, pca, h2, x0, -sq, T);
             surf = surf * T + ins;
         }
+        ts = tonemap(surf);
     }
-    if (cov < 1.0 && atmo && xa > x0) sky = atmosphere(d, pca, h2, x0, xa, skyT);
-    vec3 ts = tonemap(surf);
-    vec3 tk = tonemap(sky);
-    // a bright sky hides what is behind it (stars in daylight), a thin one barely does
-    // (capped, so the star still shines through: it was drawn before this, being farther away)
-    float skyA = clamp(1.0 - dot(skyT, vec3(0.3333)) + min(dot(tk, vec3(0.3, 0.59, 0.11)) * 0.6, 0.4), 0.0, 1.0);
+    if (cov < 1.0 && atmo && xa > x0) {
+        vec3 skyT;
+        vec3 sky = atmosphere(d, pca, h2, x0, xa, skyT);
+        tk = tonemap(sky);
+        // a bright sky hides what is behind it (stars in daylight), a thin one barely does
+        skyA = clamp(1.0 - dot(skyT, vec3(0.3333)) + 2.5 * dot(tk, vec3(0.3, 0.59, 0.11)), 0.0, 1.0);
+        // that includes the star (drawn before, being farther away): put the hidden part back,
+        // dimmed and reddened by the sky
+        vec3 sl = starLight(d);
+        if (sl.r + sl.g + sl.b > 0.0) tk = tonemap(sky + sl * (skyT * mix(1.0, skyA, u_starBehind)));
+    }
     o_color = vec4(dither(ts * cov + tk * (1.0 - cov)), 1.0 - (1.0 - cov) * (1.0 - skyA));
 }
 """
 
     fun planetFs(atmoSteps: Int, detailOctaves: Int) = HEADER +
         "#define ATMO_STEPS $atmoSteps\n#define DETAIL_OCTAVES $detailOctaves\n" +
-        PRECISION + TYPES + PLANET_FS + TONEMAP + NOISE + RING_DENSITY + RAY + ATMOSPHERE + DETAIL + PLANET_MAIN
+        PRECISION + TYPES + PLANET_FS + TONEMAP + NOISE + NOISE_FAST + RING_DENSITY + RAY + ATMOSPHERE + DETAIL + PLANET_MAIN
 
     // ---------------------------------------------------------------- rings
 
@@ -369,23 +454,85 @@ uniform vec4 u_ring;
 uniform float u_exposure;
 out vec4 o_color;
 """ + TONEMAP + NOISE + RING_DENSITY + RAY + """
+/**
+ * One stretch [ts.x, ts.y] (distances along the ray's ground line) of the annulus, seen from
+ * height y0 above the ring plane by a pixel whose rays have db.y in [ey - k, ey + k]. The ray with
+ * db.y = s meets the plane at t = -y0 / s, so the stretch covers the db.y interval between
+ * -y0 / ts.x and -y0 / ts.y; it is widened to at least 2k (one pixel) around its middle. Returns
+ * the covered fraction of the pixel and the distance of the point under the pixel's centre.
+ */
+vec2 ringStretch(vec2 ts, float y0, float ey, float k) {
+    float t1 = max(ts.x, 1e-6);
+    float t2 = ts.y;
+    if (t2 <= t1) return vec2(0.0);
+    float s1 = -y0 / t1;
+    float s2 = -y0 / t2;
+    float lo = min(s1, s2);
+    float hi = max(s1, s2);
+    float mid = 0.5 * (lo + hi);
+    float hw = max(0.5 * (hi - lo), k);
+    float ov = min(mid + hw, ey + k) - max(mid - hw, ey - k);
+    if (ov <= 0.0) return vec2(0.0);
+    // the pixel centre's place across the (widened) band, mapped onto the stretch, so it is never
+    // sampled at its ends (the annulus edges, where the density is 0); a stretch thinner than the
+    // pixel is seen whole: sample its middle, or the sample point would wander with the line's
+    // sub-pixel phase (dashes where the stretch crosses the planet's shadow)
+    float f = clamp((ey - (mid - hw)) / (2.0 * hw), 0.0, 1.0);
+    float sr = mix(lo, hi, mix(0.5, f, clamp((hi - lo) / (2.0 * k), 0.0, 1.0)));
+    // 1/t is linear in db.y: interpolate there (also fine for y0 = 0, where s1 = s2)
+    float u = hi - lo > 0.0 ? (sr - s1) / (s2 - s1) : 0.5;
+    float invT = mix(1.0 / t1, 1.0 / t2, u);
+    return vec2(ov / (2.0 * k), 1.0 / invT);
+}
+
 void main() {
     vec3 d = normalize(v_ray);
     mat3 M = mat3(u_toBody);
     vec3 db = M * d;
     vec3 ob = M * (u_center.xyz * -u_center.w);   // camera in body space, planet radii
-    if (abs(db.y) < 1e-7) discard;
-    float tp = -ob.y / db.y;
-    if (tp <= 0.0) discard;
-    vec3 q = ob + db * tp;
+    float width = u_ring.y - u_ring.x;
+    float t;            // distance along the ray to the shaded ring point
+    float ey;           // db.y of the (sub-pixel) ray through it
+    float cov = 1.0;    // fraction of the pixel on the annulus
+    bool slab = abs(db.y) < 0.5;
+    if (!slab) {
+        t = -ob.y / db.y;
+        if (t <= 0.0) discard;
+        ey = db.y;
+    } else {
+        // Shallow views: the rays across the pixel (db.y within +-k, k = half a pixel) all meet
+        // the plane on the line ob.xz + db.xz * t, at t = -ob.y / db.y. Coverage is the part of
+        // that +-k window the annulus spans, with each stretch at least one pixel thick, so a
+        // ring seen edge-on stays a continuous line instead of a dashed staircase.
+        vec2 o = ob.xz;
+        vec2 v = db.xz;
+        float A = dot(v, v);
+        float tc = -dot(o, v) / A;
+        float cr = o.x * v.y - o.y * v.x;
+        float p2 = cr * cr / A;   // squared distance of the line from the axis
+        float ro2 = u_ring.y * u_ring.y;
+        if (p2 >= ro2) discard;
+        float ho = sqrt((ro2 - p2) / A);
+        float ri2 = u_ring.x * u_ring.x;
+        float hi = p2 < ri2 ? sqrt((ri2 - p2) / A) : 0.0;
+        float k = 0.5 * u_pxAngle * sqrt(1.0 - db.y * db.y);
+        vec2 sNear = ringStretch(vec2(tc - ho, tc - hi), ob.y, db.y, k);
+        vec2 sFar = ringStretch(vec2(tc + hi, tc + ho), ob.y, db.y, k);
+        cov = min(sNear.x + sFar.x, 1.0);
+        if (cov <= 0.0) discard;
+        t = sNear.x > 0.0 ? sNear.y : sFar.y;
+        ey = -ob.y / t;
+    }
+    vec3 q = vec3(ob.x + db.x * t, 0.0, ob.z + db.z * t);
     float r = length(q.xz);
-    float x = ringX(r);
-    float dens = ringDensityX(x);
-    if (dens < 0.004) discard;
-    // fine ringlets once they are several pixels wide
-    float fpx = tp * u_pxAngle / ((u_ring.y - u_ring.x) * max(abs(db.y), 0.05));
-    float fine = clamp(0.25 / (520.0 * fpx) - 0.5, 0.0, 1.0);
-    dens *= 1.0 - fine * 0.3 * noise1(x * 520.0);
+    float x = (r - u_ring.x) / width;
+    // pixel footprint across the rings: one pixel moves the hit point by t * pxAngle * |g| with
+    // |g|^2 = 1 + (radial . db / db.y)^2 (exact for the root-mean-square over both screen axes)
+    float sl = dot(q.xz / max(r, 1e-6), db.xz) / max(abs(ey), 1e-5);
+    float fp = t * u_pxAngle * sqrt(1.0 + sl * sl) / width;
+    // the stretch coverage already anti-aliases the edges of the annulus in the slab case
+    float dens = slab ? ringProfile(clamp(x, 0.0, 1.0), fp, 0.0) : ringProfile(x, fp, fp);
+    if (dens * cov < 0.004) discard;
 
     // the part of the ring behind the planet is hidden by it
     float b;
@@ -396,23 +543,24 @@ void main() {
     float front = 0.0;
     if (b > 0.0) {
         float ts = u_cc / (b + sqrt(max(disc, 0.0)));
-        if (ts < tp) front = coverage(b, h2, disc);
+        if (ts < t) front = coverage(b, h2, disc);
     }
-    // planet shadow: does the path from q towards the star pass through the planet? (soft penumbra)
+    // planet shadow: does the path from q towards the star pass through the planet? (soft
+    // penumbra, widened by the pixel footprint: seen edge-on a pixel spans a long stretch of ring)
     float shadow = 1.0;
     float bq = dot(q, u_sunBody);
     if (bq < 0.0) {
         float hq = sqrt(max(dot(q, q) - bq * bq, 0.0));
-        float pen = max(u_sunAng * -bq, 0.004);
+        float pen = max(u_sunAng * -bq, 0.004) + fp * width;
         shadow = mix(0.04, 1.0, smoothstep(1.0 - pen, 1.0 + pen, hq));
     }
-    vec3 alb = mix(vec3(0.60, 0.54, 0.46), vec3(0.36, 0.33, 0.30), noise1(x * 20.0));
+    vec3 alb = mix(vec3(0.60, 0.54, 0.46), vec3(0.36, 0.33, 0.30), mix(0.5, noise1(x * 20.0), aaFade(20.0, fp)));
     float elev = abs(u_sunBody.y);
     vec3 col = alb * u_sunColor * shadow * (0.30 + 0.70 * elev);
     // seen from the unlit side only light diffusing through the thinner parts arrives
     if (ob.y * u_sunBody.y < 0.0) col *= mix(0.75, 0.3, dens);
     // optical depth grows along slanted paths: rings get more opaque towards edge-on
-    float a = (1.0 - exp(-dens * 1.3 / max(abs(db.y), 0.08))) * (1.0 - front);
+    float a = (1.0 - exp(-dens * 1.3 / max(abs(db.y), 0.08))) * (1.0 - front) * cov;
     o_color = vec4(tonemap(col) * a, a);
 }
 """
@@ -523,6 +671,14 @@ float craterLayer(vec3 q, float presence) {
     }
     return v;
 }
+/**
+ * Darker and more saturated: bright pale albedos come out near-white under the full sun at
+ * exposure 1 (ACES compresses their channel differences away).
+ */
+vec3 toneDown(vec3 c, float gain, float sat) {
+    float l = dot(c, vec3(0.30, 0.59, 0.11));
+    return max(mix(vec3(l), c, sat), 0.0) * gain;
+}
 float ridge(vec3 q) {
     return 1.0 - abs(fbm(q) * 2.0 - 1.0);
 }
@@ -601,7 +757,7 @@ vec3 gas(vec3 p) {
     float storm = 1.0 - smoothstep(0.04, 0.13 + swirl, sd);
     col = mix(col, vec3(0.60, 0.27, 0.15), storm * 0.85);
     col = mix(col, vec3(0.78, 0.64, 0.50), (1.0 - smoothstep(0.0, 0.05, sd)) * 0.5);
-    return col;
+    return toneDown(col, 0.45, 1.45);
 }
 
 vec3 ice(vec3 p, vec3 sp) {
@@ -615,7 +771,7 @@ vec3 ice(vec3 p, vec3 sp) {
     col = mix(col, vec3(0.22, 0.30, 0.44), l2 * 0.6);
     col = mix(col, vec3(0.60, 0.66, 0.76), l3 * 0.3 * smoothstep(0.4, 0.6, n1));
     col *= 1.0 + craterLayer(sp * 6.0, 0.2) * 0.4;
-    return col;
+    return toneDown(col, 0.48, 1.35);
 }
 
 vec3 rock(vec3 p, vec3 sp) {
