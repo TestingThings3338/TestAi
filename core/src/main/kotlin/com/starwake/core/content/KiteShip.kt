@@ -27,8 +27,8 @@ object KiteShip {
     val navGreen = Vec3(6.36f, -0.57f, 3.12f)
     val navRed = Vec3(-6.36f, -0.57f, 3.12f)
     val strobes = arrayOf(Vec3(1.56f, 2.42f, 6.66f), Vec3(-1.56f, 2.42f, 6.66f))
-    const val LENGTH = 15.1f
-    const val COLLISION_RADIUS = 6.2f
+    const val LENGTH = 15.4f
+    const val COLLISION_RADIUS = 7.0f
 
     private class Station(val z: Float, val w: Float, val ht: Float, val hb: Float, val yOff: Float)
 
@@ -53,6 +53,8 @@ object KiteShip {
         fuselage(main)
         canopy(main)
         navLights(main)
+        // dorsal sensor fin (on the centre line, so not part of the mirrored side)
+        main.box(-0.04f, 0.74f, 2.4f, 0.04f, 1.05f, 3.3f, DARK)
         val side = MeshBuilder(23)
         wing(side)
         tailFin(side)
@@ -230,8 +232,6 @@ object KiteShip {
         b.box(1.56f, -0.40f, -3.25f, 1.68f, -0.28f, -3.0f, METAL)
         // glowing status strip along the hull side
         b.box(1.58f, 0.09f, -0.8f, 1.67f, 0.16f, 1.8f, LIGHT)
-        // dorsal sensor fin
-        b.box(-0.04f, 0.74f, 2.4f, 0.04f, 1.05f, 3.3f, DARK)
     }
 
     private fun navLights(b: MeshBuilder) {

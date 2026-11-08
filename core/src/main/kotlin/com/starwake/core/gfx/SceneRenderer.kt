@@ -19,7 +19,7 @@ import kotlin.math.sin
 object Environment {
     val sunDir: Vec3 = Vec3(-0.846f, 0.451f, 0.282f).normalize()
     val sunColor = floatArrayOf(2.6f, 2.45f, 2.25f)
-    val planetDir: Vec3 = Vec3(0.45f, 0.10f, -1f).normalize()
+    val planetDir: Vec3 = Vec3(0.24f, 0.13f, -1f).normalize()
     val fillColor = floatArrayOf(0.10f, 0.075f, 0.055f)
     val ambient = floatArrayOf(0.035f, 0.042f, 0.06f)
     const val PLANET_DISTANCE = 1000f
@@ -109,9 +109,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     init {
         setupPalettes(0)
-        rockMaterial(AsteroidMesh.ROCK, 0.30f, 0.27f, 0.24f, 0.88f, 0.05f)
-        rockMaterial(AsteroidMesh.DARK_ROCK, 0.16f, 0.145f, 0.135f, 0.92f, 0.05f)
-        rockMaterial(AsteroidMesh.MINERAL, 0.46f, 0.50f, 0.56f, 0.35f, 0.45f)
+        rockMaterial(AsteroidMesh.ROCK, 0.20f, 0.18f, 0.16f, 0.88f, 0.05f)
+        rockMaterial(AsteroidMesh.DARK_ROCK, 0.11f, 0.10f, 0.095f, 0.92f, 0.05f)
+        rockMaterial(AsteroidMesh.MINERAL, 0.36f, 0.40f, 0.46f, 0.35f, 0.45f)
     }
 
     private fun rockMaterial(i: Int, r: Float, g: Float, b: Float, rough: Float, metal: Float) {
@@ -133,7 +133,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         mat(KiteShip.SECONDARY, l.secondary[0], l.secondary[1], l.secondary[2], 0.36f, 0.2f)
         mat(KiteShip.DARK, 0.075f, 0.08f, 0.09f, 0.55f, 0.5f)
         mat(KiteShip.GLASS, 0.035f, 0.07f, 0.10f, 0.06f, 0.85f, emissive = 1.2f)
-        mat(KiteShip.ENGINE, 0.45f, 0.82f, 1.0f, 1f, 0f, emissive = 3.2f, engine = 1f)
+        mat(KiteShip.ENGINE, 0.30f, 0.62f, 1.0f, 1f, 0f, emissive = 1.5f, engine = 1f)
         mat(KiteShip.LIGHT, 0.30f, 0.90f, 1.0f, 1f, 0f, emissive = 2.4f)
         mat(KiteShip.METAL, 0.62f, 0.64f, 0.66f, 0.28f, 1f)
         mat(KiteShip.RED, 1.0f, 0.12f, 0.10f, 1f, 0f, emissive = 3f)
@@ -327,15 +327,15 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             val cr = if (boost) 0.75f else 0.35f
             val cg = if (boost) 0.75f else 0.68f
             plume(px, py, pz, len, width, 0.25f + out * 0.85f, cr, cg, 1f)
-            val halo = 1.3f + out * 1.2f
-            billboard(px, py, pz, halo, c, 0f, 0.35f, 0.7f, 1f, 0.35f + out * 0.5f)
+            val halo = 1.1f + out * 1.0f
+            billboard(px, py, pz, halo, c, 0f, 0.25f, 0.55f, 1f, 0.2f + out * 0.3f)
         }
         // navigation lights: steady red/green, white strobes on the fins
         light(ship, KiteShip.navGreen, c, 0.1f, 1f, 0.3f, 0.9f, 0.55f)
         light(ship, KiteShip.navRed, c, 1f, 0.12f, 0.1f, 0.9f, 0.55f)
         val phase = (t % 1.4f)
         if (phase < 0.08f) {
-            for (s in KiteShip.strobes) light(ship, s, c, 1f, 1f, 1f, 1.6f, 1.2f)
+            for (s in KiteShip.strobes) light(ship, s, c, 1f, 1f, 1f, 1.0f, 0.6f)
         }
         gl.enable(GL.BLEND)
         gl.blendFunc(GL.ONE, GL.ONE)
@@ -360,6 +360,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         x: Float, y: Float, z: Float, size: Float, c: Camera, shape: Float,
         r: Float, g: Float, b: Float, a: Float,
     ) {
+        if (!glowStream.hasRoom()) return
         val rx = c.right.x * size
         val ry = c.right.y * size
         val rz = c.right.z * size
@@ -375,6 +376,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     /** Exhaust plume: a quad along [axis] that turns around it to face the camera. */
     private fun plume(x: Float, y: Float, z: Float, len: Float, width: Float, a: Float, r: Float, g: Float, b: Float) {
+        if (!glowStream.hasRoom()) return
         // to-camera vector is -position (camera at origin)
         tmp2.set(-x, -y, -z).normalize()
         side.cross(axis, tmp2)

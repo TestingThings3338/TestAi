@@ -113,6 +113,11 @@ void main() {
     v_normal = mat3(u_model) * n;
     vec4 pal = u_palette[mi];
     v_albedo = pal.rgb * a_mat.y;
+#ifdef INSTANCED
+    // per-rock tint variation so the field doesn't look cloned
+    float hv = fract(i_posScale.x * 0.1234 + i_posScale.z * 0.0731 + i_posScale.w * 0.37);
+    v_albedo *= vec3(0.7 + 0.5 * hv, 0.7 + 0.45 * hv, 0.7 + 0.4 * hv);
+#endif
     v_params = vec4(u_matParams[mi].xyz, pal.a);
     gl_Position = u_viewProj * wp;
 }
@@ -306,8 +311,8 @@ void main() {
     if (disc > 0.0 && -b - sqrt(disc) > 0.0) lit = 0.06;
     vec3 alb = mix(vec3(0.78, 0.72, 0.63), vec3(0.50, 0.46, 0.42), noise1(r * 23.0));
     float elev = abs(u_sunObj.y);
-    vec3 col = alb * u_sunColor * lit * (0.25 + 0.75 * elev) * 0.8;
-    o_color = vec4(tonemap(col), d * 0.92);
+    vec3 col = alb * u_sunColor * lit * (0.35 + 0.65 * elev) * 1.3;
+    o_color = vec4(tonemap(col), pow(d, 1.4) * 0.95);
 }
 """
 

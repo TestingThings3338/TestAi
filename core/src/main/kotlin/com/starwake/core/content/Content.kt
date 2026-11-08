@@ -19,7 +19,7 @@ class Content(fontMetrics: String, val fontAtlas: ByteArray) {
 
     companion object {
         const val ROCK_VARIANTS = 3
-        const val MAX_ASTEROIDS = 520
+        const val MAX_ASTEROIDS = 420
         const val MAX_STARS = 6500
         const val MAX_DUST = 700
     }

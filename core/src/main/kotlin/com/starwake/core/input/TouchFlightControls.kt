@@ -93,7 +93,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         w = width; h = height; u = unit
         mirror = settings.leftHanded
         zoneSplit = width * 0.42f
-        stickRadius = 58f * u
+        stickRadius = 52f * u
         // positions for the right-handed layout; mirrored afterwards
         val left = sl
         val right = sr
@@ -249,8 +249,8 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         } else {
             // radial dead zone, then per-axis expo for fine aiming near centre
             val scaled = ((mag - 0.06f) / 0.94f) / mag
-            stickOutX = expoCurve(nx * scaled, 0.35f)
-            stickOutY = expoCurve(ny * scaled, 0.35f)
+            stickOutX = expoCurve(nx * scaled, 0.25f)
+            stickOutY = expoCurve(ny * scaled, 0.25f)
             stickUsed = true
         }
     }
@@ -335,14 +335,14 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
 
         // -------- buttons
         val boostCol = if (boostReady || boosting) Theme.ACCENT else Theme.TEXT_DIM
-        ui.circle(boostBtn.cx, boostBtn.cy, boostBtn.w * 0.5f, withAlpha(if (boosting) Theme.ACCENT else Theme.PANEL, a * if (boosting) 0.45f else 0.8f))
+        ui.circle(boostBtn.cx, boostBtn.cy, boostBtn.w * 0.5f, withAlpha(if (boosting) Theme.ACCENT else Theme.PANEL, a * if (boosting) 0.85f else 0.8f))
         ui.circle(boostBtn.cx, boostBtn.cy, boostBtn.w * 0.5f, withAlpha(boostCol, a * 0.85f), 2f * u)
         // capacitor pips
         for (i in 0 until 3) {
             val full = capacitor >= (i + 1) / 3f - 0.01f
             ui.rect(boostBtn.cx - 15f * u + i * 11f * u, boostBtn.cy + 9f * u, 8f * u, 3f * u, withAlpha(if (full) boostCol else Theme.PANEL_LIGHT, a))
         }
-        ui.textCentered("BOOST", boostBtn.cx, boostBtn.cy - 2f * u, 10.5f * u, withAlpha(boostCol, a), tracking = 0.1f)
+        ui.textCentered("BOOST", boostBtn.cx, boostBtn.cy - 2f * u, 10.5f * u, withAlpha(if (boosting) Theme.DARK else boostCol, a), tracking = 0.1f, weight = if (boosting) 0.05f else 0f)
 
         val faCol = if (flightAssist) Theme.ACCENT else Theme.WARN
         ui.circle(faBtn.cx, faBtn.cy, faBtn.w * 0.5f, withAlpha(Theme.PANEL, a * 0.8f))
@@ -365,11 +365,14 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             val tx = if (mirror) g.x - 20f * u else g.x + g.w + 26f * u
             val al = if (mirror) UiRenderer.RIGHT else UiRenderer.LEFT
             if (!throttleUsed) {
+                val bw = 250f * u
+                ui.rect(if (mirror) tx - bw else tx - 10f * u, g.cy - 26f * u, bw + 10f * u, 44f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
                 ui.text("SLIDE UP/DOWN · THROTTLE", tx, g.cy - 8f * u, 12f * u, withAlpha(Theme.TEXT, ha), al, 0.08f, shadow = 0.8f)
                 ui.text(if (settings.stickXRoll) "SIDEWAYS · YAW   DOUBLE-TAP · STOP" else "SIDEWAYS · ROLL   DOUBLE-TAP · STOP",
                     tx, g.cy + 10f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), al, 0.08f, shadow = 0.8f)
             }
             if (!stickUsed) {
+                ui.rect(stickRestX - 140f * u, stickRestY - stickRadius - 44f * u, 280f * u, 46f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
                 ui.textCentered("DRAG TO STEER", stickRestX, stickRestY - stickRadius - 22f * u, 12f * u, withAlpha(Theme.TEXT, ha), tracking = 0.1f, shadow = 0.8f)
                 ui.textCentered(if (settings.stickXRoll) "UP/DOWN · PITCH   SIDEWAYS · ROLL" else "UP/DOWN · PITCH   SIDEWAYS · YAW",
                     stickRestX, stickRestY - stickRadius - 6f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), tracking = 0.08f, shadow = 0.8f)

@@ -145,10 +145,15 @@ class Quat(
         var rz = f0 * uy - f1 * ux
         var rl = sqrt(rx * rx + ry * ry + rz * rz)
         if (rl < 1e-6f) {
-            // forward parallel to up: pick any perpendicular
-            rx = 1f; ry = 0f; rz = 0f
-            if (abs(f0) > 0.9f) { rx = 0f; rz = 1f }
-            rl = 1f
+            // forward parallel to up: use the world axis least aligned with forward instead
+            val ax: Float
+            val ay: Float
+            val az: Float
+            if (abs(f0) < abs(f1) && abs(f0) < abs(f2)) { ax = 1f; ay = 0f; az = 0f } else if (abs(f1) < abs(f2)) { ax = 0f; ay = 1f; az = 0f } else { ax = 0f; ay = 0f; az = 1f }
+            rx = f1 * az - f2 * ay
+            ry = f2 * ax - f0 * az
+            rz = f0 * ay - f1 * ax
+            rl = sqrt(rx * rx + ry * ry + rz * rz)
         }
         rl = 1f / rl
         rx *= rl; ry *= rl; rz *= rl

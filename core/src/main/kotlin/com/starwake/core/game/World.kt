@@ -45,7 +45,7 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
         var placed = 0
         var attempts = 0
         // a few clumps give the field structure instead of uniform noise
-        val clumps = Array(7) { Vec3(rng.signed() * 1100f, rng.signed() * 160f, rng.signed() * 900f) }
+        val clumps = Array(7) { Vec3(rng.signed() * 1400f, rng.signed() * 180f, rng.signed() * 1100f) }
         while (placed < maxCount && attempts < maxCount * 40) {
             attempts++
             val big = placed < 14
@@ -60,7 +60,7 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
                 z = c.z + rng.gaussian() * 260f
             } else {
                 val a = rng.nextFloat() * 6.2831855f
-                val r = sqrt(rng.nextFloat()) * 1700f
+                val r = sqrt(rng.nextFloat()) * 2200f
                 x = cos(a) * r
                 y = rng.gaussian() * 140f
                 z = sin(a) * r * 0.8f
@@ -167,8 +167,8 @@ class ChaseCamera {
         } else {
             val k = if (dt <= 0f) 1f else expApproach(if (mode == 0) 7.5f else 5f, dt)
             rot.slerp(rot, ship.rot, k)
-            val back = if (mode == 0) 14.5f else 26f
-            val upOff = if (mode == 0) 3.6f else 6.5f
+            val back = if (mode == 0) 16.5f else 28f
+            val upOff = if (mode == 0) 4.0f else 7f
             rot.rotate(0f, upOff, back + speedFrac * 3f, offset)
         }
         shakeTime += dt
@@ -189,8 +189,8 @@ class ChaseCamera {
 /** Slow cinematic orbit used behind the main menu; the player can drag to look around. */
 class OrbitCamera {
     var yaw = 2.35f
-    var pitch = 0.12f
-    var distance = 30f
+    var pitch = 0.28f
+    var distance = 25f
     var autoSpin = 0.06f
     var idle = 10f
     private var yawVel = 0f
@@ -219,7 +219,7 @@ class OrbitCamera {
         if (idle > 2.5f) {
             val k = clamp((idle - 2.5f) / 3f, 0f, 1f)
             yaw += autoSpin * dt * k
-            pitch += (0.12f - pitch) * expApproach(0.4f, dt) * k
+            pitch += (0.28f - pitch) * expApproach(0.4f, dt) * k
         }
     }
 

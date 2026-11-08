@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon (Android 13+) silhouette of the foreground: alpha only, canopy cut out. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,28 L60,46 L80,66 L80,71 L62,64 L58,72 L50,72 L46,64 L28,71 L28,66 L48,46 Z M54,37 L57,48 L54,53 L51,48 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M50.5,73.5 L57.5,73.5 L56,78 L52,78 Z" />
+</vector>

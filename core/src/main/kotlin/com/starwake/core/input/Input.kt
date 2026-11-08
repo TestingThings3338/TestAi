@@ -110,6 +110,7 @@ class GamepadState {
 
     /** True once per physical press (GL thread). */
     fun consumePress(button: Int): Boolean {
+        if (button !in 0 until BUTTONS) return false
         synchronized(this) {
             if (pressCount[button] != seen[button]) {
                 seen[button] = pressCount[button]

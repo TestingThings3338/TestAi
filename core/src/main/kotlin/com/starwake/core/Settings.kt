@@ -50,11 +50,11 @@ class Settings {
                     "fps" -> fpsMode = v.toInt().coerceIn(0, 2)
                     "roll" -> stickXRoll = v == "1"
                     "climb" -> pitchUpClimb = v == "1"
-                    "sens" -> sensitivity = v.toFloat().coerceIn(0.5f, 1.5f)
+                    "sens" -> v.toFloat().let { if (!it.isNaN()) sensitivity = it.coerceIn(0.5f, 1.5f) }
                     "left" -> leftHanded = v == "1"
                     "hap" -> haptics = v == "1"
                     "showfps" -> showFps = v == "1"
-                    "livery" -> livery = v.toInt().coerceAtLeast(0)
+                    "livery" -> livery = v.toInt().coerceIn(0, 31)
                 }
             } catch (_: NumberFormatException) {
                 // ignore corrupt values, keep defaults

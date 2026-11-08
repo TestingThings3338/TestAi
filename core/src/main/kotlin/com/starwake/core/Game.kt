@@ -130,8 +130,8 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private val menuShipRot = Quat()
 
     init {
-        menuShipRot.setAxisAngle(0f, 1f, 0f, 2.2f)
-        val roll = Quat().setAxisAngle(0f, 0f, 1f, -0.14f)
+        menuShipRot.setAxisAngle(0f, 1f, 0f, 2.75f)
+        val roll = Quat().setAxisAngle(0f, 0f, 1f, 0.3f)
         val pitch = Quat().setAxisAngle(1f, 0f, 0f, 0.06f)
         menuShipRot.mul(menuShipRot, pitch).mul(menuShipRot, roll)
         menuShip.pos.set(AsteroidField.SHOWCASE_X.toDouble(), AsteroidField.SHOWCASE_Y.toDouble(), AsteroidField.SHOWCASE_Z.toDouble())
@@ -539,7 +539,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
             val dx = field.px[i] - sx
             val dy = field.py[i] - sy
             val dz = field.pz[i] - sz
-            val r = field.radius[i]
+            val r = field.radius[i] * 1.05f
             val reach = r + 400f
             if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) continue
             val d = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.collisionRadius
@@ -574,8 +574,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         if (state == STATE_MENU) {
             if (overlay == OVERLAY_NONE) menu.draw(ui, frame, 1f, time)
         } else {
-            val hudAlpha = if (overlay == OVERLAY_NONE) 1f else 0.35f
-            drawHud(ui, hudAlpha)
+            if (overlay == OVERLAY_NONE) drawHud(ui, 1f)
         }
         when (overlay) {
             OVERLAY_SETTINGS -> settingsScreen.draw(ui, frame, 1f)
@@ -621,28 +620,36 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
             }
         }
 
-        // speed readout, bottom centre
-        val cx = frame.w * 0.5f
-        val by = frame.h - frame.sb - 24f * u
+        // speed readout beside the throttle lever (keeps the centre clear for the ship)
+        val g = touch.gauge
+        val mirrored = settings.leftHanded
+        val sx = if (mirrored) g.x - 26f * u else g.x + g.w + 26f * u
+        val align = if (mirrored) UiRenderer.RIGHT else UiRenderer.LEFT
+        val sy = g.y + g.h
         val speed = ship.forwardSpeed
         buf.clear().appendPadded(abs(speed).toInt(), 3)
-        ui.text(buf, cx, by - 16f * u, 34f * u, withAlpha(if (speed < -1f) Theme.WARN else Theme.TEXT, a), UiRenderer.CENTER, 0.05f, 0.03f, shadow = 0.6f)
-        ui.text("M/S", cx + 46f * u, by - 16f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
+        val numW = ui.text(buf, sx, sy - 12f * u, 30f * u, withAlpha(if (speed < -1f) Theme.WARN else Theme.TEXT, a), align, 0.05f, 0.03f, shadow = 0.7f)
+        val unitX = if (mirrored) sx - numW - 6f * u else sx + numW + 6f * u
+        ui.text("M/S", unitX, sy - 12f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), align, tracking = 0.15f, shadow = 0.7f)
         // boost capacitor bar
-        val bw = 120f * u
-        ui.rect(cx - bw * 0.5f, by - 4f * u, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
+        val bw = 104f * u
+        val bx = if (mirrored) sx - bw else sx
+        ui.rect(bx, sy - 3f * u, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
         val capCol = if (ship.capacitor >= spec.boostCost) Theme.ACCENT else Theme.TEXT_DIM
-        ui.rect(cx - bw * 0.5f, by - 4f * u, bw * ship.capacitor, 4f * u, withAlpha(capCol, a), 2f * u)
-        ui.rect(cx - bw * 0.5f + bw * spec.boostCost, by - 7f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
+        ui.rect(bx, sy - 3f * u, bw * ship.capacitor, 4f * u, withAlpha(capCol, a), 2f * u)
+        ui.rect(bx + bw * spec.boostCost, sy - 6f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
+        // location, flight-assist and proximity warnings (top centre)
+        val cx = frame.w * 0.5f
+        ui.textCentered("HALCYON REACH  ·  OUTER BELT", cx, frame.st + 30f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f), tracking = 0.25f, shadow = 0.6f)
+        var warnY = frame.st + 52f * u
         if (!ship.flightAssist) {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
-            ui.textCentered("FLIGHT ASSIST OFF", cx, by - 68f * u, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.6f)
+            ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
+            warnY += 20f * u
         }
-        // location + proximity
-        ui.textCentered("HALCYON REACH  ·  OUTER BELT", cx, frame.st + 30f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f), tracking = 0.25f, shadow = 0.6f)
         if (proximity < 60f) {
             val blink = if ((time * 4f).toInt() % 2 == 0) 1f else 0.4f
-            ui.textCentered("PROXIMITY", cx, frame.st + 52f * u, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.6f)
+            ui.textCentered("PROXIMITY", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
         }
 
         touch.draw(

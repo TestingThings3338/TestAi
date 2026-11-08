@@ -91,7 +91,7 @@ class MainMenu(private val game: GameActions) {
         // drag hint
         if (dragHint > 0.01f) {
             val pulse = 0.6f + 0.4f * kotlin.math.sin(time * 2.5f)
-            ui.textCentered("◀  DRAG TO ROTATE  ▶", c.cx, c.y - 18f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * dragHint * pulse), tracking = 0.2f, shadow = 0.6f)
+            ui.textCentered("◀  DRAG TO ROTATE  ▶", (leftX + 236f * u + c.x) * 0.5f, f.h - f.sb - 22f * u, 10f * u, withAlpha(Theme.TEXT, a * dragHint * pulse * 0.8f), tracking = 0.2f, shadow = 0.8f)
         }
         // version line
         buf.clear().append("v0.1.0  ·  ").append(game.deviceInfo)

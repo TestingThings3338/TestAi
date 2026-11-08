@@ -31,7 +31,7 @@ class ShipSpec(
     val boostCost: Float = 0.42f,
     val boostAccelMultiplier: Float = 2.6f,
     val capacitorRecharge: Float = 0.12f,
-    val collisionRadius: Float = 6.2f,
+    val collisionRadius: Float = 7.0f,
 ) {
     companion object {
         val KITE = ShipSpec("KITE", "KT-1", "LIGHT MULTIROLE")
@@ -77,6 +77,9 @@ class ShipState {
 
     /** Forward component of velocity (m/s, positive when moving nose-first). */
     var forwardSpeed = 0f
+
+    /** Current speed limit; jumps to boost speed while boosting, then bleeds back smoothly. */
+    var speedCap = 0f
     val boosting get() = boostTime > 0f
 
     fun reset() {
@@ -90,6 +93,7 @@ class ShipState {
         engineOutput = 0f
         speed = 0f
         forwardSpeed = 0f
+        speedCap = 0f
     }
 }
 
@@ -149,8 +153,8 @@ class FlightModel(var spec: ShipSpec) {
             local.z += clamp(dz, -limitZ, limitZ)
             thrust = if (dz < -0.5f) (-dz / 40f).coerceAtMost(1f) else 0.15f
             val lat = sp.assistLateral * dt
-            local.x = approach(local.x, c.strafeX * sp.maxStrafeSpeed, lat)
-            local.y = approach(local.y, c.strafeY * sp.maxStrafeSpeed, lat)
+            local.x = approach(local.x, clamp(c.strafeX, -1f, 1f) * sp.maxStrafeSpeed, lat)
+            local.y = approach(local.y, clamp(c.strafeY, -1f, 1f) * sp.maxStrafeSpeed, lat)
         } else {
             val az = when {
                 boosting -> -sp.accelForward * sp.boostAccelMultiplier
@@ -158,20 +162,17 @@ class FlightModel(var spec: ShipSpec) {
                 else -> -throttle * sp.accelReverse
             }
             local.z += az * dt
-            local.x += c.strafeX * sp.accelLateral * dt
-            local.y += c.strafeY * sp.accelLateral * dt
+            local.x += clamp(c.strafeX, -1f, 1f) * sp.accelLateral * dt
+            local.y += clamp(c.strafeY, -1f, 1f) * sp.accelLateral * dt
             thrust = (if (az < 0f) -az / sp.accelForward else 0f).coerceAtMost(1f)
         }
         if (boosting) thrust = 1.6f
         s.rot.rotate(local, s.vel)
 
-        // speed limiter (also bleeds off boost speed smoothly after a boost ends)
-        val cap = if (boosting) sp.boostSpeed else sp.maxSpeed
+        // hard speed limit; after a boost the limit bleeds back down to max speed smoothly
+        s.speedCap = if (boosting) sp.boostSpeed else maxOf(sp.maxSpeed, s.speedCap - sp.accelReverse * 1.5f * dt)
         val speed = s.vel.length()
-        if (speed > cap) {
-            val newSpeed = maxOf(cap, speed - sp.accelReverse * 1.5f * dt)
-            s.vel.scale(newSpeed / speed)
-        }
+        if (speed > s.speedCap) s.vel.scale(s.speedCap / speed)
         s.speed = s.vel.length()
         s.rot.rotate(0f, 0f, -1f, tmp)
         s.forwardSpeed = s.vel.dot(tmp)
@@ -188,10 +189,11 @@ class FlightModel(var spec: ShipSpec) {
         val minDist = radius + spec.collisionRadius
         val d2 = dx * dx + dy * dy + dz * dz
         if (d2 >= minDist * minDist) return 0f
-        val d = sqrt(d2).coerceAtLeast(1e-3f)
-        val nx = dx / d
-        val ny = dy / d
-        val nz = dz / d
+        val d = sqrt(d2)
+        // exactly at the centre there is no direction to push along: pick "up"
+        val nx = if (d > 1e-4f) dx / d else 0f
+        val ny = if (d > 1e-4f) dy / d else 1f
+        val nz = if (d > 1e-4f) dz / d else 0f
         val push = (minDist - d).toDouble()
         s.pos.x += nx * push
         s.pos.y += ny * push
@@ -202,8 +204,10 @@ class FlightModel(var spec: ShipSpec) {
         val restitution = 0.35f
         s.vel.add(-nx * vn * (1f + restitution), -ny * vn * (1f + restitution), -nz * vn * (1f + restitution))
         s.vel.scale(0.8f)
-        // knock the ship's rotation a little
-        s.angVel.add(ny * vn * 0.004f, -nx * vn * 0.004f, (nx - ny) * vn * 0.003f)
+        // knock the ship's rotation a little (normal converted to the ship's own frame)
+        s.rot.rotateInverse(nx, ny, nz, tmp)
+        val k = vn * 0.004f
+        s.angVel.add((tmp.y + 0.3f * tmp.z) * k, -tmp.x * k, 0.75f * (tmp.x - tmp.y) * k)
         return -vn
     }
 }

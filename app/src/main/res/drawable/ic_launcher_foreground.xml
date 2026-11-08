@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Starwake mark: an original faceted swept-wing dart, nose up, lit from the left.
+     All geometry stays inside the 66dp adaptive-icon safe circle (radius 33 around 54,54). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- lit half -->
+    <path
+        android:fillColor="#4CD6FF"
+        android:pathData="M54,28 L54,72 L50,72 L46,64 L28,71 L28,66 L48,46 Z" />
+    <!-- shaded half -->
+    <path
+        android:fillColor="#2BA3D4"
+        android:pathData="M54,28 L60,46 L80,66 L80,71 L62,64 L58,72 L54,72 Z" />
+    <!-- canopy -->
+    <path
+        android:fillColor="#06101A"
+        android:pathData="M54,37 L57,48 L54,53 L51,48 Z" />
+    <!-- engine glow -->
+    <path
+        android:fillColor="#B9F0FF"
+        android:pathData="M50.5,73.5 L57.5,73.5 L56,78 L52,78 Z" />
+</vector>

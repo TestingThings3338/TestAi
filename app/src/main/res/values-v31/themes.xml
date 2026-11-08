@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Starwake" parent="Base.Theme.Starwake">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <!-- System splash (Android 12+): launcher icon on the icon's navy. -->
+        <item name="android:windowSplashScreenBackground">@color/starwake_navy</item>
+    </style>
+</resources>
