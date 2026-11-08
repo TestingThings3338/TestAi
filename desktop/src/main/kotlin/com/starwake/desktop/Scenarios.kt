@@ -23,8 +23,8 @@ fun gameScenario(
         driver.script()
         val hap = platform.haptics
         env.report.note(
-            "end: state ${game.stateName}, frame ${driver.frame}, last drawFrame CPU %.2f ms, haptics TAP=%d TICK=%d BUMP=%d HEAVY=%d"
-                .format(game.lastFrameCpuNanos / 1e6, hap[0], hap[1], hap[2], hap[3]),
+            "end: state ${game.stateName}, frame ${driver.frame}, last drawFrame CPU %.2f ms, haptics TAP=%d TICK=%d BUMP=%d HEAVY=%d, activePlay %b (%d changes)"
+                .format(game.lastFrameCpuNanos / 1e6, hap[0], hap[1], hap[2], hap[3], platform.activePlay, platform.activePlayChanges),
         )
     }
 }

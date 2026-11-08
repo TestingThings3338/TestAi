@@ -4,8 +4,12 @@ import com.starwake.core.Game
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
 import com.starwake.core.input.InputQueue
+import com.starwake.core.input.TouchFlightControls
+import com.starwake.core.ui.Rect
+import com.starwake.core.ui.UiHost
 import org.lwjgl.opengles.GLES20
 import java.io.File
+import kotlin.math.min
 
 /** 60 Hz in nanoseconds: frame N is presented at N * FRAME_NANOS, so runs are deterministic. */
 const val FRAME_NANOS = 16_666_667L
@@ -142,6 +146,41 @@ class GameDriver(
     var observer: FrameObserver? = null
     private var lastState: String? = null
 
+    /** UI unit (px per layout dp) exactly as Game.onSurfaceChanged derives it; keep the two in sync. */
+    private val unit = run {
+        val d = if (dp > 0f) dp else 1f
+        d * min(1f, min(h / d / 380f, w / d / 720f))
+    }
+
+    /**
+     * The in-flight touch layout, computed by core's own [TouchFlightControls] with the game's
+     * settings and this surface, so scripted touches can be checked against the button rects
+     * (VIEW, LOCK, pause, up/down thrusters, BOOST, FA) instead of trusting hard-coded fractions.
+     */
+    private val touchLayout = TouchFlightControls(
+        game.settings,
+        object : UiHost {
+            override fun haptic(type: Int) {}
+        },
+    ).also { it.layout(w, h, unit, insets[0], insets[1], insets[2], insets[3]) }
+
+    /** Name of the flight button under (x, y), including the controls' touch slop, or null. */
+    fun flightButtonAt(x: Float, y: Float): String? {
+        val c = touchLayout
+        val slop = 8f * unit
+        fun Rect.hit() = contains(x, y, slop)
+        return when {
+            c.pauseBtn.hit() -> "pause"
+            c.camBtn.hit() -> "VIEW"
+            c.lockBtn.hit() -> "LOCK"
+            c.upBtn.hit() -> "thrust up"
+            c.downBtn.hit() -> "thrust down"
+            c.boostBtn.hit() -> "BOOST"
+            c.faBtn.hit() -> "FA"
+            else -> null
+        }
+    }
+
     fun start() {
         game.onSurfaceCreated(gl)
         game.onSurfaceChanged(opts.width, opts.height, opts.density, insets[0], insets[1], insets[2], insets[3])
@@ -208,6 +247,11 @@ class GameDriver(
             private set
 
         fun down(x: Float, y: Float): Pointer {
+            if (game.stateName == "flight") {
+                flightButtonAt(x, y)?.let {
+                    report.note("WARNING: pointer $id down at (%.0f, %.0f) lands on the $it button; the script meant a stick/throttle touch".format(x, y))
+                }
+            }
             this.x = x; this.y = y; isDown = true
             game.input.push(InputQueue.DOWN, id, x, y)
             return this
