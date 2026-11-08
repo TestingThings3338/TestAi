@@ -55,29 +55,6 @@ float fbm(vec3 p) {
 }
 """
 
-    private const val RING_DENSITY = """
-float hash1(float x) {
-    uint h = pcg(uint(int(floor(x)) + 100000));
-    return float(h) * (1.0 / 4294967295.0);
-}
-float noise1(float x) {
-    float i = floor(x);
-    float f = x - i;
-    float u = f * f * (3.0 - 2.0 * f);
-    return mix(hash1(i), hash1(i + 1.0), u);
-}
-float ringDensity(float r) {
-    if (r < 1.42 || r > 2.32) return 0.0;
-    float x = (r - 1.42) / 0.9;
-    float d = 0.55 + 0.45 * noise1(r * 38.0);
-    d *= 0.6 + 0.4 * noise1(r * 140.0);
-    d *= smoothstep(0.0, 0.05, x) * (1.0 - smoothstep(0.92, 1.0, x));
-    d *= 1.0 - 0.9 * (smoothstep(0.56, 0.58, x) - smoothstep(0.63, 0.65, x));
-    d *= mix(0.35, 1.0, smoothstep(0.0, 0.45, x));
-    return d;
-}
-"""
-
     // ---------------------------------------------------------------- lit meshes (ship, rocks)
 
     private const val LIT_VS = """
@@ -231,90 +208,6 @@ void main() {
     vec2 d = gl_PointCoord * 2.0 - 1.0;
     float a = max(0.0, 1.0 - dot(d, d));
     o_color = vec4(v_col * a * a, 1.0);
-}
-"""
-
-    // ---------------------------------------------------------------- planet + rings (sky space)
-
-    val planetVs = HEADER + """
-layout(location = 0) in vec3 a_pos;
-uniform mat4 u_viewProj;
-uniform mat4 u_model;
-out vec3 v_obj;
-out vec3 v_world;
-out vec3 v_wnormal;
-void main() {
-    v_obj = a_pos;
-    vec4 w = u_model * vec4(a_pos, 1.0);
-    v_world = w.xyz;
-    v_wnormal = mat3(u_model) * a_pos;
-    gl_Position = u_viewProj * w;
-}
-"""
-
-    val planetFs = HEADER + """
-precision highp float;
-in vec3 v_obj;
-in vec3 v_world;
-in vec3 v_wnormal;
-uniform sampler2D u_tex;
-uniform vec3 u_sunDir;
-uniform vec3 u_sunObj;
-uniform vec3 u_sunColor;
-uniform vec3 u_atmo;
-uniform float u_spin;
-uniform float u_exposure;
-out vec4 o_color;
-""" + NOISE + RING_DENSITY + TONEMAP + """
-void main() {
-    vec3 n = normalize(v_obj);
-    float u = atan(n.z, n.x) * 0.15915494 + 0.5 + u_spin;
-    float v = asin(clamp(n.y, -1.0, 1.0)) * 0.31830989 + 0.5;
-    vec3 alb = texture(u_tex, vec2(u, v)).rgb;
-    alb *= alb;
-    vec3 N = normalize(v_wnormal);
-    vec3 V = normalize(-v_world);
-    float ndl = dot(N, u_sunDir);
-    float day = smoothstep(-0.10, 0.35, ndl);
-    float shadow = 1.0;
-    if (abs(u_sunObj.y) > 0.001) {
-        float t = -n.y / u_sunObj.y;
-        if (t > 0.0) {
-            vec3 q = n + u_sunObj * t;
-            shadow = 1.0 - ringDensity(length(q.xz)) * 0.7;
-        }
-    }
-    vec3 col = alb * u_sunColor * day * shadow * 1.15 + alb * 0.006;
-    float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-    col += u_atmo * rim * (0.15 + 1.2 * day);
-    o_color = vec4(tonemap(col), 1.0);
-}
-"""
-
-    val ringFs = HEADER + """
-precision highp float;
-in vec3 v_obj;
-in vec3 v_world;
-in vec3 v_wnormal;
-uniform vec3 u_sunObj;
-uniform vec3 u_sunColor;
-uniform float u_exposure;
-out vec4 o_color;
-""" + NOISE + RING_DENSITY + TONEMAP + """
-void main() {
-    float r = length(v_obj.xz);
-    float d = ringDensity(r);
-    if (d < 0.004) discard;
-    vec3 p = v_obj;
-    float b = dot(p, u_sunObj);
-    float c = dot(p, p) - 1.0;
-    float disc = b * b - c;
-    float lit = 1.0;
-    if (disc > 0.0 && -b - sqrt(disc) > 0.0) lit = 0.06;
-    vec3 alb = mix(vec3(0.78, 0.72, 0.63), vec3(0.50, 0.46, 0.42), noise1(r * 23.0));
-    float elev = abs(u_sunObj.y);
-    vec3 col = alb * u_sunColor * lit * (0.35 + 0.65 * elev) * 1.3;
-    o_color = vec4(tonemap(col), pow(d, 1.4) * 0.95);
 }
 """
 

@@ -24,14 +24,6 @@ object Environment {
     val planetDir: Vec3 = Vec3(0.24f, 0.13f, -1f).normalize()
     val fillColor = floatArrayOf(0.10f, 0.075f, 0.055f)
     val ambient = floatArrayOf(0.035f, 0.042f, 0.06f)
-    const val PLANET_DISTANCE = 1000f
-    const val PLANET_ANGULAR_RADIUS = 13.5f * DEG2RAD
-    val planetRot: Quat = Quat().also { q ->
-        // tilt the spin axis towards the viewer so the rings open up, plus a little roll
-        val tilt = Quat().setAxisAngle(1f, 0f, -0.45f, -0.42f)
-        val roll = Quat().setAxisAngle(planetDir.x, planetDir.y, planetDir.z, 0.32f)
-        q.mul(roll, tilt)
-    }
 }
 
 /** Per-frame scene parameters supplied by the game. */
@@ -102,7 +94,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     // scratch (no per-frame allocations)
     private val model = Mat4()
-    private val skyModel = Mat4()
     private val rel = Vec3()
     private val tmp = Vec3()
     private val tmp2 = Vec3()
@@ -113,7 +104,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val rockPalette = FloatArray(40)
     private val rockParams = FloatArray(40)
     private val identityRot = Quat()
-    private val sunObj = Vec3()
 
     init {
         setQuality(quality)
