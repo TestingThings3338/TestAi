@@ -29,6 +29,8 @@ import com.starwake.core.math.withAlpha
 import com.starwake.core.ui.Frame
 import com.starwake.core.ui.GameActions
 import com.starwake.core.ui.MainMenu
+import com.starwake.core.ui.MapHost
+import com.starwake.core.ui.MapScreen
 import com.starwake.core.ui.PauseScreen
 import com.starwake.core.ui.SettingsScreen
 import com.starwake.core.ui.TextBuf
@@ -45,7 +47,7 @@ import kotlin.math.sqrt
  * (menu ⇄ flight, with settings/pause overlays), simulation, input routing and rendering.
  * The per-frame path performs no heap allocations.
  */
-class Game(private val platform: Platform) : GameActions, PointerHandler {
+class Game(private val platform: Platform) : GameActions, MapHost, PointerHandler {
     /** Pointer events in render-surface pixels (push from any thread). */
     val input = InputQueue()
     val gamepad = GamepadState()
@@ -61,6 +63,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         get() = when {
             overlay == OVERLAY_SETTINGS -> "settings"
             overlay == OVERLAY_PAUSE -> "paused"
+            overlay == OVERLAY_MAP -> "map"
             state == STATE_FLIGHT -> "flight"
             else -> "menu"
         }
@@ -107,6 +110,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private val menu = MainMenu(this)
     private val settingsScreen = SettingsScreen(this)
     private val pause = PauseScreen(this)
+    private val map = MapScreen(this, system)
     private var time = 0f
     private var lastFrameNanos = 0L
     private var flightTime = 0f
@@ -119,6 +123,18 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private var lockKind = LOCK_NONE
     private var lockIndex = -1
     private var aimKind = LOCK_NONE
+
+    // landing (L): mode, touchdown state and gear animation (legs 1.6 s, then doors 0.6 s)
+    private var landing = false
+    private var landed = false
+    private var landedBody = -1
+    private var gear = 0f
+    private var message: String? = null
+    private var messageTime = 0f
+    private val upV = Vec3()
+    private val fwdV = Vec3()
+    private val rightV = Vec3()
+    private val landRot = Quat()
     private var aimIndex = -1
     private var padZeroHold = false
 
@@ -139,6 +155,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private val tmp = Vec3()
     private val tmpQ = Quat()
     private val screenPt = Vec3()
+    private val tmp2 = Vec3()
     private val buf = TextBuf(64)
     private val menuShipRot = Quat()
 
@@ -208,6 +225,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         menu.layout(frame)
         settingsScreen.layout(frame)
         pause.layout(frame)
+        map.layout(frame)
         touch.layout(frame.w, frame.h, frame.u, frame.sl, frame.st, frame.sr, frame.sb)
     }
 
@@ -302,6 +320,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
                 "fa" -> toggleFlightAssist()
                 "boost" -> controls.boost = true
                 "camera" -> chase.mode = (chase.mode + 1) % 3
+                "map" -> if (state == STATE_FLIGHT) openMap()
+                "lock" -> if (state == STATE_FLIGHT) toggleLock()
+                "action" -> if (state == STATE_FLIGHT) doAction()
+                "teleport-low" -> if (state == STATE_FLIGHT) debugTeleportLow()
                 "livery" -> settings.livery = (settings.livery + 1) % Liveries.all.size
             }
         }
@@ -329,6 +351,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private fun onBack() {
         when {
             overlay == OVERLAY_SETTINGS -> closeSettings()
+            overlay == OVERLAY_MAP -> closeMap()
             overlay == OVERLAY_PAUSE -> resume()
             state == STATE_FLIGHT -> openPause()
             else -> exitApp()
@@ -342,6 +365,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         when {
             overlay == OVERLAY_SETTINGS -> settingsScreen.group.down(id, x, y)
             overlay == OVERLAY_PAUSE -> pause.group.down(id, x, y)
+            overlay == OVERLAY_MAP -> map.down(id, x, y)
             state == STATE_MENU -> {
                 if (!menu.group.down(id, x, y) && orbitPointer < 0) {
                     orbitPointer = id
@@ -356,6 +380,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     override fun onPointerMove(id: Int, x: Float, y: Float) {
         if (settingsScreen.group.move(id, x, y)) return
         if (pause.group.move(id, x, y)) return
+        if (overlay == OVERLAY_MAP) {
+            map.move(id, x, y)
+            return
+        }
         if (menu.group.move(id, x, y)) return
         if (id == orbitPointer) {
             val dx = x - orbitLastX
@@ -373,6 +401,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     override fun onPointerUp(id: Int, x: Float, y: Float, cancelled: Boolean) {
         settingsScreen.group.up(id, x, y, cancelled)
         pause.group.up(id, x, y, cancelled)
+        if (overlay == OVERLAY_MAP) map.up(id, x, y, cancelled)
         menu.group.up(id, x, y, cancelled)
         if (id == orbitPointer) {
             orbitPointer = -1
@@ -413,10 +442,32 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         }
     }
 
+    private fun openMap() {
+        overlay = OVERLAY_MAP
+        touch.releaseAll()
+        controls.clearAxes()
+        screenChanged()
+        map.open(ship.pos, lockKind, lockIndex)
+    }
+
+    override fun closeMap() {
+        if (overlay == OVERLAY_MAP) {
+            overlay = OVERLAY_NONE
+            screenChanged()
+        }
+    }
+
+    override fun lockFromMap(kind: Int, index: Int) {
+        lockKind = kind
+        lockIndex = index
+        haptic(Haptics.TICK)
+    }
+
     /** Drops input that belonged to the previous screen (held widgets, queued pad presses). */
     private fun screenChanged() {
         settingsScreen.group.releaseAll()
         pause.group.releaseAll()
+        map.releaseAll()
         menu.group.releaseAll()
         orbitPointer = -1
         gamepad.discardPresses()
@@ -474,6 +525,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         menu.dragHint = 0f
         lockKind = LOCK_NONE
         padZeroHold = false
+        landing = false
+        landed = false
+        gear = 0f
+        message = null
         screenChanged()
     }
 
@@ -541,12 +596,18 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
             if (touch.consumePause()) openPause()
             if (touch.consumeBoost() || gamepad.consumePress(GamepadState.A)) controls.boost = true
             if (touch.consumeLock() || gamepad.consumePress(GamepadState.DPAD_UP)) toggleLock()
+            if (touch.consumeMap() || gamepad.consumePress(GamepadState.SELECT)) openMap()
+            if (touch.consumeAction() || gamepad.consumePress(GamepadState.DPAD_DOWN)) doAction()
 
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+            updateGear(dt)
+            if (landed) holdLanded(dt)
+            val limit = if (landing) minOf(here.speedLimit, LANDING_SPEED) else here.speedLimit
             val steps = clamp(ceil(dt / MAX_STEP).toInt().toFloat(), 1f, 8f).toInt()
             val h = dt / steps
             for (i in 0 until steps) {
-                if (flight.step(ship, controls, h, here.speedLimit)) {
+                if (landed) break
+                if (flight.step(ship, controls, h, limit)) {
                     haptic(Haptics.HEAVY)
                     chase.addShake(0.8f)
                 }
@@ -556,6 +617,12 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
                 collideBodies(h)
             }
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+            if (landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
+                landing = false
+                if (!landed) showMessage("LANDING CANCELLED")
+            }
+            touch.actionLabel = actionLabel()
+            if (message != null && time - messageTime > 3f) message = null
             validateLock()
             if (touch.throttleUsed && touch.stickUsed) hints -= dt * 0.8f
             else if (flightTime > 25f) hints -= dt * 0.3f
@@ -701,6 +768,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         when (overlay) {
             OVERLAY_SETTINGS -> settingsScreen.draw(ui, frame, 1f)
             OVERLAY_PAUSE -> pause.draw(ui, frame, 1f)
+            OVERLAY_MAP -> map.draw(ui, 1f, ship.pos, ship.rot, time)
         }
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
@@ -744,6 +812,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
 
         drawSteeringArrow(ui, a)
         drawTargets(ui, a)
+        drawLandingHud(ui, a)
 
         // speed readout beside the throttle lever (keeps the centre clear for the ship)
         val g = touch.gauge
@@ -776,6 +845,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
             ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
+        }
+        val msg = message
+        if (msg != null) {
+            ui.textCentered(msg, cx, frame.h * 0.30f, 13f * u, withAlpha(Theme.LOCK, a), tracking = 0.25f, shadow = 0.8f)
         }
         if (proximity < 60f) {
             val blink = if ((time * 4f).toInt() % 2 == 0) 1f else 0.4f
@@ -810,6 +883,210 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         val hl = 11f * u
         ui.line(ex, ey, ex + (bx * 0.866f - by * 0.5f) * hl, ey + (bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
         ui.line(ex, ey, ex + (bx * 0.866f + by * 0.5f) * hl, ey + (-bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
+    }
+
+    // ================================================================== landing (L)
+
+    /** Solid bodies only: no landing on the star or the gas giant. */
+    private fun landable(i: Int): Boolean {
+        if (i < 0) return false
+        val t = system.bodies[i].type
+        return t != StarSystem.BodyType.STAR && t != StarSystem.BodyType.GAS
+    }
+
+    private fun actionLabel(): String = when {
+        landed -> "TAKE OFF"
+        landing -> "CANCEL"
+        here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> "LAND"
+        else -> ""
+    }
+
+    private fun doAction() {
+        when {
+            landed -> takeOff()
+            landing -> {
+                landing = false
+                showMessage("LANDING CANCELLED")
+            }
+            here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> {
+                landing = true
+                showMessage("LANDING MODE  ·  GEAR DOWN")
+            }
+            else -> haptic(Haptics.BUMP)
+        }
+    }
+
+    private fun takeOff() {
+        if (!landed) return
+        landed = false
+        val b = system.bodies[landedBody]
+        upV.set(
+            (ship.pos.x - b.pos.x).toFloat(), (ship.pos.y - b.pos.y).toFloat(), (ship.pos.z - b.pos.z).toFloat(),
+        ).normalize()
+        ship.vel.set(upV).scale(25f)
+        showMessage("LIFT OFF")
+        haptic(Haptics.TICK)
+    }
+
+    /** Gear follows the landing mode: legs extend over 1.6 s, then the doors close over 0.6 s. */
+    private fun updateGear(dt: Float) {
+        val target = if (landing || landed) 1f else 0f
+        gear = com.starwake.core.math.approach(gear, target, dt / GEAR_TIME)
+    }
+
+    /** While landed: stay on the surface, level out, and wait for a take-off input. */
+    private fun holdLanded(dt: Float) {
+        val b = system.bodies[landedBody]
+        val dx = ship.pos.x - b.pos.x
+        val dy = ship.pos.y - b.pos.y
+        val dz = ship.pos.z - b.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
+        val rest = b.radius + spec.collisionRadius
+        ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
+        ship.vel.zero()
+        ship.angVel.zero()
+        // settle level: keep the heading, align the ship's up with the surface normal
+        ship.rot.rotate(0f, 0f, -1f, fwdV)
+        fwdV.addScaled(upV, -fwdV.dot(upV))
+        if (fwdV.lengthSq() > 1e-6f) {
+            fwdV.normalize()
+            landRot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
+            ship.rot.slerp(ship.rot, landRot, expApproach(3f, dt))
+        }
+        if (touch.vertical > 0f || touch.throttle > 0.05f || controls.strafeY > 0.2f) takeOff()
+    }
+
+    private fun showMessage(m: String) {
+        message = m
+        messageTime = time
+    }
+
+    /** Harness hook: drop the ship 20 km above PLANET II's day side, nose level, in landing range. */
+    private fun debugTeleportLow() {
+        val b = system.bodies.first { it.name == "PLANET II" }
+        val d = sqrt(b.pos.x * b.pos.x + b.pos.y * b.pos.y + b.pos.z * b.pos.z)
+        val ux = -b.pos.x / d
+        val uy = -b.pos.y / d
+        val uz = -b.pos.z / d
+        val alt = b.radius + 20_000.0
+        ship.pos.set(b.pos.x + ux * alt, b.pos.y + uy * alt, b.pos.z + uz * alt)
+        upV.set(ux.toFloat(), uy.toFloat(), uz.toFloat())
+        // heading: any direction along the surface
+        fwdV.set(0f, 1f, 0f).addScaled(upV, -upV.y).normalize()
+        ship.rot.lookRotation(fwdV.x - upV.x * 0.25f, fwdV.y - upV.y * 0.25f, fwdV.z - upV.z * 0.25f, upV.x, upV.y, upV.z)
+        ship.vel.zero()
+        touch.throttle = 0.2f
+        chase.snapTo(ship)
+        dustOrigin.set(ship.pos)
+    }
+
+    /**
+     * Pitch ladder (±10° steps relative to the local horizon) with PITCH and ALT boxes. Shown only
+     * in landing mode, like the Roblox version's L landing.
+     */
+    private fun drawLandingHud(ui: UiRenderer, a: Float) {
+        if (!(landing || landed)) {
+            if (gear > 0f) drawGear(ui, a)
+            return
+        }
+        val i = if (landed) landedBody else here.nearestBody
+        if (i < 0) return
+        val b = system.bodies[i]
+        val u = frame.u
+        val cam = sceneFrame.camera
+        val dx = ship.pos.x - b.pos.x
+        val dy = ship.pos.y - b.pos.y
+        val dz = ship.pos.z - b.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
+        ship.rot.rotate(0f, 0f, -1f, fwdV)
+        val pitchDeg = kotlin.math.asin(clamp(fwdV.dot(upV), -1f, 1f)) * 57.29578f
+        // horizon heading and right vectors
+        fwdV.addScaled(upV, -fwdV.dot(upV))
+        if (fwdV.lengthSq() < 1e-6f) ship.rot.rotate(0f, 1f, 0f, fwdV).addScaled(upV, -fwdV.dot(upV))
+        fwdV.normalize()
+        rightV.cross(fwdV, upV).normalize()
+        val col = withAlpha(Theme.OK, a * 0.85f)
+        val dim = withAlpha(Theme.OK, a * 0.5f)
+        val half = 70f * u
+        // rungs every 10°, only near the current pitch
+        var deg = -90
+        while (deg <= 90) {
+            if (kotlin.math.abs(deg - pitchDeg) <= 32f) {
+                val rad = deg * 0.017453292f
+                val c = kotlin.math.cos(rad)
+                val sn = kotlin.math.sin(rad)
+                // a far point in that direction, camera relative (ship is near the camera)
+                val px = (fwdV.x * c + upV.x * sn) * 5000f + (ship.pos.x - cam.pos.x).toFloat()
+                val py = (fwdV.y * c + upV.y * sn) * 5000f + (ship.pos.y - cam.pos.y).toFloat()
+                val pz = (fwdV.z * c + upV.z * sn) * 5000f + (ship.pos.z - cam.pos.z).toFloat()
+                if (cam.project(px, py, pz, screenPt)) {
+                    val x0 = screenPt.x
+                    val y0 = screenPt.y
+                    if (cam.project(px + rightV.x * 500f, py + rightV.y * 500f, pz + rightV.z * 500f, tmp2)) {
+                        var ex = tmp2.x - x0
+                        var ey = tmp2.y - y0
+                        val el = sqrt(ex * ex + ey * ey).coerceAtLeast(1e-3f)
+                        ex /= el; ey /= el
+                        val gap = 26f * u
+                        val wdt = if (deg == 0) 1.8f * u else 1.2f * u
+                        val cc = if (deg == 0) col else dim
+                        ui.line(x0 - ex * half, y0 - ey * half, x0 - ex * gap, y0 - ey * gap, wdt, cc)
+                        ui.line(x0 + ex * gap, y0 + ey * gap, x0 + ex * half, y0 + ey * half, wdt, cc)
+                        if (deg != 0) {
+                            buf.clear().append(deg)
+                            ui.text(buf, x0 + ex * (half + 14f * u), y0 + ey * (half + 14f * u) + 4f * u, 9f * u, dim, UiRenderer.CENTER, face = FontData.MONO)
+                        }
+                    }
+                }
+            }
+            deg += 10
+        }
+        // PITCH and ALT boxes either side of the centre
+        val cx = frame.w * 0.5f
+        val cy = frame.h * 0.5f
+        val bw = 74f * u
+        val bh = 36f * u
+        val lx = cx - 150f * u - bw
+        val rx = cx + 150f * u
+        for (k in 0..1) {
+            val x = if (k == 0) lx else rx
+            ui.rect(x, cy - bh * 0.5f, bw, bh, withAlpha(Theme.PANEL, a * 0.8f), -5f * u)
+            ui.rect(x, cy - bh * 0.5f, bw, bh, col, -5f * u, 1.2f * u)
+            ui.text(if (k == 0) "PITCH" else "ALT", x + bw * 0.5f, cy - bh * 0.5f - 5f * u, 8.5f * u, col, UiRenderer.CENTER, tracking = 0.2f, shadow = 0.6f)
+            buf.clear()
+            if (k == 0) {
+                buf.append(pitchDeg, 0).append('°')
+                ui.textCentered(buf, x + bw * 0.5f, cy, 13f * u, col, face = FontData.MONO)
+            } else {
+                val alt = maxOf(0.0, d - b.radius - spec.collisionRadius)
+                val unit = MapScreen.distanceText(buf, alt)
+                val tw = ui.textWidth(buf, 13f * u, face = FontData.MONO)
+                ui.textCentered(buf, x + bw * 0.5f - 6f * u, cy, 13f * u, col, face = FontData.MONO)
+                ui.text(unit, x + bw * 0.5f - 6f * u + tw * 0.5f + 3f * u, cy + 4f * u, 8f * u, col)
+            }
+        }
+        // vertical speed under the ALT box
+        val vs = ship.vel.dot(upV)
+        buf.clear().append(vs, 1).append(" M/S")
+        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs < -TOUCHDOWN_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
+        drawGear(ui, a)
+    }
+
+    private fun drawGear(ui: UiRenderer, a: Float) {
+        val u = frame.u
+        val label = when {
+            gear >= 1f -> if (landed) "LANDED" else "GEAR DOWN"
+            gear * GEAR_TIME < GEAR_LEGS -> "GEAR · LEGS"
+            else -> "GEAR · DOORS"
+        }
+        val x = frame.w * 0.5f
+        val y = frame.h - frame.sb - 30f * u
+        val col = withAlpha(if (gear >= 1f) Theme.OK else Theme.WARN, a)
+        ui.textCentered(label, x, y - 12f * u, 10f * u, col, tracking = 0.25f, shadow = 0.6f)
+        ui.rect(x - 50f * u, y, 100f * u, 4f * u, withAlpha(Theme.PANEL, a), 2f * u)
+        ui.rect(x - 50f * u, y, 100f * u * gear, 4f * u, col, 2f * u)
     }
 
     // ================================================================== targets, lock and markers
@@ -1010,6 +1287,31 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         if (i < 0) return
         val b = system.bodies[i]
         if (here.altitude > spec.collisionRadius * 4 + ship.speed * dt * 2) return
+        if (landing && landable(i)) {
+            // touchdown: slow, gear down and roughly level -> park on the surface
+            val dx = ship.pos.x - b.pos.x
+            val dy = ship.pos.y - b.pos.y
+            val dz = ship.pos.z - b.pos.z
+            val d = sqrt(dx * dx + dy * dy + dz * dz)
+            if (d - b.radius < spec.collisionRadius + 0.5) {
+                upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
+                val radial = ship.vel.dot(upV)
+                ship.rot.rotate(0f, 1f, 0f, tmp)
+                val level = tmp.dot(upV)
+                if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > 0.8f && ship.speed < 40f) {
+                    landed = true
+                    landedBody = i
+                    ship.vel.zero()
+                    ship.angVel.zero()
+                    touch.throttle = 0f
+                    haptic(Haptics.BUMP)
+                    showMessage("TOUCHDOWN  ·  " + b.name)
+                    return
+                } else if (radial < -TOUCHDOWN_SPEED || gear < 1f) {
+                    showMessage(if (gear < 1f) "GEAR NOT DOWN" else "HARD LANDING")
+                }
+            }
+        }
         val impact = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius.toFloat())
         if (impact > 2f && bumpCooldown <= 0f) {
             bumpCooldown = 0.25f
@@ -1098,6 +1400,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         private const val OVERLAY_NONE = 0
         private const val OVERLAY_SETTINGS = 1
         private const val OVERLAY_PAUSE = 2
+        private const val OVERLAY_MAP = 3
         private const val ACTION_NONE = 0
         private const val ACTION_LAUNCH = 1
         private const val ACTION_MENU = 2
@@ -1112,5 +1415,9 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         private const val LOCK_BODY = 3
         private const val FIELD_RANGE = 60_000.0
         private const val DUST_VISUAL_SPEED = 400f
+        private const val LANDING_SPEED = 200f
+        private const val TOUCHDOWN_SPEED = 8f
+        private const val GEAR_LEGS = 1.6f
+        private const val GEAR_TIME = 2.2f
     }
 }

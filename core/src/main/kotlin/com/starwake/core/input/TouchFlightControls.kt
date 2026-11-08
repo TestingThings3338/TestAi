@@ -67,6 +67,11 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     val camBtn = Rect()
     val pauseBtn = Rect()
     val lockBtn = Rect()
+    val mapBtn = Rect()
+
+    /** Contextual action (LAND / DOCK / TAKE OFF); hidden when [actionLabel] is empty. */
+    val actionBtn = Rect()
+    var actionLabel = ""
     val upBtn = Rect()
     val downBtn = Rect()
     private var stickRadius = 1f
@@ -101,6 +106,10 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     private var camId = -1
     private var pauseId = -1
     private var lockId = -1
+    private var mapId = -1
+    private var actionId = -1
+    private var actionEdge = false
+    private var mapEdge = false
     private var upId = -1
     private var downId = -1
     private var time = 0f
@@ -124,6 +133,8 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         val fr = 23f * u
         faBtn.set(boostBtn.cx - 92f * u - fr, height * 0.26f - fr, 2 * fr, 2 * fr)
         lockBtn.set(camBtn.x - 10f * u - 62f * u, st + 12f * u, 62f * u, 38f * u)
+        mapBtn.set(lockBtn.x - 10f * u - 56f * u, st + 12f * u, 56f * u, 38f * u)
+        actionBtn.set(boostBtn.cx - 46f * u, height * 0.22f - 17f * u, 92f * u, 34f * u)
         val vr = 21f * u
         val vx = gauge.x + gauge.w + 60f * u
         upBtn.set(vx - vr, gauge.y + 4f * u, 2 * vr, 2 * vr)
@@ -131,7 +142,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         stickRestX = width - right - 150f * u
         stickRestY = height - sb - 110f * u
         if (mirror) {
-            for (r in arrayOf(gauge, pauseBtn, camBtn, boostBtn, faBtn, lockBtn, upBtn, downBtn)) r.x = width - r.x - r.w
+            for (r in arrayOf(gauge, pauseBtn, camBtn, boostBtn, faBtn, lockBtn, mapBtn, actionBtn, upBtn, downBtn)) r.x = width - r.x - r.w
             stickRestX = width - stickRestX
         }
     }
@@ -141,6 +152,8 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     fun consumeCam() = camEdge.also { camEdge = false }
     fun consumePause() = pauseEdge.also { pauseEdge = false }
     fun consumeLock() = lockEdge.also { lockEdge = false }
+    fun consumeMap() = mapEdge.also { mapEdge = false }
+    fun consumeAction() = actionEdge.also { actionEdge = false }
 
     private fun inThrottleZone(x: Float) = if (mirror) x > w - zoneSplit else x < zoneSplit
 
@@ -164,6 +177,12 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             }
             lockId < 0 && hit(lockBtn, x, y, slop) -> {
                 lockId = id; lockEdge = true; host.haptic(Haptics.TAP)
+            }
+            mapId < 0 && hit(mapBtn, x, y, slop) -> {
+                mapId = id; mapEdge = true; host.haptic(Haptics.TAP)
+            }
+            actionId < 0 && actionLabel.isNotEmpty() && hit(actionBtn, x, y, slop) -> {
+                actionId = id; actionEdge = true; host.haptic(Haptics.TAP)
             }
             upId < 0 && hitCircle(upBtn, x, y, slop * 0.5f) -> {
                 upId = id; host.haptic(Haptics.TICK)
@@ -223,7 +242,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 val dx = (x - thrGrabX) / (48f * u)
                 rudder = deadZone(clamp(dx, -1f, 1f), 0.18f)
             }
-            else -> return id == boostId || id == faId || id == camId || id == pauseId || id == lockId || id == upId || id == downId
+            else -> return id == boostId || id == faId || id == camId || id == pauseId || id == lockId || id == mapId || id == actionId || id == upId || id == downId
         }
         return true
     }
@@ -252,6 +271,8 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             faId -> faId = -1
             camId -> camId = -1
             lockId -> lockId = -1
+            mapId -> mapId = -1
+            actionId -> actionId = -1
             upId -> upId = -1
             downId -> downId = -1
             pauseId -> {
@@ -266,6 +287,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     fun releaseAll() {
         stickId = -1; thrId = -1; boostId = -1; faId = -1; camId = -1; pauseId = -1
         lockId = -1; upId = -1; downId = -1; vertical = 0f; lockEdge = false
+        mapId = -1; mapEdge = false; actionId = -1; actionEdge = false
         stickOutX = 0f; stickOutY = 0f; rudder = 0f; boostHeld = false
         boostEdge = false; faEdge = false; camEdge = false; pauseEdge = false
     }
@@ -403,6 +425,17 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         ui.rect(lockBtn.x, lockBtn.y, lockBtn.w, lockBtn.h, withAlpha(if (locked) Theme.LOCK else Theme.PANEL, a * if (locked) 0.25f else 0.8f), -6f * u)
         ui.rect(lockBtn.x, lockBtn.y, lockBtn.w, lockBtn.h, withAlpha(lockCol, a * 0.6f), -6f * u, 1.2f * u)
         ui.textCentered("LOCK", lockBtn.cx, lockBtn.cy, 11f * u, withAlpha(if (locked) Theme.LOCK else Theme.TEXT, a), tracking = 0.12f)
+
+        ui.rect(mapBtn.x, mapBtn.y, mapBtn.w, mapBtn.h, withAlpha(Theme.PANEL, a * 0.8f), -6f * u)
+        ui.rect(mapBtn.x, mapBtn.y, mapBtn.w, mapBtn.h, withAlpha(Theme.ACCENT, a * 0.5f), -6f * u, 1.2f * u)
+        ui.textCentered("MAP", mapBtn.cx, mapBtn.cy, 11f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f)
+
+        if (actionLabel.isNotEmpty()) {
+            val pulse = 0.75f + 0.25f * kotlin.math.sin(time * 4f)
+            ui.rect(actionBtn.x, actionBtn.y, actionBtn.w, actionBtn.h, withAlpha(Theme.LOCK, a * (if (actionId >= 0) 0.9f else 0.25f * pulse)), actionBtn.h * 0.5f)
+            ui.rect(actionBtn.x, actionBtn.y, actionBtn.w, actionBtn.h, withAlpha(Theme.LOCK, a), actionBtn.h * 0.5f, 1.5f * u)
+            ui.textCentered(actionLabel, actionBtn.cx, actionBtn.cy, 11.5f * u, withAlpha(if (actionId >= 0) Theme.DARK else Theme.LOCK, a), tracking = 0.15f, weight = 0.03f)
+        }
 
         for (b in 0..1) {
             val r = if (b == 0) upBtn else downBtn
