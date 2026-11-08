@@ -65,7 +65,7 @@ object Scenarios {
         "flight" to gameScenario("flight", "Launch, throttle up with the left thumb, steer with the right stick") {
             cmd("launch")
             frames(60)
-            shot("flight-1") // just launched, throttle at rest
+            shot("flight-1") // just launched (the game starts flights at 30% throttle)
 
             throttleUp(0.35f, 30) // left thumb: lever up by 0.35 h, released
             frames(30)
