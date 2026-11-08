@@ -46,6 +46,20 @@ class SceneFrame {
 
     /** Speed-line colour: white in open space, blue in a gravity well, red for danger/heat. */
     val dustColor = Vec3(0.66f, 0.72f, 0.80f)
+
+    /** Dust is laid out around this point (moves at a capped "visual" speed, see Game). */
+    val dustOrigin = com.starwake.core.math.DVec3()
+
+    /** Direction to the star from the viewer, and how much sunlight gets through (eclipses). */
+    val sunDir = Vec3().set(Environment.sunDir)
+    var sunVisibility = 1f
+
+    /** Light reflected from the nearest planet. */
+    val fillDir = Vec3().set(Environment.planetDir)
+    val fillColor = floatArrayOf(Environment.fillColor[0], Environment.fillColor[1], Environment.fillColor[2])
+
+    /** Whether the asteroid field is close enough to draw. */
+    var drawField = true
     var exposure = 1f
 }
 
@@ -284,6 +298,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     // ------------------------------------------------------------------ near scene
 
     private fun drawAsteroids(f: SceneFrame) {
+        if (!f.drawField) return
         val c = f.camera
         val field = content.field
         field.origin.relativeTo(c.pos, rel)
@@ -310,11 +325,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         dust.use()
         gl.uniformMatrix4fv(dust.u("u_viewProj"), c.viewProj.m, 0)
         val b = DustField.BOX.toDouble()
+        val o = f.dustOrigin
         gl.uniform3f(
             dust.u("u_camMod"),
-            (((c.pos.x % b) + b) % b).toFloat(),
-            (((c.pos.y % b) + b) % b).toFloat(),
-            (((c.pos.z % b) + b) % b).toFloat(),
+            (((o.x % b) + b) % b).toFloat(),
+            (((o.y % b) + b) % b).toFloat(),
+            (((o.z % b) + b) % b).toFloat(),
         )
         val v = f.dustVelocity
         gl.uniform3f(dust.u("u_streak"), -v.x * 0.045f, -v.y * 0.045f, -v.z * 0.045f)
@@ -535,13 +551,14 @@ private class LitProgram(private val gl: Gl, instanced: Boolean) {
         gl.uniform4fv(uPalette, 10, palette, 0)
         gl.uniform4fv(uParams, 10, params, 0)
         gl.uniform1f(uTime, f.time)
-        val s = Environment.sunDir
+        val s = f.sunDir
         gl.uniform3f(uSunDir, s.x, s.y, s.z)
         val sc = Environment.sunColor
-        gl.uniform3f(uSunColor, sc[0], sc[1], sc[2])
-        val p = Environment.planetDir
+        val v = f.sunVisibility
+        gl.uniform3f(uSunColor, sc[0] * v, sc[1] * v, sc[2] * v)
+        val p = f.fillDir
         gl.uniform3f(uFillDir, p.x, p.y, p.z)
-        val fc = Environment.fillColor
+        val fc = f.fillColor
         gl.uniform3f(uFillColor, fc[0], fc[1], fc[2])
         val a = Environment.ambient
         gl.uniform3f(uAmbient, a[0], a[1], a[2])

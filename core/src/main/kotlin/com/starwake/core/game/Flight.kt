@@ -5,6 +5,7 @@ import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.approach
 import com.starwake.core.math.clamp
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /** Performance envelope of a ship hull. Speeds in m/s, rates in rad/s, accelerations per second. */
@@ -110,9 +111,18 @@ class FlightModel(var spec: ShipSpec) {
     private val local = Vec3()
     private val tmp = Vec3()
 
-    /** Returns true on the step where a boost was triggered. */
-    fun step(s: ShipState, c: ControlInput, dt: Float): Boolean {
+    /**
+     * Advances the ship by [dt]. [limit] is the dynamic speed limit for the current location
+     * (≥ the ship's normal top speed; up to 3 Mm/s far from planets and stations). Throttle maps
+     * to a fraction of it, and acceleration, braking and drift correction scale with it, so the
+     * ship covers interplanetary distances yet slows smoothly when approaching a body.
+     * Returns true on the step where a boost was triggered.
+     */
+    fun step(s: ShipState, c: ControlInput, dt: Float, limit: Float = spec.maxSpeed): Boolean {
         val sp = spec
+        val vmax = maxOf(limit, sp.maxSpeed)
+        // boost: the usual 400 m/s locally, +25 % on top of the dynamic limit in deep space
+        val boostTop = maxOf(sp.boostSpeed, vmax * 1.25f)
         var boostStarted = false
         if (c.boost && s.boostTime <= 0f && s.capacitor >= sp.boostCost) {
             s.boostTime = sp.boostDuration
@@ -144,17 +154,22 @@ class FlightModel(var spec: ShipSpec) {
         var thrust: Float
         if (s.flightAssist) {
             val targetZ = when {
-                boosting -> -sp.boostSpeed
-                throttle >= 0f -> -throttle * sp.maxSpeed
+                boosting -> -boostTop
+                throttle >= 0f -> -throttle * vmax
                 else -> -throttle * sp.maxReverse
             }
-            val fwdAccel = sp.accelForward * if (boosting) sp.boostAccelMultiplier else 1f
+            // engines scale with the regime: ~4 s to reach any limit, braking proportional to speed
+            val fwdAccel = maxOf(sp.accelForward, vmax * 0.25f) * if (boosting) sp.boostAccelMultiplier else 1f
+            // above manoeuvring speeds braking becomes proportional to speed (exponential slow-down)
+            val fast = maxOf(0f, abs(local.z) - sp.boostSpeed)
+            val brake = maxOf(sp.accelReverse, fast * 0.9f)
             val dz = targetZ - local.z
             // dz < 0: need more forward speed (main engines); dz > 0: braking (retro thrusters)
-            val limitZ = (if (dz < 0f) fwdAccel else sp.accelReverse) * dt
+            val limitZ = (if (dz < 0f) fwdAccel else brake) * dt
             local.z += clamp(dz, -limitZ, limitZ)
-            thrust = if (dz < -0.5f) (-dz / 40f).coerceAtMost(1f) else 0.15f
-            val lat = sp.assistLateral * dt
+            thrust = if (dz < -0.5f) (-dz / maxOf(40f, vmax * 0.2f)).coerceAtMost(1f) else 0.15f
+            // drift correction gets stronger with speed so the ship follows its nose at Mm/s
+            val lat = maxOf(sp.assistLateral, fast * 2.5f) * dt
             local.x = approach(local.x, clamp(c.strafeX, -1f, 1f) * sp.maxStrafeSpeed, lat)
             local.y = approach(local.y, clamp(c.strafeY, -1f, 1f) * sp.maxStrafeSpeed, lat)
         } else {
@@ -171,8 +186,12 @@ class FlightModel(var spec: ShipSpec) {
         if (boosting) thrust = 1.6f
         s.rot.rotate(local, s.vel)
 
-        // hard speed limit; after a boost the limit bleeds back down to max speed smoothly
-        s.speedCap = if (boosting) sp.boostSpeed else maxOf(sp.maxSpeed, s.speedCap - sp.accelReverse * 1.5f * dt)
+        // hard speed limit; after a boost (or when the dynamic limit drops) it bleeds down smoothly
+        s.speedCap = if (boosting) {
+            boostTop
+        } else {
+            maxOf(vmax, s.speedCap - maxOf(sp.accelReverse * 1.5f, s.speedCap * 0.9f) * dt)
+        }
         val speed = s.vel.length()
         if (speed > s.speedCap) s.vel.scale(s.speedCap / speed)
         s.speed = s.vel.length()

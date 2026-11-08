@@ -9,6 +9,7 @@ import com.starwake.core.game.FlightModel
 import com.starwake.core.game.OrbitCamera
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
+import com.starwake.core.game.StarSystem
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
@@ -23,7 +24,6 @@ import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.clamp
-import com.starwake.core.math.deadZone
 import com.starwake.core.math.expApproach
 import com.starwake.core.math.withAlpha
 import com.starwake.core.ui.Frame
@@ -94,6 +94,9 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
 
     // ------------------------------------------------------------------ simulation
     private val spec = ShipSpec.VARROW
+    private val system = StarSystem()
+    private val here = StarSystem.Locality()
+    private val dustOrigin = com.starwake.core.math.DVec3()
     private val ship = ShipState()
     private val menuShip = ShipState()
     private val flight = FlightModel(spec)
@@ -113,7 +116,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private var settingsDirty = false
     private var activePlay = -1 // last value sent to Platform.setActivePlay (-1 = never)
     private var appliedQuality = -1
+    private var lockKind = LOCK_NONE
     private var lockIndex = -1
+    private var aimKind = LOCK_NONE
+    private var aimIndex = -1
     private var padZeroHold = false
 
     // menu orbit drag
@@ -141,7 +147,11 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         val roll = Quat().setAxisAngle(0f, 0f, 1f, 0.3f)
         val pitch = Quat().setAxisAngle(1f, 0f, 0f, 0.06f)
         menuShipRot.mul(menuShipRot, pitch).mul(menuShipRot, roll)
-        menuShip.pos.set(AsteroidField.SHOWCASE_X.toDouble(), AsteroidField.SHOWCASE_Y.toDouble(), AsteroidField.SHOWCASE_Z.toDouble())
+        menuShip.pos.set(
+            system.home.x + AsteroidField.SHOWCASE_X,
+            system.home.y + AsteroidField.SHOWCASE_Y,
+            system.home.z + AsteroidField.SHOWCASE_Z,
+        )
         menuShip.rot.set(menuShipRot)
         menuShip.engineOutput = 0.15f
         orbit.yaw = 0.18f
@@ -158,6 +168,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         val c = content ?: Content(
             String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8),
             platform.readAsset("font/ui.sdf"),
+            system,
         ).also { content = it }
         if (savedSettings == null && appliedQuality < 0) pickDefaultQuality(gl.getString(GL.RENDERER) ?: "")
         c.field.setQuality(settings.quality)
@@ -263,7 +274,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
                 scene = SceneRenderer(gl, c, q)
             }
             appliedQuality = q
-            if (lockIndex >= 0 && !c.field.active[lockIndex]) lockIndex = -1
+            if (lockKind == LOCK_ASTEROID && !c.field.active[lockIndex]) lockKind = LOCK_NONE
         }
 
         handleSystemEvents()
@@ -449,7 +460,8 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         state = STATE_FLIGHT
         overlay = OVERLAY_NONE
         ship.reset()
-        ship.pos.set(0.0, 0.0, 0.0)
+        ship.pos.set(system.home)
+        dustOrigin.set(system.home)
         touch.releaseAll()
         touch.throttle = 0.3f
         controls.clearAxes()
@@ -460,7 +472,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         flightTime = 0f
         hints = 1f
         menu.dragHint = 0f
-        lockIndex = -1
+        lockKind = LOCK_NONE
         padZeroHold = false
         screenChanged()
     }
@@ -471,7 +483,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         touch.releaseAll()
         controls.clearAxes()
         orbit.idle = 10f
-        lockIndex = -1
+        lockKind = LOCK_NONE
         screenChanged()
     }
 
@@ -499,7 +511,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
 
     private fun updateMenu(dt: Float) {
         orbit.update(dt)
-        menuShip.pos.y = AsteroidField.SHOWCASE_Y + sin(time * 0.7f) * 0.35
+        menuShip.pos.y = system.home.y + AsteroidField.SHOWCASE_Y + sin(time * 0.7f) * 0.35
         tmpQ.setAxisAngle(0f, 0f, 1f, sin(time * 0.5f) * 0.03f)
         menuShip.rot.mul(menuShipRot, tmpQ)
         menuShip.engineOutput = 0.12f + 0.03f * sin(time * 3f)
@@ -511,7 +523,9 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         cam.shiftY = 0.04f
         sceneFrame.dustVelocity.zero()
         sceneFrame.dustIntensity = 0.35f
+        sceneFrame.dustOrigin.set(cam.pos)
         sceneFrame.ship = menuShip
+        updateLighting(menuShip.pos)
     }
 
     private fun updateFlight(dt: Float) {
@@ -528,17 +542,20 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
             if (touch.consumeBoost() || gamepad.consumePress(GamepadState.A)) controls.boost = true
             if (touch.consumeLock() || gamepad.consumePress(GamepadState.DPAD_UP)) toggleLock()
 
+            system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
             val steps = clamp(ceil(dt / MAX_STEP).toInt().toFloat(), 1f, 8f).toInt()
             val h = dt / steps
             for (i in 0 until steps) {
-                if (flight.step(ship, controls, h)) {
+                if (flight.step(ship, controls, h, here.speedLimit)) {
                     haptic(Haptics.HEAVY)
                     chase.addShake(0.8f)
                 }
                 controls.boost = false
                 // collide every substep so fast ships can't tunnel through small rocks
                 collide(h)
+                collideBodies(h)
             }
+            system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
             validateLock()
             if (touch.throttleUsed && touch.stickUsed) hints -= dt * 0.8f
             else if (flightTime > 25f) hints -= dt * 0.3f
@@ -554,15 +571,31 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         cam.fovY = (if (chase.mode == 2) 60f else 52f + speedFrac * 3f + chase.fovBoost) * DEG2RAD
         cam.shiftX = 0f
         cam.shiftY = 0f
-        sceneFrame.dustVelocity.set(ship.vel)
+        // speed lines move at a capped "visual" speed so they stay readable at Mm/s
+        val sp = ship.speed
+        val visScale = if (sp > DUST_VISUAL_SPEED) DUST_VISUAL_SPEED / sp else 1f
+        tmp.set(ship.vel).scale(visScale)
+        if (!paused) dustOrigin.addScaled(tmp, dt.toDouble())
+        sceneFrame.dustOrigin.set(dustOrigin)
+        // longer streaks the faster you go (logarithmic above the visual cap)
+        val streak = if (sp > DUST_VISUAL_SPEED) 1f + 0.6f * kotlin.math.log10(sp / DUST_VISUAL_SPEED) else 1f
+        sceneFrame.dustVelocity.set(tmp).scale(streak)
         sceneFrame.dustIntensity = 0.6f
-        // speed lines: white in open space, red for danger (blue is reserved for gravity wells)
-        val danger = proximity < 80f
+        // speed lines: white in open space, blue in a gravity well, red for danger or heat
+        val zone = here.zone
+        val star = here.nearestBody == 0
+        val danger = proximity < 80f || (star && here.altitude < system.bodies[0].radius)
+        val well = zone == StarSystem.Zone.GRAVITY_WELL || zone == StarSystem.Zone.LOW_ALTITUDE
         val dc = sceneFrame.dustColor
         val k = expApproach(4f, dt)
-        dc.x += ((if (danger) 1.0f else 0.66f) - dc.x) * k
-        dc.y += ((if (danger) 0.30f else 0.72f) - dc.y) * k
-        dc.z += ((if (danger) 0.26f else 0.80f) - dc.z) * k
+        val tr = if (danger) 1.0f else if (well) 0.40f else 0.66f
+        val tg = if (danger) 0.30f else if (well) 0.62f else 0.72f
+        val tb = if (danger) 0.26f else if (well) 1.0f else 0.80f
+        dc.x += (tr - dc.x) * k
+        dc.y += (tg - dc.y) * k
+        dc.z += (tb - dc.z) * k
+        sceneFrame.drawField = nearField(cam.pos)
+        updateLighting(ship.pos)
         sceneFrame.ship = if (chase.mode == 2) null else ship
     }
 
@@ -612,6 +645,10 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
     private fun collide(dt: Float) {
         val field = content?.field ?: return
         bumpCooldown -= dt
+        if (!nearField(ship.pos)) {
+            proximity = Float.MAX_VALUE
+            return
+        }
         var nearest = Float.MAX_VALUE
         val ox = field.origin.x
         val oy = field.origin.y
@@ -706,7 +743,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         }
 
         drawSteeringArrow(ui, a)
-        drawLock(ui, a)
+        drawTargets(ui, a)
 
         // speed readout beside the throttle lever (keeps the centre clear for the ship)
         val g = touch.gauge
@@ -728,8 +765,13 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         ui.rect(bx + bw * spec.boostCost, sy - 6f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
         // zone, flight-assist and proximity warnings (top centre)
         val cx = frame.w * 0.5f
-        ui.textCentered("OPEN SPACE", cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
+        ui.textCentered(here.zone.label, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         var warnY = frame.st + 52f * u
+        if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
+            val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
+            ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+            warnY += 20f * u
+        }
         if (!ship.flightAssist) {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
             ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
@@ -742,7 +784,7 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
 
         touch.draw(
             ui, a, ship.forwardSpeed / spec.maxSpeed, ship.flightAssist,
-            ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, lockIndex >= 0,
+            ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, lockKind != LOCK_NONE,
         )
     }
 
@@ -770,85 +812,239 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         ui.line(ex, ey, ex + (bx * 0.866f + by * 0.5f) * hl, ey + (-bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
     }
 
-    /** Locks the asteroid closest to the nose (within 18° and 8 km), or releases the lock. */
+    // ================================================================== targets, lock and markers
+
+    /**
+     * Finds the target closest to the nose: asteroids (when near the field), stations and bodies.
+     * Writes [aimKind]/[aimIndex]; the score is the angle off the nose minus the target's
+     * angular radius, so big bodies are easy to pick.
+     */
+    private fun findAimed(maxAngleCos: Float) {
+        aimKind = LOCK_NONE
+        aimIndex = -1
+        ship.rot.rotate(0f, 0f, -1f, tmp)
+        var bestScore = Float.MAX_VALUE
+        val field = content?.field
+        if (field != null && nearField(ship.pos)) {
+            for (i in 0 until field.total) {
+                if (!field.active[i]) continue
+                val dx = field.origin.x + field.px[i] - ship.pos.x
+                val dy = field.origin.y + field.py[i] - ship.pos.y
+                val dz = field.origin.z + field.pz[i] - ship.pos.z
+                val score = aimScore(dx, dy, dz, field.radius[i].toDouble(), maxAngleCos, LOCK_RANGE.toDouble())
+                if (score < bestScore) {
+                    bestScore = score; aimKind = LOCK_ASTEROID; aimIndex = i
+                }
+            }
+        }
+        for (i in system.stations.indices) {
+            val st = system.stations[i]
+            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, Double.MAX_VALUE)
+            if (score < bestScore) {
+                bestScore = score; aimKind = LOCK_STATION; aimIndex = i
+            }
+        }
+        for (i in system.bodies.indices) {
+            val b = system.bodies[i]
+            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, Double.MAX_VALUE)
+            if (score < bestScore) {
+                bestScore = score; aimKind = LOCK_BODY; aimIndex = i
+            }
+        }
+    }
+
+    /** Angle (radians) between the nose ([tmp]) and the target's edge; MAX_VALUE if not eligible. */
+    private fun aimScore(dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, range: Double): Float {
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        if (d < 1.0 || d - radius > range) return Float.MAX_VALUE
+        val cos = ((dx * tmp.x + dy * tmp.y + dz * tmp.z) / d).toFloat()
+        val angle = kotlin.math.acos(clamp(cos, -1f, 1f))
+        val angRadius = kotlin.math.asin(minOf(1.0, radius / d)).toFloat()
+        val off = maxOf(0f, angle - angRadius)
+        if (kotlin.math.cos(off) < maxAngleCos) return Float.MAX_VALUE
+        // tiny distance tie-breaker so the nearer of two overlapping targets wins
+        return off + (d * 1e-12).toFloat()
+    }
+
     private fun toggleLock() {
-        if (lockIndex >= 0) {
-            lockIndex = -1
+        if (lockKind != LOCK_NONE) {
+            lockKind = LOCK_NONE
             haptic(Haptics.TICK)
             return
         }
-        val field = content?.field ?: return
-        ship.rot.rotate(0f, 0f, -1f, tmp)
-        val ox = field.origin.x - ship.pos.x
-        val oy = field.origin.y - ship.pos.y
-        val oz = field.origin.z - ship.pos.z
+        findAimed(LOCK_CONE_COS)
+        lockKind = aimKind
+        lockIndex = aimIndex
+        haptic(if (lockKind != LOCK_NONE) Haptics.TICK else Haptics.BUMP)
+    }
+
+    private fun validateLock() {
+        if (lockKind == LOCK_ASTEROID) {
+            val field = content?.field ?: return
+            if (!field.active[lockIndex] || targetDistance(LOCK_ASTEROID, lockIndex) > LOCK_RANGE * 1.5f) lockKind = LOCK_NONE
+        }
+    }
+
+    /** Target centre relative to [origin] into [out] (camera-relative when origin = camera). */
+    private fun targetRel(kind: Int, i: Int, origin: com.starwake.core.math.DVec3, out: Vec3) {
+        when (kind) {
+            LOCK_ASTEROID -> {
+                val f = content!!.field
+                out.set(
+                    (f.origin.x + f.px[i] - origin.x).toFloat(),
+                    (f.origin.y + f.py[i] - origin.y).toFloat(),
+                    (f.origin.z + f.pz[i] - origin.z).toFloat(),
+                )
+            }
+            LOCK_STATION -> system.stations[i].pos.relativeTo(origin, out)
+            else -> system.bodies[i].pos.relativeTo(origin, out)
+        }
+    }
+
+    private fun targetRadius(kind: Int, i: Int): Double = when (kind) {
+        LOCK_ASTEROID -> content!!.field.collisionRadius[i].toDouble()
+        LOCK_STATION -> system.stations[i].radius
+        else -> system.bodies[i].radius
+    }
+
+    /** Distance from the ship to the target's surface, in metres (double precision). */
+    private fun targetDistance(kind: Int, i: Int): Double {
+        val dx: Double
+        val dy: Double
+        val dz: Double
+        when (kind) {
+            LOCK_ASTEROID -> {
+                val f = content!!.field
+                dx = f.origin.x + f.px[i] - ship.pos.x; dy = f.origin.y + f.py[i] - ship.pos.y; dz = f.origin.z + f.pz[i] - ship.pos.z
+            }
+            LOCK_STATION -> {
+                val p = system.stations[i].pos
+                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
+            }
+            else -> {
+                val p = system.bodies[i].pos
+                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
+            }
+        }
+        return maxOf(0.0, sqrt(dx * dx + dy * dy + dz * dz) - targetRadius(kind, i))
+    }
+
+    private fun targetName(kind: Int, i: Int): String = when (kind) {
+        LOCK_STATION -> system.stations[i].name
+        LOCK_BODY -> system.bodies[i].name
+        else -> "ASTEROID"
+    }
+
+    /**
+     * Uppercase markers on stations and bodies; amber brackets on the locked target. Distance is
+     * shown only for the locked target, or the one the nose is aimed at when nothing is locked.
+     */
+    private fun drawTargets(ui: UiRenderer, a: Float) {
+        findAimed(AIM_CONE_COS)
+        val showKind = if (lockKind != LOCK_NONE) lockKind else aimKind
+        val showIndex = if (lockKind != LOCK_NONE) lockIndex else aimIndex
+        for (i in system.stations.indices) drawMarker(ui, a, LOCK_STATION, i, showKind, showIndex)
+        for (i in system.bodies.indices) drawMarker(ui, a, LOCK_BODY, i, showKind, showIndex)
+        if (lockKind == LOCK_ASTEROID) drawMarker(ui, a, LOCK_ASTEROID, lockIndex, showKind, showIndex)
+    }
+
+    private fun drawMarker(ui: UiRenderer, a: Float, kind: Int, i: Int, showKind: Int, showIndex: Int) {
+        val cam = sceneFrame.camera
+        targetRel(kind, i, cam.pos, tmp)
+        if (!cam.project(tmp.x, tmp.y, tmp.z, screenPt)) return
+        val u = frame.u
+        val x = screenPt.x
+        val y = screenPt.y
+        if (x < -50f || y < -50f || x > frame.w + 50f || y > frame.h + 50f) return
+        val locked = kind == lockKind && i == lockIndex
+        val shown = kind == showKind && i == showIndex
+        val dist = targetDistance(kind, i)
+        val pxPerUnit = frame.h * 0.5f / cam.tanHalfY / screenPt.z
+        val screenR = (targetRadius(kind, i) * pxPerUnit).toFloat()
+        // a body filling the view needs no marker (the zone label names it)
+        if (screenR > frame.h * 0.35f && !locked) return
+        if (locked) {
+            val half = maxOf(screenR * 1.05f, 16f * u)
+            val arm = maxOf(half * 0.3f, 8f * u)
+            val col = withAlpha(Theme.LOCK, a)
+            val w = 2f * u
+            for (sxs in 0..1) for (sys in 0..1) {
+                val sxv = if (sxs == 0) -1f else 1f
+                val syv = if (sys == 0) -1f else 1f
+                val px = x + sxv * half
+                val py = y + syv * half
+                ui.line(px, py, px - sxv * arm, py, w, col)
+                ui.line(px, py, px, py - syv * arm, w, col)
+            }
+            labelAndDistance(ui, a, kind, i, x, y + half + 16f * u, col, true, dist)
+        } else if (kind != LOCK_ASTEROID) {
+            val col = withAlpha(if (kind == LOCK_STATION) Theme.ACCENT else Theme.TEXT, a * 0.85f)
+            val r = maxOf(screenR, 5f * u)
+            ui.circle(x, y, r, col, 1.2f * u)
+            labelAndDistance(ui, a, kind, i, x, y + r + 13f * u, col, shown, dist)
+        }
+    }
+
+    private fun labelAndDistance(ui: UiRenderer, a: Float, kind: Int, i: Int, x: Float, y: Float, col: Int, withDistance: Boolean, dist: Double) {
+        val u = frame.u
+        ui.text(targetName(kind, i), x, y, 9f * u, col, UiRenderer.CENTER, tracking = 0.18f, shadow = 0.7f)
+        if (withDistance) {
+            val unit = formatDistance(buf.clear(), dist.toFloat())
+            val tw = ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
+            ui.text(unit, x + tw * 0.5f + 4f * u, y + 14f * u, 8.5f * u, col, shadow = 0.7f)
+        }
+    }
+
+    /** True when [p] is close enough to the asteroid field to draw and collide with it. */
+    private fun nearField(p: com.starwake.core.math.DVec3): Boolean {
+        val o = system.fieldOrigin
+        val dx = p.x - o.x
+        val dy = p.y - o.y
+        val dz = p.z - o.z
+        return dx * dx + dy * dy + dz * dz < FIELD_RANGE * FIELD_RANGE
+    }
+
+    /** Planet/star surfaces are solid. */
+    private fun collideBodies(dt: Float) {
+        val i = here.nearestBody
+        if (i < 0) return
+        val b = system.bodies[i]
+        if (here.altitude > spec.collisionRadius * 4 + ship.speed * dt * 2) return
+        val impact = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius.toFloat())
+        if (impact > 2f && bumpCooldown <= 0f) {
+            bumpCooldown = 0.25f
+            haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
+            chase.addShake(clamp(impact / 50f, 0.2f, 1.2f))
+        }
+    }
+
+    /** Sun direction/visibility (eclipses) and the fill light bounced off the nearest planet. */
+    private fun updateLighting(at: com.starwake.core.math.DVec3) {
+        val f = sceneFrame
+        f.sunVisibility = system.sunlight(at, f.sunDir)
         var best = -1
-        var bestScore = Float.MAX_VALUE
-        for (i in 0 until field.total) {
-            if (!field.active[i]) continue
-            val dx = (ox + field.px[i]).toFloat()
-            val dy = (oy + field.py[i]).toFloat()
-            val dz = (oz + field.pz[i]).toFloat()
-            val dist = sqrt(dx * dx + dy * dy + dz * dz)
-            if (dist > LOCK_RANGE || dist < 1f) continue
-            val cos = (dx * tmp.x + dy * tmp.y + dz * tmp.z) / dist
-            if (cos < LOCK_CONE_COS) continue
-            val score = (1f - cos) * 20000f + dist
+        var bestScore = Double.MAX_VALUE
+        for (i in 1 until system.bodies.size) {
+            val b = system.bodies[i]
+            val dx = b.pos.x - at.x
+            val dy = b.pos.y - at.y
+            val dz = b.pos.z - at.z
+            val d = sqrt(dx * dx + dy * dy + dz * dz)
+            val score = d / b.radius
             if (score < bestScore) {
                 bestScore = score
                 best = i
             }
         }
-        lockIndex = best
-        haptic(if (best >= 0) Haptics.TICK else Haptics.BUMP)
-    }
-
-    private fun validateLock() {
-        val i = lockIndex
-        if (i < 0) return
-        val field = content?.field ?: return
-        if (!field.active[i] || lockDistance(i) > LOCK_RANGE * 1.5f) lockIndex = -1
-    }
-
-    /** Distance from the ship to the surface of asteroid [i]. */
-    private fun lockDistance(i: Int): Float {
-        val field = content!!.field
-        val dx = (field.origin.x + field.px[i] - ship.pos.x).toFloat()
-        val dy = (field.origin.y + field.py[i] - ship.pos.y).toFloat()
-        val dz = (field.origin.z + field.pz[i] - ship.pos.z).toFloat()
-        return sqrt(dx * dx + dy * dy + dz * dz) - field.collisionRadius[i]
-    }
-
-    /** Amber lock brackets with the target distance (distance is shown only for the locked target). */
-    private fun drawLock(ui: UiRenderer, a: Float) {
-        val i = lockIndex
-        if (i < 0) return
-        val field = content?.field ?: return
-        val cam = sceneFrame.camera
-        val c = cam.pos
-        val rx = (field.origin.x + field.px[i] - c.x).toFloat()
-        val ry = (field.origin.y + field.py[i] - c.y).toFloat()
-        val rz = (field.origin.z + field.pz[i] - c.z).toFloat()
-        if (!cam.project(rx, ry, rz, screenPt)) return
-        val u = frame.u
-        val pxPerUnit = frame.h * 0.5f / cam.tanHalfY / screenPt.z
-        val half = maxOf(field.radius[i] * pxPerUnit * 0.9f, 16f * u)
-        val x = screenPt.x
-        val y = screenPt.y
-        val arm = maxOf(half * 0.35f, 8f * u)
-        val col = withAlpha(Theme.LOCK, a)
-        val w = 2f * u
-        for (sxs in 0..1) for (sys in 0..1) {
-            val sxv = if (sxs == 0) -1f else 1f
-            val syv = if (sys == 0) -1f else 1f
-            val px = x + sxv * half
-            val py = y + syv * half
-            ui.line(px, py, px - sxv * arm, py, w, col)
-            ui.line(px, py, px, py - syv * arm, w, col)
-        }
-        val unit = formatDistance(buf.clear(), lockDistance(i))
-        val tw = ui.text(buf, x, y + half + 18f * u, 12f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
-        ui.text(unit, x + tw * 0.5f + 4f * u, y + half + 18f * u, 9f * u, col, shadow = 0.7f)
+        if (best < 0) return
+        val b = system.bodies[best]
+        b.pos.relativeTo(at, f.fillDir)
+        f.fillDir.normalize()
+        // bounce light falls off with apparent size; the lit fraction depends on the sun angle
+        val size = (1.0 / (bestScore * bestScore)).coerceAtMost(1.0).toFloat()
+        val lit = 0.5f + 0.5f * -(f.fillDir.dot(f.sunDir))
+        val k = size * lit * 1.4f
+        f.fillColor[0] = 0.10f * k; f.fillColor[1] = 0.085f * k; f.fillColor[2] = 0.07f * k
     }
 
     /** Appends a speed value in m/s, km/s or Mm/s to [b]; returns the unit label. */
@@ -909,5 +1105,12 @@ class Game(private val platform: Platform) : GameActions, PointerHandler {
         private const val ORBIT_PX_PER_RAD = 260f
         private const val LOCK_RANGE = 8000f
         private const val LOCK_CONE_COS = 0.951f // 18°
+        private const val AIM_CONE_COS = 0.9986f // 3°
+        private const val LOCK_NONE = 0
+        private const val LOCK_ASTEROID = 1
+        private const val LOCK_STATION = 2
+        private const val LOCK_BODY = 3
+        private const val FIELD_RANGE = 60_000.0
+        private const val DUST_VISUAL_SPEED = 400f
     }
 }

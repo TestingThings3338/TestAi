@@ -98,7 +98,10 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
         total = placed
     }
 
-    /** Distance from a world point to the protected areas (spawn lane, menu showcase). */
+    /**
+     * Distance from a point (relative to the player's home position) to the protected areas: the
+     * spawn lane, the menu showcase and the home station.
+     */
     private fun clearance(x: Float, y: Float, z: Float): Float {
         // spawn lane: segment from (0,0,200) to (0,0,-700)
         val cz = clamp(z, -700f, 200f)
@@ -106,7 +109,11 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
         val sx = x - SHOWCASE_X
         val sy = y - SHOWCASE_Y
         val sz = z - SHOWCASE_Z
-        return minOf(lane, sqrt(sx * sx + sy * sy + sz * sz) - 60f)
+        val tx = x - StarSystem.HOME_STATION_X.toFloat()
+        val ty = y - StarSystem.HOME_STATION_Y.toFloat()
+        val tz = z - StarSystem.HOME_STATION_Z.toFloat()
+        val station = sqrt(tx * tx + ty * ty + tz * tz) - 1250f
+        return minOf(lane, sqrt(sx * sx + sy * sy + sz * sz) - 60f, station)
     }
 
     /** How many instances of [variant] to draw for a quality level (0..2). */
