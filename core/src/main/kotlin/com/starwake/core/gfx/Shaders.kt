@@ -17,6 +17,8 @@ vec3 tonemap(vec3 c) {
 
     /** PCG-style integer hash based value noise (stable on mobile GPUs, unlike sin-hash). */
     private const val NOISE = """
+// the hash needs 32-bit integer wraparound: fragment ints default to mediump (16-bit on many GPUs)
+precision highp int;
 uint pcg(uint v) {
     uint state = v * 747796405u + 2891336453u;
     uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -359,10 +361,11 @@ void main() {
 precision mediump float;
 in float v_alpha;
 in float v_side;
+uniform vec3 u_color;
 out vec4 o_color;
 void main() {
     float a = (1.0 - abs(v_side)) * v_alpha;
-    o_color = vec4(vec3(0.62, 0.72, 0.82) * a, 1.0);
+    o_color = vec4(u_color * a, 1.0);
 }
 """
 

@@ -59,6 +59,14 @@ object AsteroidMesh {
         return b.build()
     }
 
+    /** Median distance of the mesh's vertices from its origin (8 floats per vertex). */
+    fun medianRadius(mesh: FloatArray): Float {
+        val n = mesh.size / 8
+        val r = FloatArray(n) { val o = it * 8; sqrt(mesh[o] * mesh[o] + mesh[o + 1] * mesh[o + 1] + mesh[o + 2] * mesh[o + 2]) }
+        r.sort()
+        return r[n / 2]
+    }
+
     /** Unit icosphere: returns vertices and triangle index triples. */
     fun icosphere(subdivisions: Int): Pair<List<Vec3>, List<IntArray>> {
         val t = ((1.0 + sqrt(5.0)) / 2.0).toFloat()

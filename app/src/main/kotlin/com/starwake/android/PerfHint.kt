@@ -97,7 +97,7 @@ internal class PerfHint(context: Context) {
     }
 
     companion object {
-        private const val TAG = "Starwake"
+        private const val TAG = "SpaceExploration"
         const val DEFAULT_TARGET_NANOS = 16_666_667L
     }
 }

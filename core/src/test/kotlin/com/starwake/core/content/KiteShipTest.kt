@@ -111,7 +111,7 @@ class KiteShipTest {
 
     @Test
     fun collisionRadiusConstantsAgree() {
-        assertEquals(KiteShip.COLLISION_RADIUS, ShipSpec.KITE.collisionRadius)
+        assertEquals(KiteShip.COLLISION_RADIUS, ShipSpec.VARROW.collisionRadius)
     }
 
     @Test

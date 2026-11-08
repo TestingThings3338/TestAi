@@ -19,7 +19,8 @@ import android.window.OnBackInvokedDispatcher
 import com.starwake.core.Game
 
 /**
- * Single-Activity host: immersive fullscreen, keeps the screen on, draws under the display cutout.
+ * Single-Activity host: immersive fullscreen, draws under the display cutout. The screen is kept on
+ * only during active flight (see [AndroidPlatform.setActivePlay]).
  * Every config change is handled in place (see the manifest) so the GL context survives rotation,
  * controller hot-plug, density changes and so on.
  *
@@ -34,9 +35,12 @@ class GameActivity : Activity() {
     private lateinit var gamepad: GamepadInput
     private var inputManager: InputManager? = null
 
+    /** Queued to the GL thread in [onPause]; preallocated. */
+    private val flushSettingsEvent = Runnable { game.flushSettings() }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // No FLAG_KEEP_SCREEN_ON here: AndroidPlatform sets it only while the player is flying.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val lp = window.attributes
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -76,6 +80,9 @@ class GameActivity : Activity() {
         game.onPause()
         gamepad.reset() // releases arriving while paused would be lost
         view.pacer.stop()
+        // Persist settings changed since the last save. Queued before view.onPause(): the GL thread
+        // drains its event queue before it honours the pause, and onPause() blocks until it has.
+        view.queueEvent(flushSettingsEvent)
         view.onPause()
         platform.onPause()
     }
@@ -92,6 +99,12 @@ class GameActivity : Activity() {
         if (hasFocus) {
             enterImmersive()
             view.requestFocus()
+        } else {
+            // Notification shade, system dialog, another window in multi-window, ...: open the pause
+            // menu if flying (only sets a flag), and release controller state whose key-ups would now
+            // go to the other window.
+            game.onPause()
+            gamepad.reset()
         }
     }
 

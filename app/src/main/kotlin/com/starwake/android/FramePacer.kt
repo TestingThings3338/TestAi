@@ -2,6 +2,7 @@ package com.starwake.android
 
 import android.opengl.GLSurfaceView
 import android.view.Choreographer
+import kotlin.math.ceil
 
 /**
  * Drives a RENDERMODE_WHEN_DIRTY [GLSurfaceView] from vsync.
@@ -11,11 +12,13 @@ import android.view.Choreographer
  * vsync already delivered (Choreographer runs input callbacks before animation callbacks). When the
  * GPU/CPU falls behind, requests simply coalesce; eglSwapBuffers provides the back-pressure.
  *
- * An fps cap is honoured by skipping vsyncs: a frame is requested only when
- * `frameTime - lastRequested + vsyncInterval / 2 >= 1e9 / fpsLimit`. The half-interval slack absorbs
- * timestamp jitter so that, e.g., a 60 fps cap on a 120 Hz panel requests exactly every second vsync.
- * The vsync interval is estimated from successive callbacks with an EMA, so it follows LTPO/VRR
- * refresh switches without any display queries.
+ * An fps cap is honoured by rendering every `skip`-th vsync, with
+ * `skip = max(1, ceil(targetInterval / vsyncInterval - 0.05))`: whole vsyncs, rounded up, so the cap
+ * is never exceeded and the cadence is deterministic (120 Hz + 60 cap -> 60 fps, 120 Hz + 30 -> 30,
+ * 90 Hz + 60 -> 45, 60 Hz + 60 -> 60; the 0.05 absorbs estimate noise on exact multiples). A frame
+ * is requested once `frameTime - lastRequested >= (skip - 0.5) * vsyncInterval`; the half-interval
+ * margin absorbs timestamp jitter. The vsync interval is estimated from successive callbacks with an
+ * EMA, so it follows LTPO/VRR refresh switches without any display queries.
  *
  * UI thread only, except [frameTimeNanos] which the GL thread reads. Allocation-free per frame.
  */
@@ -27,7 +30,7 @@ internal class FramePacer(private val view: GLSurfaceView) : Choreographer.Frame
     var frameTimeNanos = 0L
         private set
 
-    /** 0 = render every vsync, otherwise the frames-per-second cap (60, 30). */
+    /** 0 = render every vsync, otherwise the frames-per-second cap (60, 30). UI thread. */
     var fpsLimit = 0
         set(value) {
             field = value.coerceAtLeast(0)
@@ -72,8 +75,9 @@ internal class FramePacer(private val view: GLSurfaceView) : Choreographer.Frame
 
         val limit = fpsLimit
         if (limit > 0 && lastRequested != 0L) {
-            val target = NANOS_PER_SECOND / limit
-            if ((frameTimeNanos - lastRequested) + vsyncIntervalNanos * 0.5 < target) return
+            val interval = vsyncIntervalNanos
+            val skip = maxOf(1.0, ceil(NANOS_PER_SECOND / limit / interval - SKIP_TOLERANCE))
+            if ((frameTimeNanos - lastRequested) < (skip - 0.5) * interval) return
         }
         lastRequested = frameTimeNanos
         this.frameTimeNanos = frameTimeNanos
@@ -83,5 +87,8 @@ internal class FramePacer(private val view: GLSurfaceView) : Choreographer.Frame
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000.0
         const val EMA_ALPHA = 0.1
+
+        /** Vsyncs per frame within 5% of a whole number round down (exact multiples stay exact). */
+        const val SKIP_TOLERANCE = 0.05
     }
 }

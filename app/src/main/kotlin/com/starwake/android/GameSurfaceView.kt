@@ -244,8 +244,11 @@ internal class GameSurfaceView(context: Context, private val game: Game) : GLSur
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                // API 33+: an UP flagged FLAG_CANCELED (e.g. a palm or accidental touch the system
+                // rejected) must not act as a release, so it becomes a CANCEL for that pointer.
+                val type = if (isCanceled(event)) InputQueue.CANCEL else InputQueue.UP
                 val i = event.actionIndex
-                input.push(InputQueue.UP, event.getPointerId(i), event.getX(i) * sx, event.getY(i) * sy)
+                input.push(type, event.getPointerId(i), event.getX(i) * sx, event.getY(i) * sy)
             }
             MotionEvent.ACTION_CANCEL -> {
                 for (i in 0 until event.pointerCount) {
@@ -255,6 +258,9 @@ internal class GameSurfaceView(context: Context, private val game: Game) : GLSur
         }
         return true
     }
+
+    private fun isCanceled(event: MotionEvent): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (event.flags and MotionEvent.FLAG_CANCELED) != 0
 
     // ================================================================ GL thread
 

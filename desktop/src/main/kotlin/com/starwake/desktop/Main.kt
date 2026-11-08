@@ -3,7 +3,7 @@ package com.starwake.desktop
 import java.io.File
 import kotlin.system.exitProcess
 
-private const val USAGE = """Starwake headless preview harness (Mesa EGL surfaceless + llvmpipe)
+private const val USAGE = """Untitled Space Exploration headless preview harness (Mesa EGL surfaceless + llvmpipe)
 
 Usage: ./gradlew :desktop:run --args="[options]"
 
@@ -102,7 +102,7 @@ fun main(args: Array<String>) {
     }
     opts.outDir.mkdirs()
 
-    println("Starwake preview: ${opts.width}x${opts.height} @ ${opts.density} px/dp, scenarios ${names.joinToString()}, out ${opts.outDir.absolutePath}")
+    println("Untitled Space Exploration preview: ${opts.width}x${opts.height} @ ${opts.density} px/dp, scenarios ${names.joinToString()}, out ${opts.outDir.absolutePath}")
     val reports = ArrayList<ScenarioReport>()
     HeadlessEglDisplay().use { egl ->
         println(egl.describe())

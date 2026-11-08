@@ -12,7 +12,9 @@ import kotlin.math.sqrt
  * event (per-device axis data is cached and refreshed only when a different controller is used).
  *
  * - Sticks: AXIS_X/Y (left), AXIS_Z/RZ (right; falls back to RX/RY on devices without Z/RZ), with a
- *   radial dead-zone of max(device "flat", [STICK_DEAD_ZONE]) that is rescaled so output starts at 0.
+ *   radial dead-zone of max(device "flat", [STICK_DEAD_ZONE]) that is rescaled so the magnitude runs
+ *   0..1 from the edge of the dead zone. This is the only stick dead zone: core expects
+ *   [GamepadState] stick values to be already dead-zoned and applies none of its own.
  * - Triggers: max(LTRIGGER, BRAKE) / max(RTRIGGER, GAS), merged with digital L2/R2 keys.
  * - HAT_X/HAT_Y and DPAD keys -> DPAD buttons.
  * - Face/shoulder/start/select keys -> buttons. KEYCODE_BACK / KEYCODE_MENU coming *from a
@@ -138,6 +140,7 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
 
     // ---------------------------------------------------------------- internals
 
+    /** Sticks are published already dead-zoned and rescaled; core must not apply a second dead zone. */
     private fun publishAnalog() {
         val lt = if (digitalL2) 1f else analogL
         val rt = if (digitalR2) 1f else analogR
@@ -186,7 +189,8 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
 
     private companion object {
         const val NO_DEVICE = Int.MIN_VALUE
-        const val STICK_DEAD_ZONE = 0.1f
+        /** Radial stick dead zone (fraction of full deflection); core relies on it, see the class doc. */
+        const val STICK_DEAD_ZONE = 0.12f
         const val TRIGGER_DEAD_ZONE = 0.03f
         val DPAD_BUTTONS = intArrayOf(
             GamepadState.DPAD_UP, GamepadState.DPAD_DOWN, GamepadState.DPAD_LEFT, GamepadState.DPAD_RIGHT,

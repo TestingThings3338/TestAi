@@ -21,6 +21,12 @@ class DesktopPlatform(private val assetsDir: File, initialSettings: String? = nu
     var lastFpsLimit = 0
         private set
 
+    /** Latest [setActivePlay] value (starts false: the game boots into the menu) and how often it changed. */
+    var activePlay = false
+        private set
+    var activePlayChanges = 0
+        private set
+
     override fun readAsset(path: String): ByteArray {
         val f = File(assetsDir, path)
         if (!f.isFile) throw IllegalArgumentException("asset not found: ${f.path} (assets dir ${assetsDir.absolutePath})")
@@ -43,6 +49,12 @@ class DesktopPlatform(private val assetsDir: File, initialSettings: String? = nu
         lastRenderScale = renderScale
         lastFpsLimit = fpsLimit
         log { "[platform] applyDisplaySettings(renderScale=$renderScale, fpsLimit=$fpsLimit)" }
+    }
+
+    override fun setActivePlay(active: Boolean) {
+        if (active != activePlay) activePlayChanges++
+        activePlay = active
+        log { "[platform] setActivePlay($active)" }
     }
 
     override fun exitApp() {

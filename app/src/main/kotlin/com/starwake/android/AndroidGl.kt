@@ -25,6 +25,7 @@ internal class AndroidGl : Gl {
     override fun depthMask(flag: Boolean) = GLES30.glDepthMask(flag)
     override fun depthFunc(func: Int) = GLES30.glDepthFunc(func)
     override fun cullFace(mode: Int) = GLES30.glCullFace(mode)
+    override fun depthRange(near: Float, far: Float) = GLES30.glDepthRangef(near, far)
 
     // ---------------------------------------------------------------- shaders / programs
 

@@ -1,4 +1,4 @@
-# Starwake release shrinking rules.
+# Untitled Space Exploration release shrinking rules.
 #
 # The app uses no reflection, serialization or JNI: the only entry point is GameActivity, which AAPT
 # keeps automatically from the manifest. Everything else (including :core) may be shrunk, optimized

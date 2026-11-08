@@ -16,6 +16,9 @@ object Theme {
     const val WARN = 0xFFFFB13B.toInt()
     const val DANGER = 0xFFFF5A4D.toInt()
     const val OK = 0xFF59F0A0.toInt()
+
+    /** Target-lock amber (lock brackets, locked distance). */
+    const val LOCK = 0xFFFFB347.toInt()
     const val BLACK = 0xFF000000.toInt()
 }
 
@@ -272,31 +275,44 @@ class Selector(
     }
 }
 
-/** Horizontal slider row. */
+/** Primitive float getter/setter (no boxing, unlike () -> Float). */
+fun interface FloatSource {
+    fun get(): Float
+}
+
+fun interface FloatSink {
+    fun set(v: Float)
+}
+
+/** Horizontal slider row. Only presses on the track move it (not the label or value text). */
 class Slider(
     private val label: String,
     private val min: Float,
     private val max: Float,
-    private val get: () -> Float,
-    private val set: (Float) -> Unit,
+    private val get: FloatSource,
+    private val set: FloatSink,
 ) : Widget() {
     private val buf = TextBuf(16)
     private var lastStep = -1
+    private var tracking = false
 
     private fun trackX0() = r.x + r.w * 0.46f + 12f * r.h / 40f
     private fun trackX1() = r.x + r.w - 52f * r.h / 40f
 
     override fun press(x: Float, y: Float) {
         super.press(x, y)
-        drag(x, y)
+        val slop = 16f * r.h / 40f
+        tracking = x >= trackX0() - slop && x <= trackX1() + slop
+        if (tracking) drag(x, y)
     }
 
     override fun drag(x: Float, y: Float) {
+        if (!tracking) return
         val t = clamp01((x - trackX0()) / (trackX1() - trackX0()))
         val v = min + (max - min) * t
         val step = (v * 20f).toInt()
         // snap to 0.05 steps with a haptic tick per step
-        set(step / 20f)
+        set.set(step / 20f)
         if (step != lastStep) {
             if (lastStep >= 0) host.haptic(Haptics.TICK)
             lastStep = step
@@ -306,6 +322,7 @@ class Slider(
     override fun release(x: Float, y: Float, inside: Boolean) {
         super.release(x, y, inside)
         lastStep = -1
+        tracking = false
     }
 
     override fun draw(ui: UiRenderer, u: Float, alpha: Float) {
@@ -313,11 +330,12 @@ class Slider(
         ui.textCentered(label, r.x, r.cy, 12f * u, withAlpha(Theme.TEXT_DIM, alpha), UiRenderer.LEFT, tracking = 0.12f)
         val x0 = trackX0()
         val x1 = trackX1()
-        val t = clamp01((get() - min) / (max - min))
+        val value = get.get()
+        val t = clamp01((value - min) / (max - min))
         ui.rect(x0, r.cy - 2f * u, x1 - x0, 4f * u, withAlpha(Theme.PANEL_LIGHT, alpha), 2f * u)
         ui.rect(x0, r.cy - 2f * u, (x1 - x0) * t, 4f * u, withAlpha(Theme.ACCENT, alpha), 2f * u)
         ui.circle(x0 + (x1 - x0) * t, r.cy, (if (pressed) 10f else 8f) * u, withAlpha(Theme.ACCENT, alpha))
-        buf.clear().append(get(), 2).append('×')
+        buf.clear().append(value, 2).append('×')
         ui.textCentered(buf, r.x + r.w, r.cy, 12.5f * u, withAlpha(Theme.TEXT, alpha), UiRenderer.RIGHT)
     }
 }

@@ -10,8 +10,9 @@ import kotlin.math.sqrt
 /** Performance envelope of a ship hull. Speeds in m/s, rates in rad/s, accelerations per second. */
 class ShipSpec(
     val name: String,
-    val designation: String,
     val role: String,
+    /** Price in credits (CR). */
+    val price: Int,
     val maxSpeed: Float = 220f,
     val maxReverse: Float = 90f,
     val boostSpeed: Float = 400f,
@@ -34,7 +35,8 @@ class ShipSpec(
     val collisionRadius: Float = 7.0f,
 ) {
     companion object {
-        val KITE = ShipSpec("KITE", "KT-1", "LIGHT MULTIROLE")
+        /** Starter ship. The hull model is a stand-in until the Roblox ship geometry is exported. */
+        val VARROW = ShipSpec("VARROW", "LIGHT MULTIPURPOSE", 22_000)
     }
 }
 

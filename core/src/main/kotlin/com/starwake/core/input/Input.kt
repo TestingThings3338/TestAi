@@ -120,6 +120,11 @@ class GamepadState {
         return false
     }
 
+    /** Forgets presses not consumed yet (call when the screen changes, so they aren't replayed). */
+    fun discardPresses() {
+        synchronized(this) { pressCount.copyInto(seen) }
+    }
+
     companion object {
         const val A = 0
         const val B = 1

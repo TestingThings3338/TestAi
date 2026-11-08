@@ -119,6 +119,14 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
         return (instanceCount[variant] * frac).toInt()
     }
 
+    /** Collision sphere radius per asteroid (scale × the mesh's typical surface radius). */
+    val collisionRadius = FloatArray(maxCount).also { System.arraycopy(radius, 0, it, 0, maxCount) }
+
+    /** [factors] = typical surface radius of each mesh variant at scale 1. */
+    fun setCollisionFactors(factors: FloatArray) {
+        for (i in 0 until total) collisionRadius[i] = radius[i] * factors[variantOf[i]]
+    }
+
     /** active[i] = asteroid i is drawn at the current quality (collisions only use visible rocks). */
     val active = BooleanArray(maxCount)
 

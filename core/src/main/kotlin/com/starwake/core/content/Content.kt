@@ -11,7 +11,10 @@ class Content(fontMetrics: String, val fontAtlas: ByteArray) {
     val font = FontData.parse(fontMetrics)
     val ship: FloatArray = KiteShip.build()
     val rocks: Array<FloatArray> = Array(ROCK_VARIANTS) { AsteroidMesh.build(it * 17 + 5, 2) }
-    val field = AsteroidField(1234L, MAX_ASTEROIDS, ROCK_VARIANTS)
+    val field = AsteroidField(1234L, MAX_ASTEROIDS, ROCK_VARIANTS).also { f ->
+        // collide against each rock's median surface radius rather than its bounding scale
+        f.setCollisionFactors(FloatArray(ROCK_VARIANTS) { AsteroidMesh.medianRadius(rocks[it]) })
+    }
     val stars: FloatArray = StarField.build(MAX_STARS)
     val dust: Pair<FloatArray, ShortArray> = DustField.build(MAX_DUST)
     val sphere: Pair<FloatArray, ShortArray> = Primitives.uvSphere(72, 44)

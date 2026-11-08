@@ -21,6 +21,9 @@ interface Gl {
     fun depthFunc(func: Int)
     fun cullFace(mode: Int)
 
+    /** glDepthRangef: maps NDC depth into [near, far] of the depth buffer. */
+    fun depthRange(near: Float, far: Float)
+
     fun createShader(type: Int): Int
     fun shaderSource(shader: Int, src: String)
     fun compileShader(shader: Int)

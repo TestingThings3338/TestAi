@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Display
 import android.view.HapticFeedbackConstants
+import android.view.WindowManager
 import com.starwake.core.Haptics
 import com.starwake.core.Platform
 import kotlin.math.abs
@@ -21,6 +22,11 @@ import kotlin.math.roundToInt
  * Display policy ([applyDisplaySettings]): render scale -> fixed-size GL surface; fps limit ->
  * Choreographer pacing + preferred display mode (same resolution, best refresh) + Surface frame rate
  * hint + ADPF frame budget.
+ *
+ * Active play ([setActivePlay]): the screen is kept on only while the player is flying, and on static
+ * screens (menu, pause, settings) the pacer is capped at [IDLE_FPS] (or the user's lower cap) to save
+ * battery. The display mode and Surface frame-rate hint keep following the user's setting, so
+ * opening a menu never triggers a refresh-rate switch.
  */
 internal class AndroidPlatform(private val activity: Activity) : Platform, DisplayManager.DisplayListener {
     private val prefs = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -34,10 +40,15 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     private var requestedScale = Float.NaN
     private var requestedFps = -1
 
+    /** Latest value from [setActivePlay]; any thread writes, the UI thread applies. Starts in the menu. */
+    @Volatile private var activePlay = false
+
     // UI thread only.
-    private var appliedFps = -1
+    private var appliedFps = -1 // user's fps limit as applied (0 = display max), -1 before the first
+    private var keepScreenOn = false // FLAG_KEEP_SCREEN_ON as currently set on the window
 
     private val applyDisplayRunnable = Runnable { applyDisplayOnUiThread(force = false) }
+    private val applyActivePlayRunnable = Runnable { applyActivePlayOnUiThread() }
     private val exitRunnable = Runnable { activity.finish() }
     private val hapticTap = HapticRunnable(HapticFeedbackConstants.VIRTUAL_KEY)
     private val hapticTick = HapticRunnable(HapticFeedbackConstants.CLOCK_TICK)
@@ -88,6 +99,13 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
         }
     }
 
+    override fun setActivePlay(active: Boolean) {
+        if (activePlay == active) return
+        activePlay = active
+        // One preallocated Runnable that reads the latest value: rapid toggles coalesce correctly.
+        mainHandler.post(applyActivePlayRunnable)
+    }
+
     override fun exitApp() {
         mainHandler.post(exitRunnable)
     }
@@ -136,7 +154,7 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
         v.setRenderScale(scale) // no-op when unchanged
         if (!force && fps == appliedFps) return
         appliedFps = fps
-        v.pacer.fpsLimit = fps
+        v.pacer.fpsLimit = effectiveFps()
 
         val display = currentDisplay() ?: return
         val mode = selectDisplayMode(display, fps)
@@ -182,11 +200,40 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
         return best
     }
 
-    /** ADPF frame budget: the cap if set, otherwise the display's current refresh rate. */
+    /** Keep-screen-on flag and idle frame cap; idempotent. */
+    private fun applyActivePlayOnUiThread() {
+        val active = activePlay
+        if (active != keepScreenOn) {
+            keepScreenOn = active
+            if (active) {
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        val v = view ?: return
+        if (appliedFps < 0) return // display settings not applied yet; they pick up activePlay then
+        val fps = effectiveFps()
+        if (v.pacer.fpsLimit == fps) return
+        v.pacer.fpsLimit = fps
+        currentDisplay()?.let { updatePerfTarget(it) }
+    }
+
+    /**
+     * Pacer cap actually used: the user's limit while flying (0 = display max), otherwise at most
+     * [IDLE_FPS] (a lower user cap such as 30 is kept). UI thread.
+     */
+    private fun effectiveFps(): Int {
+        val user = appliedFps.coerceAtLeast(0)
+        if (activePlay) return user
+        return if (user in 1..IDLE_FPS) user else IDLE_FPS
+    }
+
+    /** ADPF frame budget: the effective cap if set, otherwise the display's current refresh rate. */
     private fun updatePerfTarget(display: Display) {
         val v = view ?: return
         val refresh = display.refreshRate.takeIf { it >= 1f } ?: 60f
-        val fps = appliedFps
+        val fps = v.pacer.fpsLimit
         val effective = if (fps > 0) minOf(fps.toFloat(), refresh) else refresh
         v.perfHint.targetNanos = (1_000_000_000.0 / effective).toLong()
     }
@@ -206,8 +253,12 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     }
 
     private companion object {
-        const val PREFS_NAME = "starwake"
+        /** SharedPreferences file (space_exploration.xml); backup_rules / data_extraction_rules name it. */
+        const val PREFS_NAME = "space_exploration"
         const val KEY_SETTINGS = "settings"
+
+        /** Frame cap on static screens (menu, pause, settings). */
+        const val IDLE_FPS = 60
 
         fun buildDeviceInfo(): String {
             val maker = Build.MANUFACTURER.orEmpty().replaceFirstChar { it.uppercaseChar() }

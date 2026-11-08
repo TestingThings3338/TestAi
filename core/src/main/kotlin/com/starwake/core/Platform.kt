@@ -21,6 +21,13 @@ interface Platform {
      */
     fun applyDisplaySettings(renderScale: Float, fpsLimit: Int)
 
+    /**
+     * True while the player is actively flying (no menu/pause/settings). The platform keeps the
+     * screen awake only then, and may lower the frame rate (e.g. to 60) on static screens to save
+     * battery. Called from the GL thread, only when the value changes.
+     */
+    fun setActivePlay(active: Boolean)
+
     /** Closes the app (from the main menu). */
     fun exitApp()
 

@@ -2,9 +2,9 @@
 <!-- Android 12+: back up / transfer only the player settings. -->
 <data-extraction-rules>
     <cloud-backup>
-        <include domain="sharedpref" path="starwake.xml" />
+        <include domain="sharedpref" path="space_exploration.xml" />
     </cloud-backup>
     <device-transfer>
-        <include domain="sharedpref" path="starwake.xml" />
+        <include domain="sharedpref" path="space_exploration.xml" />
     </device-transfer>
 </data-extraction-rules>

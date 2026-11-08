@@ -24,14 +24,14 @@
         android:label="@string/app_name"
         android:resizeableActivity="true"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Starwake"
+        android:theme="@style/Theme.SpaceExploration"
         tools:targetApi="33">
 
         <!-- configChanges: the game handles every display/input change itself so the Activity (and with
              it the GL context and all GPU resources) is never recreated. -->
         <activity
             android:name="com.starwake.android.GameActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection|colorMode"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
             android:exported="true"
             android:screenOrientation="sensorLandscape">
             <intent-filter>

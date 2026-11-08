@@ -12,6 +12,7 @@ import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Mat4
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
+import com.starwake.core.math.TAU_F
 import kotlin.math.ln
 import kotlin.math.sin
 
@@ -42,6 +43,9 @@ class SceneFrame {
     var pxScale = 1f
     val dustVelocity = Vec3()
     var dustIntensity = 0.6f
+
+    /** Speed-line colour: white in open space, blue in a gravity well, red for danger/heat. */
+    val dustColor = Vec3(0.66f, 0.72f, 0.80f)
     var exposure = 1f
 }
 
@@ -67,21 +71,11 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             it.setInstanceData(f.instanceData[v], f.instanceCount[v], intArrayOf(4, 4), 4)
         }
     }
-    private val starCount = when (quality) {
-        0 -> 3000
-        1 -> 4500
-        else -> Content.MAX_STARS
-    }
-    private val starMesh = GpuMesh(gl, content.stars.copyOf(starCount * StarField.FLOATS), intArrayOf(3, 4))
-    private val dustCount = when (quality) {
-        0 -> 300
-        1 -> 500
-        else -> Content.MAX_DUST
-    }
-    private val dustMesh = GpuMesh(
-        gl, content.dust.first.copyOf(dustCount * 20), intArrayOf(3, 2),
-        content.dust.second.copyOf(dustCount * 6),
-    )
+    // full buffers are uploaded once; quality only changes how much of them is drawn
+    private val starMesh = GpuMesh(gl, content.stars, intArrayOf(3, 4))
+    private val dustMesh = GpuMesh(gl, content.dust.first, intArrayOf(3, 2), content.dust.second)
+    private var starCount = 0
+    private var dustCount = 0
     private val sphereMesh = GpuMesh(gl, content.sphere.first, intArrayOf(3), content.sphere.second)
     private val ringMesh = GpuMesh(gl, content.ring.first, intArrayOf(3), content.ring.second)
     private val glowStream = QuadStream(gl, 48, intArrayOf(3, GL.FLOAT, 3, GL.FLOAT, 4, GL.FLOAT))
@@ -90,7 +84,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val envTex = bakeEnvironment(envSize)
     private val planetTex = bakePlanet(if (quality == 0) 1024 else 2048, if (quality == 0) 512 else 1024)
     private val envLod = ln(envSize.toFloat()) / ln(2f) - 1.5f
-    val quality = quality
+    var quality = quality
+        private set
 
     // scratch (no per-frame allocations)
     private val model = Mat4()
@@ -108,10 +103,29 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val sunObj = Vec3()
 
     init {
+        setQuality(quality)
         setupPalettes(0)
         rockMaterial(AsteroidMesh.ROCK, 0.20f, 0.18f, 0.16f, 0.88f, 0.05f)
         rockMaterial(AsteroidMesh.DARK_ROCK, 0.11f, 0.10f, 0.095f, 0.92f, 0.05f)
         rockMaterial(AsteroidMesh.MINERAL, 0.36f, 0.40f, 0.46f, 0.35f, 0.45f)
+    }
+
+    /** True when [q] needs differently sized baked textures (then rebuild the renderer). */
+    fun needsRebake(q: Int): Boolean = (q == 0) != (envSize == 256)
+
+    /** Cheap quality switch: star/dust counts (asteroid counts come from the field's active mask). */
+    fun setQuality(q: Int) {
+        quality = q
+        starCount = when (q) {
+            0 -> 3000
+            1 -> 4500
+            else -> Content.MAX_STARS
+        }
+        dustCount = when (q) {
+            0 -> 300
+            1 -> 500
+            else -> Content.MAX_DUST
+        }
     }
 
     private fun rockMaterial(i: Int, r: Float, g: Float, b: Float, rough: Float, metal: Float) {
@@ -159,8 +173,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         drawSun(f)
         drawPlanet(f)
 
+        // near scene uses depth [0, 0.999); the sky-space planet sits in [0.999, 1] – no second clear
+        gl.depthRange(0f, 0.999f)
         gl.depthMask(true)
-        gl.clear(GL.DEPTH_BUFFER_BIT)
         gl.enable(GL.DEPTH_TEST)
         gl.depthFunc(GL.LEQUAL)
         gl.enable(GL.CULL_FACE)
@@ -171,6 +186,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         drawDust(f)
         if (ship != null) drawShipGlows(f, ship)
         gl.depthMask(true)
+        gl.depthRange(0f, 1f)
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
         gl.disable(GL.BLEND)
@@ -199,7 +215,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.uniformMatrix4fv(star.u("u_viewProj"), f.camera.viewProj.m, 0)
         gl.uniform1f(star.u("u_pxScale"), f.pxScale)
         gl.uniform1f(star.u("u_bright"), 1f)
-        starMesh.draw(GL.POINTS)
+        starMesh.drawRange(GL.POINTS, starCount)
         gl.disable(GL.BLEND)
     }
 
@@ -214,7 +230,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.blendFunc(GL.ONE, GL.ONE)
         glow.use()
         gl.uniformMatrix4fv(glow.u("u_viewProj"), c.skyViewProj.m, 0)
-        gl.uniform1f(glow.u("u_time"), f.time)
+        gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
         glowStream.flush()
         gl.disable(GL.BLEND)
     }
@@ -229,6 +245,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         rot.rotateInverse(Environment.sunDir, sunObj)
         val sc = Environment.sunColor
 
+        gl.depthRange(0.999f, 1f)
         gl.enable(GL.DEPTH_TEST)
         gl.depthFunc(GL.LEQUAL)
         gl.depthMask(true)
@@ -305,7 +322,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.uniform1f(dust.u("u_width"), 1.3f * f.pxScale * 2f / c.height)
         gl.uniform1f(dust.u("u_aspect"), c.width.toFloat() / c.height)
         gl.uniform1f(dust.u("u_intensity"), f.dustIntensity)
-        dustMesh.draw()
+        gl.uniform3f(dust.u("u_color"), f.dustColor.x, f.dustColor.y, f.dustColor.z)
+        dustMesh.drawRange(GL.TRIANGLES, dustCount * 6)
     }
 
     private fun drawShipGlows(f: SceneFrame, ship: ShipState) {
@@ -344,7 +362,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.CULL_FACE)
         glow.use()
         gl.uniformMatrix4fv(glow.u("u_viewProj"), c.viewProj.m, 0)
-        gl.uniform1f(glow.u("u_time"), t)
+        gl.uniform1f(glow.u("u_time"), t % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
     }
@@ -477,6 +495,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     companion object {
+        /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
+        private const val GLOW_PERIOD = TAU_F / 61f
+
         /** Cube face basis (faceZ, faceX, faceY) matching GL's cube map face orientation. */
         private val FACE_BASIS = arrayOf(
             floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, -1f, 0f),

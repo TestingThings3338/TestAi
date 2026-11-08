@@ -106,7 +106,7 @@ object Smoke {
         // panel with a title
         ui.rect(48f * s, 48f * s, 820f * s, 200f * s, 0xB0081420.toInt(), radius = 22f * s)
         ui.rect(48f * s, 48f * s, 820f * s, 200f * s, 0xFF3FC8FF.toInt(), radius = 22f * s, stroke = 3f * s)
-        ui.text("STARWAKE 0123", 88f * s, 170f * s, 96f * s, 0xFFFFFFFF.toInt(), tracking = 0.06f, shadow = 0.6f)
+        ui.text("SPACE 0123", 88f * s, 170f * s, 96f * s, 0xFFFFFFFF.toInt(), tracking = 0.06f, shadow = 0.6f)
         ui.text(label.uppercase() + "  /  LLVMPIPE", 92f * s, 222f * s, 30f * s, 0xFF9FD8FF.toInt(), tracking = 0.12f)
         // chamfered button, rings, a soft glow, a line
         ui.rect(w - 560f * s, h - 190f * s, 480f * s, 120f * s, 0xE0FF7A1A.toInt(), radius = -24f * s)

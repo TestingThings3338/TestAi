@@ -146,6 +146,14 @@ class GpuMesh(
         else gl.drawArrays(mode, 0, vertexCount)
     }
 
+    /** Draws only the first [count] vertices (or indices for indexed meshes). */
+    fun drawRange(mode: Int, count: Int) {
+        if (count <= 0) return
+        gl.bindVertexArray(vao)
+        if (indexCount > 0) gl.drawElements(mode, minOf(count, indexCount), GL.UNSIGNED_SHORT, 0)
+        else gl.drawArrays(mode, 0, minOf(count, vertexCount))
+    }
+
     fun drawInstanced(instances: Int) {
         if (instances <= 0) return
         gl.bindVertexArray(vao)

@@ -3,6 +3,7 @@ package com.starwake.core.ui
 import com.starwake.core.Settings
 import com.starwake.core.content.Liveries
 import com.starwake.core.game.ShipSpec
+import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.UiRenderer
 import com.starwake.core.math.clamp01
 import com.starwake.core.math.withAlpha
@@ -71,19 +72,21 @@ class MainMenu(private val game: GameActions) {
         val a = alpha
         // soft vignette behind the left column for legibility
         ui.rect(-f.w * 0.1f, -f.h * 0.1f, leftX + 320f * u, f.h * 1.2f, withAlpha(Theme.BLACK, a * 0.35f), 0f, 0f, 160f * u)
-        ui.text("STARWAKE", leftX - 2f * u, titleY, 46f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, weight = 0.05f, shadow = 0.6f)
+        ui.text("UNTITLED", leftX, titleY - 40f * u, 17f * u, withAlpha(Theme.ACCENT, a), tracking = 0.45f, shadow = 0.6f, face = FontData.TITLE)
+        ui.text("SPACE EXPLORATION", leftX - 2f * u, titleY, 33f * u, withAlpha(Theme.TEXT, a), tracking = 0.08f, weight = 0.03f, shadow = 0.6f, face = FontData.TITLE)
         ui.rect(leftX, titleY + 14f * u, 56f * u, 3f * u, withAlpha(Theme.ACCENT, a))
-        ui.text("DEEP SPACE FLIGHT  ·  PROTOTYPE", leftX + 66f * u, titleY + 18f * u, 10.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.25f)
+        ui.text("A GAME BY AFloidDEV", leftX + 66f * u, titleY + 18f * u, 10.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.2f)
         group.draw(ui, u, a)
 
         // ship card
         val c = card
         ui.rect(c.x, c.y, c.w, c.h, withAlpha(Theme.PANEL, a * 0.85f), -12f * u)
         ui.rect(c.x, c.y, c.w, c.h, withAlpha(Theme.ACCENT, a * 0.35f), -12f * u, 1.2f * u)
-        val spec = ShipSpec.KITE
-        buf.clear().append(spec.designation).append("  ").append(spec.name)
-        ui.text(buf, c.x + 16f * u, c.y + 28f * u, 17f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f, weight = 0.04f)
+        val spec = ShipSpec.VARROW
+        ui.text(spec.name, c.x + 16f * u, c.y + 28f * u, 19f * u, withAlpha(Theme.TEXT, a), tracking = 0.15f, face = FontData.TITLE)
         ui.text(spec.role, c.x + 16f * u, c.y + 44f * u, 9.5f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
+        buf.clear().append(spec.price / 1000).append(',').appendPadded(spec.price % 1000, 3).append(" CR")
+        ui.text(buf, c.x + c.w - 16f * u, c.y + 28f * u, 12f * u, withAlpha(Theme.TEXT, a), UiRenderer.RIGHT, face = FontData.MONO)
         statBar(ui, u, a, c.x + 16f * u, c.y + 62f * u, c.w - 32f * u, "SPEED", spec.maxSpeed, "M/S", spec.maxSpeed / 400f)
         statBar(ui, u, a, c.x + 16f * u, c.y + 80f * u, c.w - 32f * u, "BOOST", spec.boostSpeed, "M/S", spec.boostSpeed / 500f)
         statBar(ui, u, a, c.x + 16f * u, c.y + 98f * u, c.w - 32f * u, "AGILITY", spec.maxPitchRate * 57.3f, "°/S", spec.maxPitchRate / 1.5f)
@@ -101,7 +104,7 @@ class MainMenu(private val game: GameActions) {
     private fun statBar(ui: UiRenderer, u: Float, a: Float, x: Float, y: Float, w: Float, label: String, value: Float, unit: String, frac: Float) {
         ui.textCentered(label, x, y, 9.5f * u, withAlpha(Theme.TEXT_DIM, a), UiRenderer.LEFT, tracking = 0.15f)
         buf.clear().append(value.toInt()).append(' ').append(unit)
-        ui.textCentered(buf, x + w, y, 10f * u, withAlpha(Theme.TEXT, a), UiRenderer.RIGHT)
+        ui.textCentered(buf, x + w, y, 10f * u, withAlpha(Theme.TEXT, a), UiRenderer.RIGHT, face = FontData.MONO)
         val bx = x + 70f * u
         val bw = w - 70f * u - 64f * u
         ui.rect(bx, y - 2f * u, bw, 4f * u, withAlpha(Theme.PANEL_LIGHT, a), 2f * u)
@@ -167,7 +170,7 @@ class SettingsScreen(private val game: GameActions) {
         ui.rect(0f, 0f, f.w, f.h, withAlpha(Theme.BLACK, a * 0.55f))
         ui.rect(p.x, p.y, p.w, p.h, withAlpha(Theme.PANEL, a * 0.97f), -14f * u)
         ui.rect(p.x, p.y, p.w, p.h, withAlpha(Theme.ACCENT, a * 0.4f), -14f * u, 1.2f * u)
-        ui.text("SETTINGS", p.x + 22f * u, p.y + 36f * u, 20f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, weight = 0.04f)
+        ui.text("SETTINGS", p.x + 22f * u, p.y + 36f * u, 20f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, face = FontData.TITLE)
         val pad = 22f * u
         val colW = (p.w - pad * 3f) * 0.5f
         ui.text("GRAPHICS", p.x + pad, p.y + 62f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
@@ -204,7 +207,7 @@ class PauseScreen(private val game: GameActions) {
     fun draw(ui: UiRenderer, f: Frame, alpha: Float) {
         val u = f.u
         ui.rect(0f, 0f, f.w, f.h, withAlpha(Theme.BLACK, alpha * 0.5f))
-        ui.textCentered("PAUSED", cx, top - 34f * u, 26f * u, withAlpha(Theme.TEXT, alpha), tracking = 0.3f, weight = 0.04f, shadow = 0.6f)
+        ui.textCentered("PAUSED", cx, top - 34f * u, 26f * u, withAlpha(Theme.TEXT, alpha), tracking = 0.3f, shadow = 0.6f, face = FontData.TITLE)
         group.draw(ui, u, alpha)
     }
 }

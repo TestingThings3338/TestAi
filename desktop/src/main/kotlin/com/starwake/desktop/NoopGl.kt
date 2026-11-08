@@ -35,6 +35,7 @@ class NoopGl : Gl {
     override fun depthMask(flag: Boolean) = c()
     override fun depthFunc(func: Int) = c()
     override fun cullFace(mode: Int) = c()
+    override fun depthRange(near: Float, far: Float) = c()
 
     override fun createShader(type: Int): Int = id()
     override fun shaderSource(shader: Int, src: String) = c()
@@ -94,7 +95,7 @@ class NoopGl : Gl {
 
     override fun getError(): Int = GL.NO_ERROR
     override fun getString(name: Int): String? = when (name) {
-        GL.VENDOR -> "Starwake"
+        GL.VENDOR -> "Untitled Space Exploration"
         GL.RENDERER -> "no-op"
         GL.VERSION -> "OpenGL ES 3.0 no-op"
         else -> ""

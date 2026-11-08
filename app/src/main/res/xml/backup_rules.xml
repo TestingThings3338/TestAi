@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Android 11 and lower: back up only the player settings. -->
 <full-backup-content>
-    <include domain="sharedpref" path="starwake.xml" />
+    <include domain="sharedpref" path="space_exploration.xml" />
 </full-backup-content>

@@ -14,7 +14,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class FlightModelTest {
-    private val spec = ShipSpec.KITE
+    private val spec = ShipSpec.VARROW
     private val model = FlightModel(spec)
     private val dt = 1f / 60f
 
@@ -43,7 +43,7 @@ class FlightModelTest {
 
     @Test
     fun kiteSpecIsInternallyConsistent() {
-        assertEquals("KITE", spec.name)
+        assertEquals("VARROW", spec.name)
         assertTrue(spec.maxReverse < spec.maxSpeed && spec.maxSpeed < spec.boostSpeed)
         assertTrue(spec.boostCost in 0f..1f && spec.capacitorRecharge > 0f)
         assertTrue(spec.maxPitchRate > 0f && spec.maxYawRate > 0f && spec.maxRollRate > 0f)

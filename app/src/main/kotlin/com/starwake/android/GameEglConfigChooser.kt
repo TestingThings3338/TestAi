@@ -90,7 +90,7 @@ internal class GameEglConfigChooser : GLSurfaceView.EGLConfigChooser {
         if (egl.eglGetConfigAttrib(display, config, attribute, value)) value[0] else 0
 
     private companion object {
-        const val TAG = "Starwake"
+        const val TAG = "SpaceExploration"
 
         /** EGL_KHR_create_context / EGL 1.5: config supports OpenGL ES 3.x contexts. */
         const val EGL_OPENGL_ES3_BIT_KHR = 0x40

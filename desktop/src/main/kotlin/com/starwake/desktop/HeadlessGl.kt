@@ -66,6 +66,7 @@ class HeadlessGl(override val screenFramebuffer: Int, private val debug: Boolean
     override fun depthMask(flag: Boolean) { GLES20.glDepthMask(flag); chk("glDepthMask") }
     override fun depthFunc(func: Int) { GLES20.glDepthFunc(func); chk("glDepthFunc", func) }
     override fun cullFace(mode: Int) { GLES20.glCullFace(mode); chk("glCullFace", mode) }
+    override fun depthRange(near: Float, far: Float) { GLES30.glDepthRangef(near, far); chk("glDepthRangef") }
 
     override fun createShader(type: Int): Int { val s = GLES20.glCreateShader(type); chk("glCreateShader", type); return s }
     override fun shaderSource(shader: Int, src: String) { GLES20.glShaderSource(shader, src); chk("glShaderSource") }

@@ -48,7 +48,7 @@ class Camera {
         this.height = height
         val aspect = width.toFloat() / height.coerceAtLeast(1)
         proj.perspective(fovY, aspect, near, far, shiftX, shiftY)
-        skyProj.perspective(fovY, aspect, 10f, 4000f, shiftX, shiftY)
+        skyProj.perspective(fovY, aspect, 300f, 4000f, shiftX, shiftY)
         view.setViewRotation(rot)
         viewProj.mul(proj, view)
         skyViewProj.mul(skyProj, view)
