@@ -68,8 +68,13 @@ object Scenarios {
 
         "ships" to Scenario(
             "ships",
-            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: chase, far chase, cockpit, gear in flight, menu backdrop per ship",
+            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: chase, far chase, cockpit, gear in flight, menu backdrop per ship; every hull docks at OUTPOST II and HOME STATION, the MORVEN flies the whole route into OUTPOST II",
         ) { ShipsScenario.run(it) },
+
+        "holograms" to Scenario(
+            "holograms",
+            "The ForceField holograms of the KESSOCK, LOCHRAN and MORVEN up close (see-through rim glow), at two moments of their shimmer (no Game)",
+        ) { ShipsScenario.holograms(it) },
 
         "map" to Scenario(
             "map",

@@ -249,6 +249,22 @@ class StationMeshTest {
     }
 
     @Test
+    fun slotFitsKeepsTheClearanceOnEverySide() {
+        val slot = Vec3()
+        val c = StationMesh.SLOT_CLEARANCE
+        for (m in 0 until StationMesh.MODELS) {
+            StationMesh.slotSize(m, slot)
+            val w = 2f * (slot.x - c)
+            val h = 2f * (slot.y - c)
+            assertTrue(StationMesh.slotFits(m, w, h), "model $m: a $w x $h m hull leaves exactly the clearance")
+            assertTrue(!StationMesh.slotFits(m, w + 0.1f, h), "model $m: too wide")
+            assertTrue(!StationMesh.slotFits(m, w, h + 0.1f), "model $m: too tall")
+        }
+        // the biggest Roblox hull, MORVEN (BoundsSize 61.5 x 40.3 m), fits both stand-in slots
+        for (m in 0 until StationMesh.MODELS) assertTrue(StationMesh.slotFits(m, 61.5f, 40.3f), "model $m: MORVEN")
+    }
+
+    @Test
     fun theSlotIsARecessedOpeningWithAGlowingBackWall() {
         val pos = Vec3()
         val dir = Vec3()

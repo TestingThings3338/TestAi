@@ -376,8 +376,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     /**
      * One pass of the ship model (ShipModel.PASS_*): opaque with the rest of the scene, glass after
-     * it with alpha blending and no depth writes. The engine glow discs follow the throttle like
-     * ShipHull.updatePlumes (half transparent at idle, opaque at full, 1.35x brighter on boost).
+     * it with premultiplied alpha blending (ForceField adds its glow at alpha 0) and no depth writes.
+     * The engine glow discs follow the throttle like ShipHull.updatePlumes (half transparent at
+     * idle, opaque at full, 1.35x brighter on boost).
      */
     private fun drawShip(f: SceneFrame, ship: ShipState, pass: Int) {
         val rig = f.gear ?: return
@@ -390,7 +391,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         ships.begin(c.viewProj, f, envTex, envLod, engine)
         if (pass == ShipModel.PASS_GLASS) {
             gl.enable(GL.BLEND)
-            gl.blendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
+            gl.blendFunc(GL.ONE, GL.ONE_MINUS_SRC_ALPHA)
             gl.depthMask(false)
             ships.draw(pass, f.shipView, model, rig)
             gl.depthMask(true)

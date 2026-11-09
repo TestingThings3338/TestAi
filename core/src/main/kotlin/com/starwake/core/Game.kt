@@ -428,18 +428,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 }
                 "lock-outpost" -> if (state == STATE_FLIGHT) lockFromMap(LOCK_STATION, 1)
                 "dock" -> if (state == STATE_FLIGHT) requestDocking(0)
-                "docked" -> if (state == STATE_FLIGHT) {
-                    requestDocking(0)
-                    stationPort(0)
-                    // lined up, the hull's centre 20 m in front of the slot (updateDocking glides it in)
-                    system.stations[0].rot.rotate(0f, 1f, 0f, upV)
-                    ship.rot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
-                    ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
-                    ship.pos.set(dockPos.x + dockDir.x * 20.0 - tmp.x, dockPos.y + dockDir.y * 20.0 - tmp.y, dockPos.z + dockDir.z * 20.0 - tmp.z)
-                    dockPhase = 1
-                }
-                "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(1500.0, 0f)
-                "ram-station" -> if (state == STATE_FLIGHT) debugBehindStation(400.0, 120f)
+                "docked" -> if (state == STATE_FLIGHT) debugDocked(0)
+                "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(0, 1500.0, 0f)
+                "ram-station" -> if (state == STATE_FLIGHT) debugBehindStation(0, 400.0, 120f)
                 "ship" -> {
                     settings.ship = (settings.ship + 1) % ShipCatalog.all.size
                     settingsDirty = true
@@ -453,6 +444,14 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                     if (i >= 0) {
                         settings.ship = i
                         settingsDirty = true
+                    }
+                } else if (state == STATE_FLIGHT) {
+                    // the station commands for any station: "dock=1", "docked=1", "behind-station=1"
+                    val i = cmd.substringAfter('=', "").toIntOrNull() ?: -1
+                    if (i in system.stations.indices) when (cmd.substringBefore('=')) {
+                        "dock" -> requestDocking(i)
+                        "docked" -> debugDocked(i)
+                        "behind-station" -> debugBehindStation(i, 1500.0, 0f)
                     }
                 }
             }
@@ -1175,10 +1174,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         dustOrigin.set(ship.pos)
     }
 
-    /** Harness hook: puts the ship [dist] m behind HOME STATION (opposite its slot), nose on the hub, flying at it at [speed]. */
-    private fun debugBehindStation(dist: Double, speed: Float) {
-        stationPort(0)
-        val st = system.stations[0]
+    /** Harness hook: puts the ship [dist] m behind station [i] (opposite its slot), nose on the hub, flying at it at [speed]. */
+    private fun debugBehindStation(i: Int, dist: Double, speed: Float) {
+        stationPort(i)
+        val st = system.stations[i]
         ship.pos.set(st.pos.x - dockDir.x * dist, st.pos.y - dockDir.y * dist, st.pos.z - dockDir.z * dist)
         st.rot.rotate(0f, 1f, 0f, upV)
         ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
@@ -1190,6 +1189,24 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         liftTime = 0f
         gearRig.update(0f, gearWanted(), true)
         docking = false
+        chase.snapTo(ship)
+        dustOrigin.set(ship.pos)
+    }
+
+    /**
+     * Harness hook: auto-dock into station [i], already lined up with the hull's centre 20 m in front
+     * of the slot ([updateDocking] glides it in).
+     */
+    private fun debugDocked(i: Int) {
+        if (!requestDocking(i)) return
+        stationPort(i)
+        system.stations[i].rot.rotate(0f, 1f, 0f, upV)
+        ship.rot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
+        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
+        ship.pos.set(dockPos.x + dockDir.x * 20.0 - tmp.x, dockPos.y + dockDir.y * 20.0 - tmp.y, dockPos.z + dockDir.z * 20.0 - tmp.z)
+        ship.vel.zero()
+        ship.angVel.zero()
+        dockPhase = 1
         chase.snapTo(ship)
         dustOrigin.set(ship.pos)
     }
@@ -1353,8 +1370,16 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         return minOf(tmp2.z * 0.5f, tmp2.z - spec.sizeZ * 0.5f - PARK_NOSE_GAP).toDouble()
     }
 
-    private fun requestDocking(i: Int) {
-        if (i < 0) return
+    /** Engages auto-dock into station [i]'s slot; false (with a message) when the hull does not fit it. */
+    private fun requestDocking(i: Int): Boolean {
+        if (i < 0) return false
+        // auto-dock flies without collision: only into a slot the hull clears on every side (every
+        // hull fits both stand-in slots, as every Roblox hangar takes every ship)
+        if (!com.starwake.core.content.StationMesh.slotFits(system.stations[i].model, spec.sizeX, spec.sizeY)) {
+            showMessage("DOCKING DENIED  ·  SLOT TOO SMALL")
+            haptic(Haptics.BUMP)
+            return false
+        }
         docking = true
         dockStation = i
         dockPhase = 0
@@ -1362,6 +1387,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         landing = false
         showMessage("DOCKING GRANTED  ·  AUTO-DOCK ENGAGED")
         haptic(Haptics.TICK)
+        return true
     }
 
     /**

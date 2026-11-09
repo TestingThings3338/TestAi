@@ -102,6 +102,39 @@ object StationMesh {
     }
 
     /**
+     * Room in metres a docking hull keeps from the slot opening's edge on every side. The lit trim
+     * reaches up to 0.3 x its thickness (1.5 m at the ring station) into the opening; the rest is
+     * clearance for the slide-in.
+     */
+    const val SLOT_CLEARANCE = 3f
+
+    /**
+     * True when a hull [width] x [height] metres, centred and lined up on the dock axis (as auto-dock
+     * parks it), fits [model]'s slot opening with [SLOT_CLEARANCE] to spare on every side. Its length
+     * does not matter: a hull longer than the tunnel parks with its tail out of the entrance.
+     * In Roblox every station's hangar takes every ship, so both slots are sized for the biggest hull
+     * (MORVEN, 61.5 x 40.3 m); auto-dock, which flies without collision, refuses a hull that does not
+     * fit. Allocation free.
+     */
+    fun slotFits(model: Int, width: Float, height: Float): Boolean {
+        val sw: Float
+        val sh: Float
+        when (model) {
+            RING_STATION -> { sw = R_SLOT_W; sh = R_SLOT_H }
+            OUTPOST -> { sw = O_SLOT_W; sh = O_SLOT_H }
+            else -> throw IllegalArgumentException("no station model $model")
+        }
+        return width * 0.5f + SLOT_CLEARANCE <= sw && height * 0.5f + SLOT_CLEARANCE <= sh
+    }
+
+    /**
+     * The outpost's docking bay, the block that holds its slot: [out] = (half width, half height, z
+     * of its back face) in local metres. It runs from the slot face ([dockPort]) back to that z, into
+     * the core tower.
+     */
+    fun outpostBay(out: Vec3): Vec3 = out.set(O_BOX_W, O_BOX_H, O_BACK)
+
+    /**
      * Landing pad: [outPos] = centre of the pad's top surface, [outUp] = its normal. Returns the usable
      * pad radius in metres, or 0 when the model has no pad (outputs then untouched).
      */
@@ -132,10 +165,10 @@ object StationMesh {
         -36f, -46f, 38f, -46f, // front-inner chamfer, front face (then front-outer chamfer)
     )
 
-    // dock head (front of the spindle)
+    // dock head (front of the spindle); the slot takes the biggest hull (see [slotFits])
     private const val R_FRONT = -340f
     private const val R_SLOT_W = 50f
-    private const val R_SLOT_H = 20f
+    private const val R_SLOT_H = 25f
     private const val R_SLOT_DEPTH = 110f
     private const val R_HEAD_R = 150f
     private const val R_HEAD_R2 = 172f
@@ -288,10 +321,11 @@ object StationMesh {
 
     private const val O_FRONT = -150f
     private const val O_BACK = -28f
-    private const val O_BOX_W = 48f
-    private const val O_BOX_H = 30f
-    private const val O_SLOT_W = 26f
-    private const val O_SLOT_H = 11f
+    // the slot takes the biggest hull (see [slotFits]); the bay keeps a plate around its trim
+    private const val O_BOX_W = 58f
+    private const val O_BOX_H = 44f
+    private const val O_SLOT_W = 36f
+    private const val O_SLOT_H = 25f
     private const val O_SLOT_DEPTH = 50f
     private const val PAD_X = 195f
     private const val PAD_TOP = 4f

@@ -2,6 +2,7 @@ package com.starwake.core.content
 
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.ShipSpec
+import com.starwake.core.math.Vec3
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -189,6 +190,12 @@ class ShipModelTest {
         val bytes = read("ships/varrow.bin")
         bytes[4] = 9 // version
         assertFailsWith<IllegalArgumentException> { ShipModel.parse(bytes) { read("ships/$it") } }
+        // a rig with more bones than the ship shader holds
+        val rig = read("ships/varrow.bin")
+        val at = 8 + (1 + 6) * 2 + 4 * (3 + 6 + 7) + 1 + (1 + "cockpit-brannock.bin".length) + 1
+        assertEquals(models.getValue("varrow").boneCount, rig[at].toInt(), "bone count offset")
+        rig[at] = (ShipModel.MAX_BONES + 1).toByte()
+        assertFailsWith<IllegalArgumentException> { ShipModel.parse(rig) { read("ships/$it") } }
     }
 
     // ---------------------------------------------------------------- landing gear (ShipGear)
@@ -396,5 +403,32 @@ class ShipModelTest {
             assertEquals(m.centreY, s.centreY)
             assertEquals(m.centreZ, s.centreZ)
         }
+    }
+
+    @Test
+    fun everyHullFitsEveryStationSlot() {
+        // auto-dock parks the hull's centre on the slot axis and flies without collision, so every
+        // hull must clear every slot, as every Roblox hangar takes every ship (Game refuses one that
+        // does not fit)
+        val slot = Vec3()
+        var tightest = Float.MAX_VALUE
+        var tightestAt = ""
+        for (m in models.values) {
+            val s = ShipSpec.fromModel(ShipCatalog.all.first { it.id == m.id }, m)
+            // the real outline around the hull's centre, gear down (its largest)
+            val halfW = maxOf(m.centreX - m.bounds[0], m.bounds[3] - m.centreX)
+            val halfH = maxOf(m.centreY - m.bounds[1], m.bounds[4] - m.centreY)
+            for (model in 0 until StationMesh.MODELS) {
+                assertTrue(StationMesh.slotFits(model, s.sizeX, s.sizeY), "${m.id} (${s.sizeX} x ${s.sizeY} m) does not fit station model $model")
+                StationMesh.slotSize(model, slot)
+                val room = minOf(slot.x - halfW, slot.y - halfH)
+                assertTrue(room >= StationMesh.SLOT_CLEARANCE - 0.5f, "${m.id} in station model $model: %.2f m to the slot's edge".format(room))
+                if (room < tightest) {
+                    tightest = room
+                    tightestAt = "${m.id} in station model $model"
+                }
+            }
+        }
+        println("tightest slot fit: %s, %.2f m to the opening's edge".format(tightestAt, tightest))
     }
 }

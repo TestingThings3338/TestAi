@@ -1,5 +1,7 @@
 package com.starwake.core.gfx
 
+import com.starwake.core.content.ShipModel
+
 /**
  * All GLSL ES 3.00 shaders. Lighting is done in linear space and tone-mapped (ACES fit) + gamma
  * encoded in each shader, so no post-processing pass (and no extra framebuffer bandwidth) is needed.
@@ -155,7 +157,7 @@ void main() {
     // ---------------------------------------------------------------- Roblox ships (ShipModel)
 
     /** Bones the ship shader holds (the largest rig, Brannock, has 36). */
-    const val SHIP_MAX_BONES = 48
+    const val SHIP_MAX_BONES = ShipModel.MAX_BONES
 
     /**
      * Quantised ship vertices (see ShipModel): position u16 x3 + material/bone, normal snorm8,
@@ -176,6 +178,7 @@ out vec3 v_normal;
 flat out vec3 v_albedo;
 flat out vec4 v_params;
 flat out float v_alpha;
+flat out float v_field;
 void main() {
     float bone = floor(a_pos.w * (1.0 / 256.0));
     int mi = int(a_pos.w - bone * 256.0 + 0.5);
@@ -193,13 +196,21 @@ void main() {
     v_albedo = pow(a_color.rgb, vec3(2.2));
     v_params = u_mat[mi];
     v_alpha = a_color.a;
+    v_field = mi == ${ShipModel.MAT_FORCEFIELD} ? 1.0 : 0.0;
     gl_Position = u_viewProj * wp;
 }
 """
 
     /**
      * The lit model of the rocks and stations plus what Roblox materials need: Neon (and the engine
-     * glow discs) is unlit, its colour times the glow; glass is blended with its opacity.
+     * glow discs) is unlit, its colour times the glow; glass is blended with its opacity. Output is
+     * premultiplied (the glass pass blends ONE, ONE_MINUS_SRC_ALPHA; opaque parts have alpha 1).
+     *
+     * ForceField (the holograms aboard the KESSOCK, LOCHRAN and MORVEN) is see-through even at
+     * Transparency 0 in Roblox: a glow in the part colour, faint face-on and bright towards the rim,
+     * with a drifting shimmer, that only adds light. Here: strength = 1 - Transparency (the vertex
+     * alpha), the shimmer two crossed waves anchored to the ship, alpha 0 so the blend adds it to
+     * what is behind.
      */
     val shipFs = HEADER + """
 precision highp float;
@@ -208,6 +219,8 @@ in vec3 v_normal;
 flat in vec3 v_albedo;
 flat in vec4 v_params; // x metallic, y emissive, z engine-driven, w roughness
 flat in float v_alpha;
+flat in float v_field;
+uniform mat4 u_model;
 uniform vec3 u_sunDir;
 uniform vec3 u_sunColor;
 uniform vec3 u_fillDir;
@@ -216,19 +229,28 @@ uniform vec3 u_ambient;
 uniform float u_engine;
 uniform float u_exposure;
 uniform float u_envLod;
+uniform float u_fieldPhase;
 uniform samplerCube u_env;
 out vec4 o_color;
 """ + TONEMAP + """
 void main() {
     vec3 N = normalize(v_normal);
     vec3 V = normalize(-v_pos);
+    float ndv = max(dot(N, V), 0.001);
+    if (v_field > 0.5) {
+        vec3 sp = (v_pos - u_model[3].xyz) * mat3(u_model); // ship space
+        float rim = 1.0 - ndv;
+        float wave = sin(sp.y * 5.0 + u_fieldPhase) * sin(sp.x * 3.0 - sp.z * 4.0 - 2.0 * u_fieldPhase);
+        vec3 glow = v_albedo * v_params.y * v_alpha * (0.06 + 0.5 * rim * rim) * (1.0 + 0.3 * wave);
+        o_color = vec4(tonemap(glow), 0.0);
+        return;
+    }
     float metal = v_params.x;
     float rough = v_params.w;
     vec3 alb = v_albedo;
     float ndl = max(dot(N, u_sunDir), 0.0);
     vec3 H = normalize(u_sunDir + V);
     float ndh = max(dot(N, H), 0.0);
-    float ndv = max(dot(N, V), 0.001);
     float gloss = 1.0 - rough;
     float specPow = exp2(gloss * 10.0 + 1.0);
     float specNorm = (specPow + 8.0) * 0.0398;
@@ -245,7 +267,7 @@ void main() {
     col += env * F * (0.6 + 1.4 * metal) * 1.6;
     float emis = v_params.y * mix(1.0, u_engine, v_params.z);
     if (v_params.y > 0.0) col = alb * emis;
-    o_color = vec4(tonemap(col), v_alpha);
+    o_color = vec4(tonemap(col) * v_alpha, v_alpha);
 }
 """
 

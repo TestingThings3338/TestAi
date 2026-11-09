@@ -827,7 +827,7 @@ class StationCollision(private val flight: FlightModel) {
             val l = ArrayList<Proxy>()
             val oct = (PI / 8).toFloat()
             l += revolve("core tower", O, X, Z, Y, floatArrayOf(0f, -110f, 28f, -110f, 42f, -94f, 42f, 94f, 28f, 110f, 0f, 110f), 8, oct)
-            // docking bay: 96 x 60 m box from the slot face back into the tower, minus the slot tunnel
+            // docking bay: a box from the slot face back into the tower, minus the slot tunnel
             dockBay(l)
             val hab = floatArrayOf(0f, 25f, 22f, 25f, 22f, 136f, 14f, 150f, 0f, 154f)
             l += revolve("rear habitat", O, X, Y, Z, hab, 8, oct)
@@ -892,16 +892,17 @@ class StationCollision(private val flight: FlightModel) {
             slotTrim(l, zf, slot.x, slot.y, t)
         }
 
-        /** Outpost docking bay: box x ±48, y ±30 from the slot face back to z = -28, minus the tunnel. */
+        /** Outpost docking bay ([StationMesh.outpostBay]) from the slot face back into the tower, minus the tunnel. */
         private fun dockBay(l: ArrayList<Proxy>) {
             val port = Vec3()
             val dir = Vec3()
             StationMesh.dockPort(StationMesh.OUTPOST, port, dir)
             val slot = StationMesh.slotSize(StationMesh.OUTPOST, Vec3())
+            val bay = StationMesh.outpostBay(Vec3())
             val zf = port.z
-            val zb = -28f
-            val hw = 48f
-            val hh = 30f
+            val zb = bay.z
+            val hw = bay.x
+            val hh = bay.y
             l += box("bay top", -hw, slot.y, zf, hw, hh, zb)
             l += box("bay bottom", -hw, -hh, zf, hw, -slot.y, zb)
             l += box("bay right", slot.x, -hh, zf, hw, hh, zb)

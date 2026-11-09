@@ -3,11 +3,13 @@ package com.starwake.core.gfx
 import com.starwake.core.content.ShipModel
 import com.starwake.core.game.GearRig
 import com.starwake.core.math.Mat4
+import com.starwake.core.math.TAU_F
 
 /**
  * Draws a [ShipModel]: one VAO per chunk (the hull, the shared cockpit), one draw call per chunk and
  * pass. Opaque parts (with Neon and the engine glow discs, unlit in the shader) go in the opaque
- * pass with the rest of the scene; glass is blended afterwards without depth writes. The view picks
+ * pass with the rest of the scene; glass is blended afterwards without depth writes (premultiplied:
+ * ForceField holograms add their glow, see Shaders.shipFs), the nearer chunk last. The view picks
  * the index range: the exterior view leaves out the pilot's body (CockpitOnly), the cockpit view the
  * canopy cage and everything hidden from the seat (HideInside, HideSeated).
  *
@@ -30,6 +32,7 @@ class ShipRenderer(private val gl: Gl) {
     private val uExposure = prog.u("u_exposure")
     private val uEnvLod = prog.u("u_envLod")
     private val uEnv = prog.u("u_env")
+    private val uFieldPhase = prog.u("u_fieldPhase")
 
     private class ChunkMesh(val chunk: ShipModel.Chunk, val vao: Int, val vbo: Int, val ibo: Int, val indexType: Int)
 
@@ -114,6 +117,8 @@ class ShipRenderer(private val gl: Gl) {
         gl.uniform1f(uEngine, engine)
         gl.uniform1f(uExposure, f.exposure)
         gl.uniform1f(uEnvLod, envLod)
+        // ForceField shimmer: wrapped to one turn (the shader's waves run at whole multiples of it)
+        gl.uniform1f(uFieldPhase, (f.time * FIELD_SHIMMER_SPEED) % TAU_F)
         gl.activeTexture(GL.TEXTURE0)
         gl.bindTexture(GL.TEXTURE_CUBE_MAP, env)
         gl.uniform1i(uEnv, 0)
@@ -131,7 +136,11 @@ class ShipRenderer(private val gl: Gl) {
             bonesVersion = rig.version
             gl.uniform4fv(uBones, rig.boneCount * 3, rig.bones, 0)
         }
-        for (i in meshes.indices) {
+        // glass back to front: from outside the hull's canopy covers the cockpit's translucent parts,
+        // from the seat those are in front of the canopy
+        val reverse = pass == ShipModel.PASS_GLASS && view == ShipModel.VIEW_EXTERIOR
+        for (k in meshes.indices) {
+            val i = if (reverse) meshes.size - 1 - k else k
             val mesh = meshes[i]
             val c = mesh.chunk
             val count = c.count(pass, view)
@@ -185,5 +194,8 @@ class ShipRenderer(private val gl: Gl) {
 
         /** Ambient multiplier for ship parts (Roblox lights the hulls with a brighter ambient than our rocks). */
         private const val SHIP_AMBIENT = 2.5f
+
+        /** How fast the ForceField shimmer drifts (radians of its waves per second). */
+        private const val FIELD_SHIMMER_SPEED = 2.4f
     }
 }

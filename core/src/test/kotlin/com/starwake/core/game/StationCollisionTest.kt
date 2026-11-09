@@ -143,7 +143,7 @@ class StationCollisionTest {
         // and solid points are solid for both: hub, ring tube, dock head beside the slot, spindle, mast
         // beacon; outpost tower, bay wall, pad, tank
         val solidRing = listOf(floatArrayOf(0f, 0f, 0f), floatArrayOf(0f, 845f, 0f), floatArrayOf(100f, 0f, -260f), floatArrayOf(0f, 0f, 200f), floatArrayOf(0f, 0f, 652f))
-        val solidOutpost = listOf(floatArrayOf(0f, 0f, 0f), floatArrayOf(37f, 0f, -120f), floatArrayOf(195f, -2f, 0f), floatArrayOf(-80f, -44f, 0f))
+        val solidOutpost = listOf(floatArrayOf(0f, 0f, 0f), floatArrayOf(47f, 0f, -120f), floatArrayOf(195f, -2f, 0f), floatArrayOf(-80f, -44f, 0f))
         for ((m, pts) in listOf(0 to solidRing, 1 to solidOutpost)) for (p in pts) {
             assertTrue(sc.localDistance(m, p[0], p[1], p[2]) < 0f, "model $m: (${p.joinToString()}) should be inside a proxy")
             assertTrue(fields[m].inside(p[0].toDouble(), p[1].toDouble(), p[2].toDouble()), "model $m: (${p.joinToString()}) should be inside the mesh")

@@ -157,6 +157,9 @@ class ShipModel private constructor(
         const val VIEW_EXTERIOR = 0
         const val VIEW_COCKPIT = 1
 
+        /** Most bones a ship may have, the three fixed ones included: what the ship shader holds. */
+        const val MAX_BONES = 48
+
         /** Bone 0: every part that never moves. */
         const val BONE_STATIC = 0
 
@@ -202,7 +205,7 @@ class ShipModel private constructor(
             0.00f, 0f, 0f, 0.90f, // Basalt
             0.00f, 0f, 0f, 0.92f, // Rock
             0.00f, 1.5f, 0f, 1f, // Neon
-            0.00f, 1.0f, 0f, 1f, // ForceField
+            0.00f, 1.0f, 0f, 1f, // ForceField: a see-through glow added to the scene (Shaders.shipFs)
             0.00f, 1.0f, 1f, 1f, // engine glow disc (Neon, brightness follows the throttle)
         )
 
@@ -229,7 +232,7 @@ class ShipModel private constructor(
             val files = Array(chunkCount) { str(b) }
             val hasDoors = b.get().toInt() != 0
             val boneCount = b.get().toInt() and 0xFF
-            require(boneCount >= 3) { "bad bone count $boneCount" }
+            require(boneCount in 3..MAX_BONES) { "bad bone count $boneCount (the shader holds $MAX_BONES)" }
             val bones = Array(boneCount - 3) {
                 val kind = b.get().toInt() and 0xFF
                 val pivot = FloatArray(12) { b.float }

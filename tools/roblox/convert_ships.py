@@ -62,7 +62,8 @@ OUTPUT (all little-endian; str = u8 length + UTF-8 bytes)
         u16 x, y, z     quantised position
         u16 matBone     material id (low byte, see MATERIALS) + 256 * bone (high byte)
         s8  nx, ny, nz, 0   unit normal (snorm8)
-        u8  r, g, b, a      sRGB colour, a = opacity (1 - Transparency)
+        u8  r, g, b, a      sRGB colour, a = opacity (1 - Transparency); on ForceField the
+                            strength of its glow (also 1 - Transparency)
     indexCount x u16/u32 (padded to 4 bytes)
 
   Classes (ShipHull.isHidden): cockpit only = under a CockpitOnly model (pilot's arms and legs),
@@ -73,12 +74,13 @@ OUTPUT (all little-endian; str = u8 length + UTF-8 bytes)
   BONES (ShipGear): 0 static, 1 landing gear without joint data (hidden when stowed), 2 GearClosed
   hull doors (shown only when stowed), 3.. one per rigid gear group (same role, hinge, angle, lift,
   liftFrom, ankle: they move as one) and one per Link item (rods that stretch). The game poses
-  them like ShipGear.pose, in ship space.
+  them like ShipGear.pose, in ship space. At most MAX_BONES (the ship shader's array).
 
   Passes: glass = every part with 0 < Transparency < 1 (canopy panes, windows, holo emitters,
   translucent Neon) and ForceField; the rest is opaque. Fully transparent parts are not in the glTF.
   Materials: Neon is drawn unlit; parts with the EngineGlow attribute get the "engine" material,
-  whose glow follows the throttle (ShipHull.updatePlumes).
+  whose glow follows the throttle (ShipHull.updatePlumes). ForceField (the bridge holograms) is
+  see-through even at Transparency 0, as in Roblox: the shader draws it as an added rim glow.
 
   Left out: the cockpit holo backboards (Cockpit/Holo/*/Back), which ShipInterior shows only
   while the holo displays their text (SurfaceGuis, not part of the glTF).
@@ -113,6 +115,7 @@ ENGINE = MAT["engine"]
 CLASS_COCKPIT, CLASS_BOTH, CLASS_EXTERIOR = 0, 1, 2
 PASS_OPAQUE, PASS_GLASS = 0, 1
 BONE_STATIC, BONE_GEAR, BONE_CLOSED = 0, 1, 2
+MAX_BONES = 48  # the three fixed bones included; keep in sync with ShipModel.MAX_BONES (the shader's array)
 KIND = {"Leg": 1, "Foot": 2, "Mount": 3, "Door": 4, "Link": 5}
 PART_CLASSES = {"Part", "WedgePart", "CornerWedgePart", "UnionOperation", "MeshPart", "TrussPart"}
 OUTSIDE_GROUPS = {"Hull", "Lights", "Engines", "Canopy", "Gear"}
@@ -551,8 +554,8 @@ def build_rig(parts, root_inv):
             bones.append(rec)
             groups[key] = 2 + len(bones)
         bone_of[i] = groups[key]
-    if 3 + len(bones) > 255:
-        raise ValueError("too many gear bones")
+    if 3 + len(bones) > MAX_BONES:
+        raise ValueError("%d gear bones: the ship shader holds %d (ShipModel.MAX_BONES)" % (3 + len(bones), MAX_BONES))
     for i, p in enumerate(parts):
         if p.rbx.get("attrs", {}).get("GearClosed") is True:
             bone_of[i] = BONE_CLOSED
