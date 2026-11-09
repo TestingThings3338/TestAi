@@ -296,6 +296,45 @@ class TouchFlightControlsTest {
         for (r in listOf(c.upBtn, c.leftBtn, c.faBtn, c.boostBtn)) assertTrue(minOf(r.w, r.h) >= 38f - 1e-3f)
     }
 
+    /**
+     * The first-flight hint plates cover no control on the usual phone screens, either hand: BOOST
+     * moved down to y 192 (5.6) and now reaches into the stick hint's row, so that plate moves inward.
+     */
+    @Test
+    fun firstFlightHintsCoverNoControl() {
+        // (width px, height px, u px): the 5.6 reference at u = 1, Xiaomi 15 at 2.875, the harness'
+        // 2400 x 1080 at 2.75, a typical 2400 x 1080 at 2.625, a small 1600 x 720 at 2.0 (u = 0.947 dp),
+        // a 4:3 tablet
+        val screens = listOf(
+            Triple(929f, 417f, 1f), Triple(2670f, 1200f, 2.875f), Triple(2400f, 1080f, 2.75f),
+            Triple(2400f, 1080f, 2.625f), Triple(1600f, 720f, 2f * 360f / 380f), Triple(2048f, 1536f, 2f),
+        )
+        for ((sw, sh, su) in screens) for (left in listOf(false, true)) for (cutout in listOf(0f, 30f * su)) {
+            val c = TouchFlightControls(Settings().also { it.leftHanded = left }, host)
+            c.layout(sw, sh, su, cutout, 0f, 0f, 0f)
+            val what = "${sw.toInt()}x${sh.toInt()} u=$su left-handed=$left cutout=$cutout"
+            // every laid-out control, those of later ports included (they appear in the same places)
+            val controls = listOf(
+                "PAUSE" to c.pauseBtn, "WALK" to c.walkBtn, "DATA" to c.dataBtn, "MAP" to c.mapBtn, "LOCK" to c.lockBtn,
+                "VIEW" to c.camBtn, "look strip" to c.lookStrip, "ACTION" to c.actionBtn, "AUTO" to c.autoBtn,
+                "SCAN" to c.scanBtn, "FA" to c.faBtn, "BOOST" to c.boostBtn, "lever" to c.gauge, "▲" to c.upBtn,
+                "▼" to c.downBtn, "◀" to c.leftBtn, "▶" to c.rightBtn, "CANCEL JUMP" to c.cancelJumpBtn,
+            )
+            for ((hint, r) in listOf("stick hint" to c.stickHint, "lever hint" to c.throttleHint)) {
+                for ((name, b) in controls) {
+                    val overlap = r.x < b.x + b.w && b.x < r.x + r.w && r.y < b.y + b.h && b.y < r.y + r.h
+                    assertFalse(overlap, "$what: the $hint covers $name")
+                }
+                assertTrue(r.x >= 0f && r.x + r.w <= sw && r.y >= 0f && r.y + r.h <= sh, "$what: the $hint is off screen")
+            }
+            // the plates do not meet, and the stick's stays over the stick's half of the screen
+            val a = c.stickHint
+            val b = c.throttleHint
+            assertFalse(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h, "$what: the hints overlap")
+            assertTrue(if (left) a.cx < sw * 0.5f else a.cx > sw * 0.5f, "$what: stick hint on the wrong side")
+        }
+    }
+
     @Test
     fun leftHandedLayoutKeepsEachSidesInsetAndTheArrows() {
         val s = Settings().also { it.leftHanded = true }

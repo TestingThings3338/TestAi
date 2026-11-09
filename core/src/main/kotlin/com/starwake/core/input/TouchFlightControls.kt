@@ -83,6 +83,10 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
 
     /** The look strip (01 5.6: x 150–640, y 0–56 u from the safe insets). */
     val lookStrip = Rect()
+
+    /** Plates of the first-flight hints: the lever's beside the gauge, the stick's above its rest ring. */
+    val throttleHint = Rect()
+    val stickHint = Rect()
     private var stickRadius = 1f
     private var stickRestX = 0f
     private var stickRestY = 0f
@@ -189,6 +193,21 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             rightBtn.x = lx
             stickRestX = width - stickRestX
         }
+        // first-flight hints, on the inner side of the lever and above the stick's rest ring. BOOST
+        // (moved down to make room for AUTO) reaches into the stick hint's row on phone screens:
+        // there the plate moves inward, clear of the BOOST column, so it never covers a control
+        val hy = gauge.y + gauge.h * 0.64f
+        if (mirror) throttleHint.set(gauge.x - 270f * u, hy - 26f * u, 260f * u, 44f * u)
+        else throttleHint.set(gauge.x + gauge.w + 16f * u, hy - 26f * u, 260f * u, 44f * u)
+        val hintW = 280f * u
+        val hintH = 46f * u
+        val hintY = stickRestY - stickRadius - 44f * u
+        val gap = 8f * u
+        var hintX = stickRestX - hintW * 0.5f
+        if (hintY < boostBtn.y + boostBtn.h + gap && hintY + hintH > boostBtn.y - gap) {
+            hintX = if (mirror) maxOf(hintX, boostBtn.x + boostBtn.w + gap) else minOf(hintX, boostBtn.x - gap - hintW)
+        }
+        stickHint.set(hintX, hintY, hintW, hintH)
     }
 
     private fun inThrottleZone(x: Float) = if (mirror) x > w - zoneSplit else x < zoneSplit
@@ -578,24 +597,24 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         ui.rect(pauseBtn.cx - 6f * u, pauseBtn.cy - 7f * u, 4f * u, 14f * u, withAlpha(Theme.TEXT, a))
         ui.rect(pauseBtn.cx + 2f * u, pauseBtn.cy - 7f * u, 4f * u, 14f * u, withAlpha(Theme.TEXT, a))
 
-        // -------- first-flight hints (below the strafe cross, beside the lever)
+        // -------- first-flight hints (below the strafe cross beside the lever, above the stick)
         if (hints > 0.01f) {
             val ha = a * hints
-            val tx = if (mirror) g.x - 20f * u else g.x + g.w + 26f * u
-            val al = if (mirror) UiRenderer.RIGHT else UiRenderer.LEFT
-            val hy = g.y + g.h * 0.64f
             if (!throttleUsed) {
-                val bw = 250f * u
-                ui.rect(if (mirror) tx - bw else tx - 10f * u, hy - 26f * u, bw + 10f * u, 44f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
-                ui.text("SLIDE UP/DOWN · THROTTLE", tx, hy - 8f * u, 12f * u, withAlpha(Theme.TEXT, ha), al, 0.08f, shadow = 0.8f)
+                val r = throttleHint
+                val tx = if (mirror) r.x + r.w - 10f * u else r.x + 10f * u
+                val al = if (mirror) UiRenderer.RIGHT else UiRenderer.LEFT
+                ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
+                ui.text("SLIDE UP/DOWN · THROTTLE", tx, r.y + 18f * u, 12f * u, withAlpha(Theme.TEXT, ha), al, 0.08f, shadow = 0.8f)
                 ui.text(if (settings.stickXRoll) "SIDEWAYS · YAW   DOUBLE-TAP · STOP" else "SIDEWAYS · ROLL   DOUBLE-TAP · STOP",
-                    tx, hy + 10f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), al, 0.08f, shadow = 0.8f)
+                    tx, r.y + 36f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), al, 0.08f, shadow = 0.8f)
             }
             if (!stickUsed) {
-                ui.rect(stickRestX - 140f * u, stickRestY - stickRadius - 44f * u, 280f * u, 46f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
-                ui.textCentered("DRAG TO STEER", stickRestX, stickRestY - stickRadius - 22f * u, 12f * u, withAlpha(Theme.TEXT, ha), tracking = 0.1f, shadow = 0.8f)
+                val r = stickHint
+                ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
+                ui.textCentered("DRAG TO STEER", r.cx, r.y + 22f * u, 12f * u, withAlpha(Theme.TEXT, ha), tracking = 0.1f, shadow = 0.8f)
                 ui.textCentered(if (settings.stickXRoll) "UP/DOWN · PITCH   SIDEWAYS · ROLL" else "UP/DOWN · PITCH   SIDEWAYS · YAW",
-                    stickRestX, stickRestY - stickRadius - 6f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), tracking = 0.08f, shadow = 0.8f)
+                    r.cx, r.y + 38f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), tracking = 0.08f, shadow = 0.8f)
             }
             if (lookEnabled) {
                 ui.textCentered("DRAG HERE TO LOOK AROUND", lookStrip.cx, lookStrip.y + lookStrip.h - 8f * u, 9f * u, withAlpha(Theme.TEXT_DIM, ha * 0.8f), tracking = 0.15f, shadow = 0.8f)
