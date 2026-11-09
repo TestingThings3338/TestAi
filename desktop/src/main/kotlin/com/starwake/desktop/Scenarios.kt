@@ -1,6 +1,7 @@
 package com.starwake.desktop
 
 import com.starwake.core.Game
+import com.starwake.core.game.Session
 
 /** A named, runnable check. Add new ones to [Scenarios.registry]; "all" runs them in order. */
 class Scenario(val name: String, val description: String, val body: (ScenarioEnv) -> Unit)
@@ -154,13 +155,17 @@ object Scenarios {
             shot("sys-docked")
         },
 
-        "gameplay" to gameScenario("gameplay", "Checks: land, touch down, take off; Back twice while docked; boost during auto-dock; off-screen lock arrow") {
+        "gameplay" to gameScenario("gameplay", "Checks: off-screen lock arrow (MERIDIAN behind the spawn); land, touch down, take off; Back twice while docked; boost during auto-dock") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
-            // off-screen lock: TRANQUILITY (at Luna) is far away and not in view at spawn -> edge arrow
-            cmd("lock-station tranquility")
+            // off-screen lock: the free-flight spawn is 3 km out of MERIDIAN's mouth with the nose
+            // straight away from the station, so MERIDIAN is behind the ship -> the edge arrow
+            cmd("lock-station meridian")
             frames(10)
+            info()
+            check(field("lock") == "${Session.LOCK_STATION}:0") { "MERIDIAN is not locked: ${info()}" }
+            check(field("lockArrow") == "true") { "no edge arrow for MERIDIAN behind the ship: ${info()}" }
             shot("gp-lock-arrow")
             cmd("lock clear")
             // --- landing: 60 m above Earth, LAND, hold the down thruster until touchdown

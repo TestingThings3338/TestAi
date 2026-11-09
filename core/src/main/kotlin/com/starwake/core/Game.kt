@@ -91,6 +91,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
             "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
+            "lockArrow=${hud.lockArrowShown} " +
             "sceneRocks=${sceneFrame.debris?.visible ?: 0} " +
             (session?.debugState() ?: "menu")
 

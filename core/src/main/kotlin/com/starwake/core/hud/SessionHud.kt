@@ -44,6 +44,10 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     var hintTime = 0f
         private set
 
+    /** The last [draw] showed the locked target, off screen, with the edge arrow (harness read-out). */
+    var lockArrowShown = false
+        private set
+
     /** A new flight: the hints show again, for [HINT_TIME] of their own screen time. */
     fun resetHints() {
         hints = 1f
@@ -66,6 +70,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val u = frame.u
         val a = alpha
         val ship = s.ship
+        lockArrowShown = false
         // reticle where the nose points (800 m ahead) and the velocity vector marker
         ship.rot.rotate(0f, 0f, -800f, tmp)
         relToCam(s, cam, tmp)
@@ -302,6 +307,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
      */
     private fun drawLockArrow(ui: UiRenderer, s: Session, cam: Camera, a: Float, kind: Int, i: Int) {
         val u = frame.u
+        lockArrowShown = true
         // view-space direction (camera looks down -Z, +Y up); screen y grows downwards
         cam.rot.rotateInverse(tmp, tmp2)
         var dx = tmp2.x
