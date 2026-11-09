@@ -1100,7 +1100,7 @@ class Session(
         }
     }
 
-    /** C45 (pre-port): the PROXIMITY warning from asteroid and station hull gaps. */
+    /** C45 (pre-port): the PROXIMITY warning from station hull gaps. */
     private fun updateProximity() {
         // station hulls make the proximity warning. Not while auto-docking (it flies its own clear
         // route), docked or landed, nor just after a launch, which starts 30 m off the slot

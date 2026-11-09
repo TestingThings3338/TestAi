@@ -192,7 +192,9 @@ class StarSystem(
             }
             if (recordDelta) b.delta.set(b.pos.x - ox, b.pos.y - oy, b.pos.z - oz) else b.delta.set(0.0, 0.0, 0.0)
         }
-        for (s in stations) {
+        // indices, not an iterator: no allocation per frame (ART has no escape analysis)
+        for (i in stations.indices) {
+            val s = stations[i]
             val h = bodies[s.parent].pos
             s.pos.set(h.x + s.offset.x, h.y + s.offset.y, h.z + s.offset.z)
         }

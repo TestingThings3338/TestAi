@@ -38,4 +38,18 @@ class DebugCommandsTest {
         assertNull(near("near -1"))
         assertNull(near("near NOWHERE 100"))
     }
+
+    @Test
+    fun stationsAreNamedByIndexIdOrName() {
+        fun st(arg: String?) = Game.stationTarget(arg, system)
+        assertEquals(0, st("0"))
+        assertEquals(2, st("2"))
+        assertEquals(system.stations.indexOfFirst { it.id == "SOL-ARES" }, st("SOL-ARES"))
+        assertEquals(system.stations.indexOfFirst { it.id == "SOL-ARES" }, st("ares"))
+        assertEquals(system.stations.indexOfFirst { it.id == "SOL-TRANQUILITY" }, st("tranquility"))
+        assertEquals(system.stations.indexOfFirst { it.id == "SOL-MERIDIAN" }, st("meridian-station"))
+        assertNull(st(null))
+        assertNull(st("${system.stations.size}"))
+        assertNull(st("nowhere"))
+    }
 }

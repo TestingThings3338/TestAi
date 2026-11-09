@@ -21,6 +21,8 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // -Pnoea: run without escape analysis, so the zero-allocation tests see what ART would allocate
+    if (project.hasProperty("noea")) jvmArgs("-XX:-DoEscapeAnalysis")
     // ShipModelTest reads the converted Roblox ships from the app's assets (../app/src/main/assets)
     inputs.dir(rootProject.file("app/src/main/assets/ships")).withPathSensitivity(PathSensitivity.RELATIVE)
 }

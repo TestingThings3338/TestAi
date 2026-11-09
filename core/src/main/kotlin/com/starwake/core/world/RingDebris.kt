@@ -253,7 +253,7 @@ class RingDebris {
             val qz = pz + wz
             val radial = sqrt(qx * qx + qz * qz)
             var shown = 0.0
-            if (radial in inner..outer) {
+            if (radial >= inner && radial <= outer) {
                 val d = if (profile != null) RingProfiles.densityAt(profile, radial / outer) else density
                 val dens = minOf(d * 1.1, 1.0)
                 val band = ((dens - threshold[i]) / DENSITY_SOFT).coerceIn(0.0, 1.0)

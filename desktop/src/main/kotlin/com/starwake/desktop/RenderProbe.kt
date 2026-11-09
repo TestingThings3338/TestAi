@@ -59,9 +59,9 @@ class CountingGl(private val inner: Gl) : Gl by inner {
  *  - "station-depth": MERIDIAN STATION from an oblique front view at 1..200 km with a telephoto lens,
  *    compared against a reference that draws the station alone with a projection fitted to it
  *    (near = d - R, far = d + R), so depth precision cannot be the cause of a difference;
- *  - "render-probe": draw calls, depth slices and full-screen body passes per frame for spawn,
- *    30 km from the station, deep space, leaving the field (40 and 55 km) and the star behind / in front
- *    of the camera.
+ *  - "render-probe": draw calls, depth slices and full-screen body passes per frame for MERIDIAN's
+ *    spawn, 30 km from the station (towards and away from it), deep space, and Mercury from 3 radii
+ *    and from 50 km on its night side with the star behind / in front of it.
  */
 object RenderProbe {
     private val distancesKm = intArrayOf(1, 2, 5, 12, 30, 60, 200)
@@ -283,8 +283,8 @@ object RenderProbe {
             for ((label, alt) in listOf("3r" to 2.0 * p1.radius, "50km" to 50_000.0)) {
                 val d = p1.radius + alt
                 val p = DVec3(p1.pos.x + nx * d, p1.pos.y + ny * d, p1.pos.z + nz * d)
-                view("planet1-$label-away", p, out.set(nx.toFloat(), ny.toFloat(), nz.toFloat()), withShip = false)
-                view("planet1-$label-sunward", p, out.set(-nx.toFloat(), -ny.toFloat() + 0.02f, -nz.toFloat()), withShip = false)
+                view("mercury-$label-away", p, out.set(nx.toFloat(), ny.toFloat(), nz.toFloat()), withShip = false)
+                view("mercury-$label-sunward", p, out.set(-nx.toFloat(), -ny.toFloat() + 0.02f, -nz.toFloat()), withShip = false)
             }
             scene.dispose()
         }

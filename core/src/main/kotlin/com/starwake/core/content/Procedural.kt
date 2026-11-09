@@ -9,7 +9,7 @@ import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** Procedural asteroid meshes: displaced, stretched icospheres with faceted shading. */
+/** Procedural rock meshes (the ring debris): displaced, stretched icospheres with faceted shading. */
 object AsteroidMesh {
     const val ROCK = 0
     const val DARK_ROCK = 1

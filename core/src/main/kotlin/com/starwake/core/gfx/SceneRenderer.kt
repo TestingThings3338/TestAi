@@ -682,7 +682,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 }
 
-/** Uniform bindings shared by the ship and asteroid programs. */
+/** Uniform bindings shared by the station and ring-debris programs. */
 private class LitProgram(private val gl: Gl, instanced: Boolean) {
     val prog = ShaderProgram(gl, if (instanced) "litInstanced" else "lit", Shaders.litVs(instanced), Shaders.litFs)
     private val uViewProj = prog.u("u_viewProj")

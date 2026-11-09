@@ -18,8 +18,11 @@ import kotlin.math.sqrt
  *    lock; Jupiter's cloud-top barrier and its LANDING BLOCKED prompt;
  *  - "sol-trip": MERIDIAN to Mars at full throttle, timed to Mars's mass-shadow edge and to 60 km;
  *  - "sol-docking": the real auto-dock at all six Sol stations (no-op GL), then each station on
- *    approach (GL).
- * The game's world is a pure function of its save-game clock, so the scripts rebuild Sol at the
+ *    approach (GL);
+ *  - "ring-debris" and "orbits" (03-world.md 9.5): Saturn's ring from inside, the B ring against the
+ *    Cassini division; bodies turning on the save-game clock with a parked ship riding along.
+ * The timed flights run on the no-op GL (the same game logic at 60 Hz, nothing drawn) and their
+ * shots come from a replay of the same deterministic script. The game's world is a pure function of its save-game clock, so the scripts rebuild Sol at the
  * clock the debug read-out shows to know where the bodies are.
  */
 object SolScenarios {
