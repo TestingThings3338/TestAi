@@ -49,7 +49,7 @@ object Scenarios {
 
         "bodies" to Scenario(
             "bodies",
-            "Real-scale BodyRenderer without Game: gas giant from home, PLANET II from orbit and 20 km, the star, dots, all surface types",
+            "Sol at S = 3000 through BodyRenderer without Game: measured angular sizes (Luna 0.53 deg from Earth, Earth 37.5 deg from MERIDIAN, ...), every body from 3.5 radii, the hosts from their stations, Earth's limb and 20 km horizon, Saturn's rings and Cassini division, Uranus's ring at 82 deg, an occluded moon, the bakes",
         ) { Bodies.run(it) },
 
         "stations" to Scenario(
@@ -64,17 +64,17 @@ object Scenarios {
 
         "station-depth" to Scenario(
             "station-depth",
-            "HOME STATION at 1-200 km (oblique front, telephoto) vs a fitted-depth reference: depth precision of far stations",
+            "MERIDIAN STATION at 1-200 km (oblique front, telephoto) vs a fitted-depth reference: depth precision of far stations",
         ) { RenderProbe.stationDepth(it) },
 
         "render-probe" to Scenario(
             "render-probe",
-            "Draw calls, depth slices, body full-screen passes per frame: spawn, 30 km out, deep space, field 40/55 km, star behind/ahead",
+            "Draw calls, depth slices, body full-screen passes per frame: MERIDIAN spawn, 30 km out, deep space, star behind/ahead",
         ) { RenderProbe.passes(it) },
 
         "ships" to Scenario(
             "ships",
-            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: cockpit, external, chase, gear in flight, menu backdrop per ship; every hull docks at OUTPOST II and HOME STATION, the MORVEN flies the whole route into OUTPOST II",
+            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: cockpit, external, chase, gear in flight, menu backdrop per ship; every hull docks at TRANQUILITY YARDS (outpost stand-in) and MERIDIAN STATION (ring stand-in), the MORVEN flies the whole route into TRANQUILITY",
         ) { ShipsScenario.run(it) },
 
         "holograms" to Scenario(
@@ -84,7 +84,7 @@ object Scenarios {
 
         "map" to Scenario(
             "map",
-            "System map without Game: opening view (none / OUTPOST II / PLANET III selected), pinch on PLANET II, two-finger pan, tap-select, ship close-ups, no per-frame allocation",
+            "Sol system map without Game: opening view (none / MERIDIAN / Saturn selected), pinch on Earth, zoomed to Earth's moons and stations, tap-select Jupiter, ship close-ups, no per-frame allocation",
         ) { MapScenario.run(it) },
 
         "menu" to gameScenario("menu", "Main menu after 2 s") {
@@ -158,12 +158,12 @@ object Scenarios {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
-            // off-screen lock: OUTPOST II is far away and not in view at spawn -> edge arrow
-            cmd("lock-outpost")
+            // off-screen lock: TRANQUILITY (at Luna) is far away and not in view at spawn -> edge arrow
+            cmd("lock-station tranquility")
             frames(10)
             shot("gp-lock-arrow")
-            cmd("lock-outpost")
-            // --- landing: 60 m above PLANET II, LAND, hold the down thruster until touchdown
+            cmd("lock clear")
+            // --- landing: 60 m above Earth, LAND, hold the down thruster until touchdown
             cmd("teleport-surface")
             frames(2)
             cmd("action")
@@ -205,7 +205,7 @@ object Scenarios {
             shot("gp-launched")
         },
 
-        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind HOME STATION routes round the hull; ramming the hull stops at it") {
+        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; ramming the hull stops at it") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
@@ -310,7 +310,7 @@ object Scenarios {
 
         "start-docked" to Scenario(
             "start-docked",
-            "D13: a fresh start (real LAUNCH tap) parks the ship docked in HOME STATION's slot, services after the reveal, the welcome lines over them 5 s later; LAUNCH on the services flies out with the first-flight hints unspent (30 s docked, no-op GL) and clear of BOOST",
+            "D13: a fresh start (real LAUNCH tap) parks the ship docked in MERIDIAN STATION's slot above Earth, in the station's frame, services after the reveal, the welcome lines over them 5 s later; LAUNCH on the services flies out with the first-flight hints unspent (30 s docked, no-op GL) and clear of BOOST",
         ) { SessionScenarios.startDocked(it) },
 
         "camera-views" to Scenario(

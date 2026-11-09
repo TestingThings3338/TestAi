@@ -102,46 +102,33 @@ float vnoiseFast(vec3 p) {
 """
 
     /**
-     * Ring density profile of the menu ring (Shaders.ringDensity), re-parametrised so that
-     * x = 0 at u_ring.x (inner radius, in planet radii) and 1 at u_ring.y (outer radius), and
-     * filtered by the footprint of a pixel (or of the star's penumbra, for shadows).
+     * The ring's opacity from its Roblox profile (`ShipVisualAssets.RingProfiles`, 03-world.md
+     * Appendix D): a 128-texel texture over f = r / outer radius, value i at f = (i − 0.5)/128 (the
+     * texel centres), linear between. Mipmapped: the footprint [fp] (planet radii) of a pixel, or of
+     * the star's penumbra for shadows, picks the level, so far or edge-on rings never shimmer.
      */
-    private const val RING_DENSITY = """
-float hash1(float x) {
-    uint h = pcg(uint(int(floor(x)) + 100000));
-    return float(h) * (1.0 / 4294967295.0);
+    private const val RING_PROFILE = """
+float ringOpacity(float r, float fp) {
+    float f = r / u_ring.y;
+    if (f <= 0.0 || f > 1.0) return 0.0;
+    float lod = log2(max(fp / u_ring.y * 128.0, 1.0));
+    return textureLod(u_ringTex, vec2(f, 0.5), lod).r;
 }
-float noise1(float x) {
-    float i = floor(x);
-    float f = x - i;
-    float u = f * f * (3.0 - 2.0 * f);
-    return mix(hash1(i), hash1(i + 1.0), u);
-}
-/**
- * Weight of a feature with [freq] cycles per unit of x under a footprint [fp] (x units): 1 while
- * a cycle spans 4 or more footprints, 0 at 2 or fewer (then the feature shows its mean instead).
- */
-float aaFade(float freq, float fp) {
-    return clamp(0.5 / (freq * max(fp, 1e-6)) - 1.0, 0.0, 1.0);
-}
-/**
- * Every noise band fades to its mean once its period drops below ~2 footprints [fp], and the
- * gap's edges widen by [fp] around their midpoints, which keeps its mean (area). The ramps at the
- * inner and outer edge widen by [fpEdge] (0 when the caller anti-aliases the annulus itself).
- */
-float ringProfile(float x, float fp, float fpEdge) {
-    if (x < -fpEdge || x > 1.0 + fpEdge) return 0.0;
-    float d = 0.55 + 0.45 * mix(0.5, noise1(x * 34.2), aaFade(34.2, fp));
-    d *= 0.8 + 0.4 * (noise1(x * 126.0) - 0.5) * aaFade(126.0, fp);
-    // the finest ringlets
-    d *= 1.0 + 0.3 * (0.5 - noise1(x * 520.0)) * aaFade(520.0, fp);
-    d *= smoothstep(-fpEdge, 0.05 + fpEdge, x) * (1.0 - smoothstep(0.92 - fpEdge, 1.0 + fpEdge, x));
-    d *= 1.0 - 0.9 * (smoothstep(0.56 - fp, 0.58 + fp, x) - smoothstep(0.63 - fp, 0.65 + fp, x));
-    d *= mix(0.35, 1.0, smoothstep(0.0, 0.45, x));
-    return d;
-}
-float ringX(float r) {
-    return (r - u_ring.x) / (u_ring.y - u_ring.x);
+"""
+
+    /**
+     * A bigger body drawn before this one (its centre is farther) whose near surface still hides
+     * part of this one: the camera-relative centre (in this body's radii) and radius of `u_occ`
+     * (w = 0: none). Returns the ray distance (radii) to its near surface, or 1e30.
+     */
+    private const val OCCLUDER = """
+float occluderHit(vec3 d) {
+    if (u_occ.w <= 0.0) return 1e30;
+    float b = dot(d, u_occ.xyz);
+    float c = dot(u_occ.xyz, u_occ.xyz) - u_occ.w * u_occ.w;
+    float disc = b * b - c;
+    if (disc <= 0.0 || b <= 0.0) return 1e30;
+    return b - sqrt(disc);
 }
 """
 
@@ -243,6 +230,8 @@ uniform vec3 u_glareColor;
 uniform vec3 u_coronaColor;
 uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
 uniform float u_exposure;
+uniform sampler2D u_ringTex; // the ring's opacity profile (when u_ring.z = 1)
+uniform vec4 u_occ;          // occluder: centre (camera space, this body's radii) and radius; w = 0 none
 out vec4 o_color;
 """
 
@@ -366,9 +355,8 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
         float t = -nb.y / u_sunBody.y;
         if (t > 0.0) {
             vec3 q = nb + u_sunBody * t;
-            // blurred by the star's disc (penumbra) and by the pixel
-            float blur = max(2.0 * u_ring.w * t, fpS) / (u_ring.y - u_ring.x);
-            shadow = 1.0 - 0.8 * ringProfile(ringX(length(q.xz)), blur, blur);
+            // the ring's shadow, blurred by the star's disc (penumbra) and by the pixel
+            shadow = 1.0 - 0.85 * ringOpacity(length(q.xz), max(2.0 * u_ring.w * t, fpS));
         }
     }
     vec3 sun = u_sunColor * (diff * shadow);
@@ -383,8 +371,8 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
         float e = tx.a * tx.a * max(1.0 + 2.0 * det, 0.0);
         col += vec3(3.0, 0.85, 0.20) * e * (0.3 + 0.7 * night);
     } else if (u_type == T_TERRAN) {
+        // sun glint on open water; no city lights (DECISIONS 12)
         col += sun * (pow(ndh, 80.0) * 2.5 + pow(ndh, 12.0) * 0.06) * water;
-        col += vec3(1.0, 0.70, 0.36) * (tx.a * night * 0.3 * clamp(1.0 + 3.0 * det, 0.0, 2.0));
     } else if (u_type == T_ICE) {
         col += sun * pow(ndh, 24.0) * 0.12;
     }
@@ -404,6 +392,9 @@ void main() {
     if (cov <= 0.0 && (!atmo || discA <= 0.0)) discard;
     float xa = sqrt(max(discA, 0.0));
     float x0 = max(-xa, -b);
+    // behind a bigger body drawn earlier (a moon behind its planet's limb): that body stays in front
+    float tOcc = occluderHit(d);
+    if (tOcc < 1e29 && tOcc < (cov > 0.0 ? u_cc / (b + sqrt(max(disc, 0.0))) : b)) discard;
     vec3 ts = vec3(0.0);
     vec3 tk = vec3(0.0);
     float skyA = 0.0;
@@ -436,7 +427,7 @@ void main() {
 
     fun planetFs(atmoSteps: Int, detailOctaves: Int) = HEADER +
         "#define ATMO_STEPS $atmoSteps\n#define DETAIL_OCTAVES $detailOctaves\n" +
-        PRECISION + TYPES + PLANET_FS + TONEMAP + NOISE + NOISE_FAST + RING_DENSITY + RAY + ATMOSPHERE + DETAIL + PLANET_MAIN
+        PRECISION + TYPES + PLANET_FS + TONEMAP + NOISE + NOISE_FAST + RING_PROFILE + OCCLUDER + RAY + ATMOSPHERE + DETAIL + PLANET_MAIN
 
     // ---------------------------------------------------------------- rings
 
@@ -452,8 +443,10 @@ uniform vec3 u_sunColor;
 uniform float u_sunAng;   // angular radius of the star seen from the planet
 uniform vec4 u_ring;
 uniform float u_exposure;
+uniform sampler2D u_ringTex;  // the opacity profile
+uniform vec3 u_ringColor;     // the ring's data colour, linear
 out vec4 o_color;
-""" + TONEMAP + NOISE + RING_DENSITY + RAY + """
+""" + TONEMAP + RING_PROFILE + RAY + """
 /**
  * One stretch [ts.x, ts.y] (distances along the ray's ground line) of the annulus, seen from
  * height y0 above the ring plane by a pixel whose rays have db.y in [ey - k, ey + k]. The ray with
@@ -525,13 +518,13 @@ void main() {
     }
     vec3 q = vec3(ob.x + db.x * t, 0.0, ob.z + db.z * t);
     float r = length(q.xz);
-    float x = (r - u_ring.x) / width;
-    // pixel footprint across the rings: one pixel moves the hit point by t * pxAngle * |g| with
-    // |g|^2 = 1 + (radial . db / db.y)^2 (exact for the root-mean-square over both screen axes)
+    // pixel footprint across the rings (planet radii): one pixel moves the hit point by
+    // t * pxAngle * |g| with |g|^2 = 1 + (radial . db / db.y)^2 (the RMS over both screen axes)
     float sl = dot(q.xz / max(r, 1e-6), db.xz) / max(abs(ey), 1e-5);
-    float fp = t * u_pxAngle * sqrt(1.0 + sl * sl) / width;
-    // the stretch coverage already anti-aliases the edges of the annulus in the slab case
-    float dens = slab ? ringProfile(clamp(x, 0.0, 1.0), fp, 0.0) : ringProfile(x, fp, fp);
+    float fpR = t * u_pxAngle * sqrt(1.0 + sl * sl);
+    float fp = fpR / width;
+    // the slab case keeps the sample inside the annulus (its stretch coverage anti-aliases the edges)
+    float dens = ringOpacity(slab ? clamp(r, u_ring.x, u_ring.y) : r, fpR);
     if (dens * cov < 0.004) discard;
 
     // the part of the ring behind the planet is hidden by it
@@ -554,13 +547,17 @@ void main() {
         float pen = max(u_sunAng * -bq, 0.004) + fp * width;
         shadow = mix(0.04, 1.0, smoothstep(1.0 - pen, 1.0 + pen, hq));
     }
-    vec3 alb = mix(vec3(0.60, 0.54, 0.46), vec3(0.36, 0.33, 0.30), mix(0.5, noise1(x * 20.0), aaFade(20.0, fp)));
+    // the data colour (the Sol rings' images bring theirs; without them the ring colour), the
+    // dense parts a little brighter, as Saturn's B ring
+    vec3 alb = u_ringColor * (0.78 + 0.35 * dens);
     float elev = abs(u_sunBody.y);
     vec3 col = alb * u_sunColor * shadow * (0.30 + 0.70 * elev);
     // seen from the unlit side only light diffusing through the thinner parts arrives
     if (ob.y * u_sunBody.y < 0.0) col *= mix(0.75, 0.3, dens);
-    // optical depth grows along slanted paths: rings get more opaque towards edge-on
-    float a = (1.0 - exp(-dens * 1.3 / max(abs(db.y), 0.08))) * (1.0 - front) * cov;
+    // the profile is the opacity seen face-on; along slanted paths the optical depth grows, so
+    // rings get more opaque towards edge-on: a = 1 - (1 - dens)^(1/|mu|)
+    float tau = -log(1.0 - min(dens, 0.995));
+    float a = (1.0 - exp(-tau / max(abs(db.y), 0.05))) * (1.0 - front) * cov;
     o_color = vec4(tonemap(col) * a, a);
 }
 """
@@ -641,13 +638,17 @@ void main() {
     /**
      * Equirect surface texture: u = longitude (atan(z, x)), v = latitude (asin(y)), so that a body
      * space direction samples exactly the colour baked for it. RGB = sqrt(albedo); A = emission
-     * (lava glow, city lights). Rendered in horizontal strips (u_rect = v offset, v scale) so no
-     * single draw runs long enough to trip a mobile GPU watchdog.
+     * (the lava glow of generated volcanic worlds). The recipe is the body's look
+     * ([BodyLooksShader]: one per Sol body, the class ones for generated bodies) in its data colour
+     * and class palette. Rendered in horizontal strips (u_rect = v offset, v scale) so no single draw
+     * runs long enough to trip a mobile GPU watchdog.
      */
     val bakeFs = HEADER + PRECISION + TYPES + """
 in vec2 v_ndc;
-uniform int u_type;
+uniform int u_look;
 uniform vec4 u_seed;     // xyz noise offset, w = 0..1
+uniform vec4 u_pal[8];   // linear colours: 0 body, 1 shore, 2 low, 3 high, 4 peak, 5 ice (w: ice latitude), 6 deep, 7 shallow
+uniform vec4 u_air;      // the atmosphere colour, linear
 uniform vec2 u_rect;
 out vec4 o_color;
 """ + NOISE + """
@@ -712,33 +713,6 @@ float lightDots(vec3 q) {
     return exp(-dot(dq, dq) * 30.0) * (0.25 + 0.75 * b);
 }
 
-vec3 terran(vec3 p, vec3 sp, out float lights) {
-    vec3 wv = vec3(fbm(sp * 1.1), fbm(sp * 1.1 + vec3(5.2, 1.3, 2.8)), fbm(sp * 1.1 + vec3(9.1, 4.7, 7.3))) - 0.5;
-    float hgt = fbm(sp * 1.6 + wv * 1.4) + (vnoise(sp * 7.0) - 0.5) * 0.10;
-    float e = hgt - (0.52 + 0.04 * (u_seed.w - 0.5));
-    float lat = abs(p.y);
-    float moist = fbm(sp * 2.3 + vec3(3.3));
-    float land = smoothstep(-0.004, 0.004, e);
-    vec3 ocean = mix(vec3(0.016, 0.075, 0.14), vec3(0.004, 0.02, 0.065), smoothstep(0.0, 0.08, -e));
-    float belt = 1.0 - smoothstep(0.08, 0.26, abs(lat - 0.38));
-    float dry = smoothstep(0.62, 0.80, (1.0 - moist) * 0.8 + belt * 0.40);
-    vec3 green = mix(vec3(0.028, 0.07, 0.024), vec3(0.10, 0.12, 0.05), smoothstep(0.3, 0.7, moist));
-    vec3 lnd = mix(green, vec3(0.40, 0.31, 0.17), dry);
-    lnd = mix(lnd, vec3(0.20, 0.17, 0.14), smoothstep(0.09, 0.19, e));
-    lnd = mix(lnd, vec3(0.80, 0.82, 0.86), smoothstep(0.25, 0.31, e + lat * 0.12));
-    vec3 col = mix(ocean, lnd, land);
-    float ice = smoothstep(0.91, 0.95, lat + (fbm(sp * 4.0 + vec3(2.0)) - 0.5) * 0.12);
-    col = mix(col, vec3(0.82, 0.86, 0.92), ice);
-    float cl = fbm(vec3(sp.x, sp.y * 1.9, sp.z) * 2.4 + wv * 2.2 + vec3(20.0));
-    float cl2 = fbm(sp * 8.0 + wv * 3.0);
-    float cloud = smoothstep(0.52, 0.74, cl * 0.8 + cl2 * 0.25);
-    col = mix(col, vec3(0.86, 0.88, 0.91), cloud * 0.92);
-    lights = land * (1.0 - ice) * (1.0 - cloud * 0.85) * (1.0 - dry * 0.7) * (1.0 - smoothstep(0.06, 0.16, e))
-        * smoothstep(0.50, 0.68, fbm(sp * 4.0 + vec3(2.0)))
-        * (lightDots(sp * 40.0) + 0.7 * lightDots(sp * 70.0 + vec3(7.0)) + 0.08);
-    return col;
-}
-
 vec3 gas(vec3 p) {
     float w1 = fbm(p * 3.0 + u_seed.xyz) - 0.5;
     float w2 = fbm(p * 9.0 + u_seed.zxy) - 0.5;
@@ -779,16 +753,7 @@ vec3 ice(vec3 p, vec3 sp) {
     return toneDown(col, 0.48, 1.35);
 }
 
-vec3 rock(vec3 p, vec3 sp) {
-    float n1 = fbm(sp * 3.0);
-    vec3 col = mix(vec3(0.10, 0.092, 0.084), vec3(0.24, 0.215, 0.19), n1);
-    col = mix(col, vec3(0.06, 0.058, 0.056), smoothstep(0.55, 0.70, fbm(sp * 1.1 + vec3(8.0))) * 0.8);
-    col = mix(col, vec3(0.24, 0.17, 0.11), smoothstep(0.5, 0.8, fbm(sp * 0.8 + vec3(13.0))) * 0.5);
-    float c = craterLayer(sp * 2.5, 0.55) + 0.8 * craterLayer(sp * 7.0, 0.65)
-        + 0.6 * craterLayer(sp * 19.0, 0.7) + 0.45 * craterLayer(sp * 50.0, 0.75);
-    return col * max(1.0 + c, 0.2);
-}
-
+""" + BodyLooksShader.LOOKS + """
 void main() {
     float u = v_ndc.x * 0.5 + 0.5;
     float v = u_rect.x + (v_ndc.y * 0.5 + 0.5) * u_rect.y;
@@ -796,13 +761,8 @@ void main() {
     float lat = (v - 0.5) * 3.14159265;
     vec3 p = vec3(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon));
     vec3 sp = p + u_seed.xyz;
-    vec3 col;
-    float a = 0.0;
-    if (u_type == T_LAVA) col = lava(p, sp, a);
-    else if (u_type == T_TERRAN) col = terran(p, sp, a);
-    else if (u_type == T_GAS) col = gas(p);
-    else if (u_type == T_ICE) col = ice(p, sp);
-    else col = rock(p, sp);
+    float a;
+    vec3 col = bodyLook(u_look, p, sp, a);
     o_color = vec4(sqrt(clamp(col, 0.0, 1.0)), clamp(a, 0.0, 1.0));
 }
 """

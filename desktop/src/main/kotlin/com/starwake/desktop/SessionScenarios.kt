@@ -2,8 +2,8 @@ package com.starwake.desktop
 
 import com.starwake.core.Game
 import com.starwake.core.content.ShipCatalog
-import com.starwake.core.game.StarSystem
 import com.starwake.core.game.Voice
+import com.starwake.core.world.WorldBuilder
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
@@ -163,11 +163,12 @@ object SessionScenarios {
         if (phaseAtDocked != "REVEAL") fail("the services must open with the reveal, came in $phaseAtDocked")
         frames(60)
         if (field("docked") != "true" || field("pstate") != "DOCKED") fail("not docked")
-        if (field("station") != "0") fail("not at the home station")
+        if (field("station") != "0") fail("not at MERIDIAN (station 0)")
+        if (field("ref") != "MERIDIAN_STATION") fail("a docked ship rides in its station's frame: ${field("ref")}")
         if (num("speed") != 0.0) fail("a docked ship is at rest")
         val gap = num("hull")
         if (gap <= 0.0) fail("parked inside the station's walls (gap $gap m)")
-        report.note("docked at HOME STATION, hull gap %.1f m to the slot walls".format(gap))
+        report.note("docked at MERIDIAN STATION, hull gap %.1f m to the slot walls".format(gap))
         shot("start-docked")
         // the world runs behind the services (they do not pause): the welcome lines (text until
         // recordings exist, D31) show over them 5 s after the reveal. The docked view is static,
@@ -272,11 +273,12 @@ object SessionScenarios {
     // ------------------------------------------------------------------ camera-views
 
     fun cameraViews(env: ScenarioEnv) = run(env) {
-        val home = StarSystem().home
+        val sol = WorldBuilder.sol()
         cmd("launch space")
         frames(5)
-        // at rest at the old spawn, nose -Z (the gas giant ahead): ship space = world space
-        cmd("teleport ${home.x} ${home.y} ${home.z} 0 0 -1")
+        // at rest at the free-flight spawn off MERIDIAN, nose -Z: ship space = world space (the
+        // camera offsets are compared in the ship's frame, so the world moving on does not matter)
+        cmd("teleport ${vec("pos").joinToString(" ")} 0 0 -1")
         cmd("throttle 0")
         frames(10)
         fun camNear(x: Double, y: Double, z: Double, eps: Double, what: String) {
@@ -346,17 +348,17 @@ object SessionScenarios {
         cmd("view cockpit")
         frames(2)
         // the place command "near <body> [alt]" (01 9.6): a body index keeps the 20 km default
-        val planet2 = StarSystem().bodies.indexOfFirst { it.name == "PLANET II" }
+        val earth = sol.bodyIndex("Earth")
         cmd("throttle 0")
-        cmd("near $planet2")
+        cmd("near $earth")
         frames(2)
         val byIndex = num("alt")
-        cmd("near PLANET-II 5000")
+        cmd("near EARTH 5000")
         frames(2)
         val byName = num("alt")
-        if (abs(byIndex - 20_000.0) > 100.0) fail("near $planet2: altitude $byIndex m, expected 20 km above PLANET II")
-        if (abs(byName - 5_000.0) > 100.0) fail("near PLANET-II 5000: altitude $byName m, expected 5 km")
-        report.note("near $planet2: %.1f m; near PLANET-II 5000: %.1f m (above the gear)".format(byIndex, byName))
+        if (abs(byIndex - 20_000.0) > 100.0) fail("near $earth: altitude $byIndex m, expected 20 km above Earth")
+        if (abs(byName - 5_000.0) > 100.0) fail("near EARTH 5000: altitude $byName m, expected 5 km")
+        report.note("near $earth: %.1f m; near EARTH 5000: %.1f m (above the gear)".format(byIndex, byName))
     }
 
     // ------------------------------------------------------------------ map-nonpausing
@@ -379,9 +381,11 @@ object SessionScenarios {
         frames(2)
         if (game.stateName != "map") fail("the MAP button did not open the map")
         if (field("aim") != "0.00,0.00") fail("the stick was not released under the map: aim ${field("aim")}")
-        val p0 = vec("pos")
+        // in the ship's reference frame (Earth's, which carries it along at 11 km/s)
+        val p0 = vec("fpos")
         frames(180)
-        val p1 = vec("pos")
+        val p1 = vec("fpos")
+        if (field("ref") != "EARTH") fail("off MERIDIAN the ship flies in Earth's frame: ${field("ref")}")
         val moved = sqrt((p1[0] - p0[0]) * (p1[0] - p0[0]) + (p1[1] - p0[1]) * (p1[1] - p0[1]) + (p1[2] - p0[2]) * (p1[2] - p0[2]))
         report.note("under the map for 3 s: moved %.1f m at %.1f m/s (%.1f %% of v·3 s)".format(moved, v, moved / (v * 3.0) * 100.0))
         if (abs(moved - v * 3.0) > 0.1 * v * 3.0) fail("the flight did not keep running under the map: moved $moved m, expected ~${v * 3.0}")

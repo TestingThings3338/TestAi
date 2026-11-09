@@ -6,6 +6,7 @@ import com.starwake.core.content.StationMesh
 import com.starwake.core.math.DVec3
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
+import com.starwake.core.world.WorldBuilder
 import kotlin.math.sqrt
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -13,7 +14,7 @@ import kotlin.test.assertTrue
 
 /** Spawn rules of 01-core-loop.md 2.1.4-2.1.5 and 4.6 (9.4 SpawnRulesTest). */
 class SpawnRulesTest {
-    private val system = StarSystem()
+    private val system = WorldBuilder.sol()
 
     private fun dist(a: DVec3, b: DVec3): Double {
         val dx = a.x - b.x
@@ -41,7 +42,11 @@ class SpawnRulesTest {
         val pos = DVec3()
         val rot = Quat()
         SpawnRules.starArrival(system, pos, rot)
-        val star = system.bodies[0]
+        val star = system.bodies[system.star]
+        // Sol: danger = max(heat 37,000, shadow 92,000) studs x 3000; safe = 1.15 x danger
+        assertEquals(0.0, pos.x, 1e-3)
+        assertEquals(19.044e6, pos.y, 1.0)
+        assertEquals(-317.4e6, pos.z, 1.0)
         val toStar = Vec3((star.pos.x - pos.x).toFloat(), (star.pos.y - pos.y).toFloat(), (star.pos.z - pos.z).toFloat()).normalize()
         assertTrue(forward(rot).dot(toStar) > 0.9999f, "faces the star")
         for (b in system.bodies) assertTrue(dist(pos, b.pos) >= 1.5 * b.radius, "clear of ${b.name}")
@@ -49,7 +54,7 @@ class SpawnRulesTest {
 
     @Test
     fun clearOfBodiesPushesOutAlongTheSameRay() {
-        val b = system.bodies[3] // PLANET II
+        val b = system.bodies[system.bodyIndex("Earth")]
         // 1.4 r on +X: pushed to 3 r on +X
         val p = DVec3(b.pos.x + 1.4 * b.radius, b.pos.y, b.pos.z)
         SpawnRules.clearOfBodies(system, p)
@@ -112,9 +117,10 @@ class SpawnRulesTest {
     @Test
     fun aNewPilotStartsDockedAtTheHomeStation() {
         val i = SpawnRules.startStation(system)
-        assertEquals(SpawnRules.HOME_STATION, system.stations[i].name)
+        assertEquals("SOL-MERIDIAN", system.stations[i].id)
+        assertEquals("MERIDIAN STATION", system.stations[i].name)
         val host = RecordingHost()
-        val s = Session(system, null, Settings(), host, GearRig())
+        val s = Session(system, Settings(), host, GearRig())
         s.startDocked()
         assertTrue(s.mode.docked)
         assertEquals(PlayerState.DOCKED, s.mode.state)
@@ -134,7 +140,7 @@ class SpawnRulesTest {
     fun recoveryIsInFrontOfTheNearestStation() {
         val pos = DVec3()
         val rot = Quat()
-        // a crash near OUTPOST IV
+        // a crash near ARES DEEP
         val crash = DVec3().set(system.stations[2].pos)
         crash.x += 5_000.0
         val used = SpawnRules.recoveryPose(system, crash, pos, rot)

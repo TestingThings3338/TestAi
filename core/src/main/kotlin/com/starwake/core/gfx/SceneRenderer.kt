@@ -1,6 +1,5 @@
 package com.starwake.core.gfx
 
-import com.starwake.core.content.AsteroidMesh
 import com.starwake.core.content.Content
 import com.starwake.core.content.DustField
 import com.starwake.core.content.Primitives
@@ -9,14 +8,11 @@ import com.starwake.core.content.StarField
 import com.starwake.core.content.StationMesh
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.ShipState
-import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Mat4
-import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.TAU_F
 import kotlin.math.abs
 import kotlin.math.ln
-import kotlin.math.sin
 import kotlin.math.sqrt
 
 /** Fixed lighting setup of the starting system. */
@@ -61,8 +57,6 @@ class SceneFrame {
     val fillDir = Vec3().set(Environment.planetDir)
     val fillColor = floatArrayOf(Environment.fillColor[0], Environment.fillColor[1], Environment.fillColor[2])
 
-    /** Whether the asteroid field is close enough to draw. */
-    var drawField = true
     var exposure = 1f
 }
 
@@ -71,12 +65,11 @@ class SceneFrame {
  * one texture lookup for the background, no post-processing passes.
  *
  * Depth: the near scene shares one 24-bit depth buffer (near plane 0.5 m) only while everything in
- * it is close. Stations and the asteroid field that are far from the camera, and from whatever is
+ * it is close. Stations that are far from the camera, and from whatever is
  * close to it, go into a far slice with a projection fitted to them, drawn first into the back
  * half of the depth range (see planSlices); the near slice then uses the front half.
  */
 class SceneRenderer(private val gl: Gl, private val content: Content, quality: Int) {
-    private val litInst = LitProgram(gl, true)
     private val sky = ShaderProgram(gl, "sky", Shaders.skyVs, Shaders.skyFs)
     private val star = ShaderProgram(gl, "stars", Shaders.starVs, Shaders.starFs)
     private val dust = ShaderProgram(gl, "dust", Shaders.dustVs, Shaders.dustFs)
@@ -84,12 +77,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     private val fullscreen = GpuMesh(gl, Primitives.fullscreenTriangle, intArrayOf(2))
     private val ships = ShipRenderer(gl)
-    private val rockMeshes = Array(content.rocks.size) { v ->
-        GpuMesh(gl, content.rocks[v], intArrayOf(3, 3, 2)).also {
-            val f = content.field
-            it.setInstanceData(f.instanceData[v], f.instanceCount[v], intArrayOf(4, 4), 4)
-        }
-    }
     // full buffers are uploaded once; quality only changes how much of them is drawn
     private val starMesh = GpuMesh(gl, content.stars, intArrayOf(3, 4))
     private val dustMesh = GpuMesh(gl, content.dust.first, intArrayOf(3, 2), content.dust.second)
@@ -113,14 +100,10 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val tmp2 = Vec3()
     private val side = Vec3()
     private val axis = Vec3()
-    private val rockPalette = FloatArray(40)
-    private val rockParams = FloatArray(40)
-    private val identityRot = Quat()
 
     // depth slices, planned once per frame (planSlices)
-    private val slices = DepthSlices(1 + content.system.stations.size)
+    private val slices = DepthSlices(maxOf(1, content.system.stations.size))
     private val stationSlot = IntArray(content.system.stations.size)
-    private var fieldSlot = -1
     private val farProj = Mat4()
     private val farViewProj = Mat4()
 
@@ -139,55 +122,18 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         r * 1.01f
     }
 
-    /** Radius around the field origin that holds every rock at any spin, at any quality. */
-    private val fieldRadius: Float
-
-    /** Per rock variant: how many leading instances to keep when thinning (the big rocks are placed first). */
-    private val bigRocks = IntArray(content.rocks.size)
-
-    /** Largest bounding radius of a rock that thinning may drop (metres). */
-    private val smallRockRadius: Float
-
     /** Depth slices the last frame used: 1, or 2 when far objects got their own (diagnostics). */
     var depthSlices = 1
         private set
 
     init {
-        // field bounds from the instance data: rocks spin about their centres, so a rock's sphere is
-        // its scale times its mesh's farthest vertex
-        val field = content.field
-        var fr = 0f
-        var small = 0f
-        for (v in content.rocks.indices) {
-            val mesh = content.rocks[v]
-            var meshR = 0f
-            var o = 0
-            while (o < mesh.size) {
-                meshR = maxOf(meshR, sqrt(mesh[o] * mesh[o] + mesh[o + 1] * mesh[o + 1] + mesh[o + 2] * mesh[o + 2]))
-                o += 8
-            }
-            val d = field.instanceData[v]
-            var lastBig = -1
-            for (k in 0 until field.instanceCount[v]) {
-                val b = k * 8
-                val r = d[b + 3] * meshR
-                fr = maxOf(fr, sqrt(d[b] * d[b] + d[b + 1] * d[b + 1] + d[b + 2] * d[b + 2]) + r)
-                if (d[b + 3] >= BIG_ROCK_SCALE) lastBig = k else small = maxOf(small, r)
-            }
-            bigRocks[v] = lastBig + 1
-        }
-        fieldRadius = fr * 1.01f
-        smallRockRadius = small
         setQuality(quality)
-        rockMaterial(AsteroidMesh.ROCK, 0.20f, 0.18f, 0.16f, 0.88f, 0.05f)
-        rockMaterial(AsteroidMesh.DARK_ROCK, 0.11f, 0.10f, 0.095f, 0.92f, 0.05f)
-        rockMaterial(AsteroidMesh.MINERAL, 0.36f, 0.40f, 0.46f, 0.35f, 0.45f)
     }
 
     /** True when [q] needs differently sized baked textures (then rebuild the renderer). */
     fun needsRebake(q: Int): Boolean = (q == 0) != (envSize == 256) || bodies.needsRebake(q)
 
-    /** Cheap quality switch: star/dust counts (asteroid counts come from the field's active mask). */
+    /** Cheap quality switch: star and dust counts. */
     fun setQuality(q: Int) {
         quality = q
         starCount = when (q) {
@@ -200,11 +146,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             1 -> 500
             else -> Content.MAX_DUST
         }
-    }
-
-    private fun rockMaterial(i: Int, r: Float, g: Float, b: Float, rough: Float, metal: Float) {
-        rockPalette[i * 4] = r; rockPalette[i * 4 + 1] = g; rockPalette[i * 4 + 2] = b; rockPalette[i * 4 + 3] = rough
-        rockParams[i * 4] = metal
     }
 
     /** The ship model drawn for [SceneFrame.ship] (uploads it; not per frame). */
@@ -244,14 +185,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         if (slices.split) {
             // far slice first, behind everything: nothing in it overlaps the near slice in depth
             gl.depthRange(0.5f, 1f)
-            drawAsteroids(f, true)
             drawStations(f, true)
             drawStationLights(f, true)
             gl.depthRange(0f, 0.5f)
         } else {
             gl.depthRange(0f, 1f)
         }
-        drawAsteroids(f, false)
         drawStations(f, false)
         val ship = f.ship
         if (ship != null) drawShip(f, ship, ShipModel.PASS_OPAQUE)
@@ -298,7 +237,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     // ------------------------------------------------------------------ depth slices
 
     /**
-     * Decides, once per frame, which slice the field and each station are drawn in, and culls the
+     * Decides, once per frame, which slice each station is drawn in, and culls the
      * ones whose bounding sphere is outside the view. The camera's own cluster is everything within
      * [NEAR_REACH] (ship, dust) plus whatever overlaps it in depth, transitively; it is drawn with
      * the camera's projection, so spawn and docking render exactly as with a single slice. Anything
@@ -306,9 +245,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
      * depth step is millimetres instead of ~20 m with the 0.5 m near plane.
      *
      * Every object lies wholly in one slice and the slices do not overlap in depth, so nothing is
-     * drawn twice (the field included) and the order between slices is always right. The home
-     * station and the field always overlap in depth (2.7 km apart, radii 0.9 and ~2.3 km), so they
-     * share a slice and occlude each other through one depth buffer.
+     * drawn twice and the order between slices is always right.
      */
     private fun planSlices(f: SceneFrame) {
         val c = f.camera
@@ -316,11 +253,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         s.begin()
         val tx = c.tanHalfX * (1f + abs(c.shiftX))
         val ty = c.tanHalfY * (1f + abs(c.shiftY))
-        fieldSlot = -1
-        if (f.drawField) {
-            content.field.origin.relativeTo(c.pos, rel)
-            fieldSlot = s.add(rel.dot(c.right), rel.dot(c.up), rel.dot(c.forward), fieldRadius, tx, ty)
-        }
         val stations = content.system.stations
         for (i in stations.indices) {
             val st = stations[i]
@@ -334,7 +266,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         s.plan(maxOf(NEAR_REACH, if (f.ship != null) f.shipReach else 0f))
         depthSlices = if (s.split) 2 else 1
         if (!s.split) return
-        // one scale for the whole slice keeps the depth order inside it exact (rocks vs station);
+        // one scale for the whole slice keeps the depth order inside it exact;
         // scaling about the eye changes neither the picture nor the precision, it only keeps the
         // coordinates of a station 3000 km away in the range the rest of the scene uses
         farScale = if (s.farNear > FAR_SCALE_FROM) FAR_SCALE_FROM / s.farNear else 1f
@@ -348,31 +280,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private fun inSlice(slot: Int, far: Boolean): Boolean = slot >= 0 && slices.isFar(slot) == far
 
     // ------------------------------------------------------------------ near scene
-
-    /**
-     * The field, in the slice [planSlices] put it in. In the far slice it is shrunk towards the eye
-     * by the slice's scale, so it never reaches the far plane. Once even the largest small rock is
-     * down to a pixel or two, the small rocks are thinned out (the big ones always stay): they
-     * would cost ~400k vertices per frame for a few dots.
-     */
-    private fun drawAsteroids(f: SceneFrame, far: Boolean) {
-        if (!inSlice(fieldSlot, far)) return
-        val c = f.camera
-        val field = content.field
-        field.origin.relativeTo(c.pos, rel)
-        val k = if (far) farScale else 1f
-        model.setTRS(rel.x * k, rel.y * k, rel.z * k, identityRot, k)
-        litInst.begin(if (far) farViewProj else c.viewProj, model, f, envTex, envLod, rockPalette, rockParams, 0f)
-        // apparent radius (px) of the largest small rock at the field's near edge
-        val edge = rel.length() - fieldRadius
-        val px = if (edge > 1f) smallRockRadius / edge * c.height / (2f * c.tanHalfY) else Float.MAX_VALUE
-        val keep = ((px - THIN_END_PX) / (THIN_START_PX - THIN_END_PX)).coerceIn(0f, 1f)
-        for (v in rockMeshes.indices) {
-            val all = field.drawCount(v, quality)
-            val big = minOf(bigRocks[v], all)
-            rockMeshes[v].drawInstanced(big + ((all - big) * keep).toInt())
-        }
-    }
 
     /**
      * One pass of the ship model (ShipModel.PASS_*): opaque with the rest of the scene, glass after
@@ -669,14 +576,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     fun dispose() {
-        litInst.dispose()
         for (p in arrayOf(sky, star, dust, glow)) p.dispose()
         stationLit.dispose()
         for (m in stationMeshes) m.dispose()
         bodies.dispose()
         fullscreen.dispose(); ships.dispose(); starMesh.dispose(); dustMesh.dispose()
         glowStream.dispose()
-        for (m in rockMeshes) m.dispose()
         gl.deleteTexture(envTex)
     }
 
@@ -716,14 +621,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         /** Relative slack on the far slice's planes (the bounding spheres are exact, float math is not). */
         private const val FAR_MARGIN = 0.002f
 
-        /** Rocks of at least this scale are the field's big rocks, which thinning never drops. */
-        private const val BIG_ROCK_SCALE = 60f
-
-        /** The small rocks thin out while the largest one shrinks from this apparent radius (px)... */
-        private const val THIN_START_PX = 2f
-
-        /** ...to this one, where only the big rocks are left. */
-        private const val THIN_END_PX = 0.5f
 
         /** Cube face basis (faceZ, faceX, faceY) matching GL's cube map face orientation. */
         private val FACE_BASIS = arrayOf(

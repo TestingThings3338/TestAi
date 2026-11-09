@@ -12,7 +12,7 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 
 class StationCollisionTest {
-    private val system = StarSystem()
+    private val system = com.starwake.core.world.WorldBuilder.sol()
 
     /** One station per model, with non-trivial orientations and real (1e9 m) coordinates. */
     private val stations = Array(StationMesh.MODELS) { m -> system.stations.first { it.model == m } }
@@ -427,9 +427,11 @@ class StationCollisionTest {
             assertEquals(0, front.detourFrames, "model $m: a ship in front needs no detour")
             assertDocks(m, "in front, off axis", 600f, 300f, -1400f)
         }
-        // the harness spawn point, behind the home station
+        // the harness spawn point ("launch space"), 3 km out of MERIDIAN's mouth
         val st = stations[0]
-        val spawn = toLocal(st, system.home, Vec3())
+        val home = DVec3()
+        system.spaceSpawn(system.stations.indexOf(st), home, com.starwake.core.math.Quat())
+        val spawn = toLocal(st, home, Vec3())
         assertDocks(0, "spawn", spawn.x, spawn.y, spawn.z)
     }
 

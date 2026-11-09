@@ -56,7 +56,7 @@ class CountingGl(private val inner: Gl) : Gl by inner {
 /**
  * Rendering checks for the scene's depth handling and body culling, through the real
  * [SceneRenderer] (no Game):
- *  - "station-depth": HOME STATION from an oblique front view at 1..200 km with a telephoto lens,
+ *  - "station-depth": MERIDIAN STATION from an oblique front view at 1..200 km with a telephoto lens,
  *    compared against a reference that draws the station alone with a projection fitted to it
  *    (near = d - R, far = d + R), so depth precision cannot be the cause of a difference;
  *  - "render-probe": draw calls, depth slices and full-screen body passes per frame for spawn,
@@ -65,9 +65,6 @@ class CountingGl(private val inner: Gl) : Gl by inner {
  */
 object RenderProbe {
     private val distancesKm = intArrayOf(1, 2, 5, 12, 30, 60, 200)
-
-    /** Mirrors Game.nearField (the field is drawn within 60 km of its origin). */
-    private const val FIELD_RANGE = 60_000.0
 
     fun stationDepth(env: ScenarioEnv) {
         val opts = env.opts
@@ -80,7 +77,7 @@ object RenderProbe {
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
             val scene = SceneRenderer(gl, content, 2)
             val system = content.system
-            val st = system.stations.first { it.name == "HOME STATION" }
+            val st = system.stations[system.stationIndex("SOL-MERIDIAN")]
             val radius = StationMesh.radius(st.model)
 
             // reference renderer: the station mesh + its light sprites, unscaled, fitted depth range
@@ -117,11 +114,6 @@ object RenderProbe {
                 // telephoto: the station spans ~80% of the height at every distance
                 cam.fovY = (2.0 * atan(1.25 * radius / d)).toFloat()
                 cam.update(w, h)
-                val fo = system.fieldOrigin
-                val fx = cam.pos.x - fo.x
-                val fy = cam.pos.y - fo.y
-                val fz = cam.pos.z - fo.z
-                f.drawField = fx * fx + fy * fy + fz * fz < FIELD_RANGE * FIELD_RANGE
                 gl.reset()
                 scene.render(f)
                 GLES20.glFinish()
@@ -182,8 +174,8 @@ object RenderProbe {
                 s.screenshot("depth-${km}km-ref")
                 val cmp = compare(game, ref, mask, w * h)
                 r.note(
-                    "%3d km: %d draw calls, field %s; station pixels %d, differing from the fitted-depth reference by > 24/255: %d (%.2f%% of the frame, %.1f%% of the station)"
-                        .format(km, draws, if (f.drawField) "drawn" else "off", cmp[0], cmp[1], cmp[1] * 100.0 / (w * h), cmp[1] * 100.0 / maxOf(1, cmp[0])),
+                    "%3d km: %d draw calls; station pixels %d, differing from the fitted-depth reference by > 24/255: %d (%.2f%% of the frame, %.1f%% of the station)"
+                        .format(km, draws, cmp[0], cmp[1], cmp[1] * 100.0 / (w * h), cmp[1] * 100.0 / maxOf(1, cmp[0])),
                 )
                 zoom(s, "depth-${km}km", minOf(w, h) / 2, minOf(w, h) / 2, 2)
             }
@@ -210,7 +202,7 @@ object RenderProbe {
             val model = com.starwake.core.content.ShipModel.load("varrow") { platform.readAsset(it) }
             scene.setShipModel(model)
             val system = content.system
-            val home = system.stations.first { it.name == "HOME STATION" }
+            val home = system.stations[system.stationIndex("SOL-MERIDIAN")]
             val ship = ShipState()
             val f = SceneFrame()
             f.gear = com.starwake.core.game.GearRig().also { it.setModel(model, down = false) }
@@ -219,7 +211,7 @@ object RenderProbe {
             f.pxScale = h / 1080f
             f.time = 0.3f
             val star = system.bodies[0]
-            val p1 = system.bodies.first { it.name == "PLANET I" }
+            val p1 = system.bodies[system.bodyIndex("Mercury")]
             val out = Vec3()
             var frame = 0L
 
@@ -231,11 +223,6 @@ object RenderProbe {
                 cam.pos.set(pos)
                 cam.rot.lookRotation(look.x, look.y, look.z, 0f, 1f, 0f)
                 cam.update(w, h)
-                val fo = system.fieldOrigin
-                val fx = pos.x - fo.x
-                val fy = pos.y - fo.y
-                val fz = pos.z - fo.z
-                f.drawField = fx * fx + fy * fy + fz * fz < FIELD_RANGE * FIELD_RANGE
                 if (withShip) {
                     // the VARROW's centre 125 m ahead and 26 m below, like the chase camera
                     ship.rot.set(cam.rot)
@@ -260,35 +247,31 @@ object RenderProbe {
                 val ms = (System.nanoTime() - t0) / 1e6
                 s.drainErrors(frame)
                 r.note(
-                    "%-22s %2d draw calls, %d depth slice(s), %d body full-screen draw(s), %6.0fk instanced vertices, field %s, render+finish %.1f ms"
-                        .format(name, gl.draws, scene.depthSlices, gl.fullscreen - 1, gl.instancedVertices / 1000.0, if (f.drawField) "on" else "off", ms),
+                    "%-22s %2d draw calls, %d depth slice(s), %d body full-screen draw(s), %6.0fk instanced vertices, render+finish %.1f ms"
+                        .format(name, gl.draws, scene.depthSlices, gl.fullscreen - 1, gl.instancedVertices / 1000.0, ms),
                 )
                 s.screenshot("probe-$name")
                 if (zoomCentre) zoom(s, "probe-$name", 400, 300, 3)
             }
 
-            // spawn: chase camera behind the ship at home, looking down the spawn lane (-Z)
-            val hp = system.home
-            view("spawn", DVec3(hp.x, hp.y + 4.0, hp.z + 16.5), out.set(0f, 0f, -1f))
-            // 30 km out in front of HOME STATION, looking back at it (station + field in view)
+            // spawn: chase camera behind the ship at the free-flight spawn off MERIDIAN, nose to Earth
+            val hp = DVec3()
+            val hq = com.starwake.core.math.Quat()
+            system.spaceSpawn(system.stationIndex("SOL-MERIDIAN"), hp, hq)
+            val nose = hq.rotate(0f, 0f, -1f, Vec3())
+            view("spawn", DVec3(hp.x - nose.x * 16.5, hp.y - nose.y * 16.5 + 4.0, hp.z - nose.z * 16.5), out.set(nose))
+            // 30 km out in front of MERIDIAN, looking back at it (Earth behind the station)
             val dir = Vec3()
             home.rot.rotate(-0.55f, 0.35f, -1f, dir)
             dir.normalize()
             val at30 = DVec3(home.pos.x + dir.x * 30_000.0, home.pos.y + dir.y * 30_000.0, home.pos.z + dir.z * 30_000.0)
             view("station-30km", at30, out.set(-dir.x, -dir.y, -dir.z))
             view("station-30km-away", at30, out.set(dir.x, dir.y, dir.z))
-            // deep space: halfway between home and PLANET II's orbit, looking at the star
-            val deep = DVec3(hp.x * 0.75, hp.y * 0.75 + 2.0e7, hp.z * 0.75)
+            // deep space: a quarter of the way from Earth to the star, 200 Mm above the plane, looking at it
+            val deep = DVec3(hp.x * 0.75, hp.y * 0.75 + 2.0e8, hp.z * 0.75)
             view("deep-space", deep, out.set(-deep.x.toFloat(), -deep.y.toFloat(), -deep.z.toFloat()))
 
-            // F12: leaving the field; at 40 km the 40 km far plane used to cut through it (+-2.3 km)
-            val fo = system.fieldOrigin
-            for (km in intArrayOf(40, 55)) {
-                val p = DVec3(fo.x + dir.x * km * 1000.0, fo.y + dir.y * km * 1000.0, fo.z + dir.z * km * 1000.0)
-                view("field-${km}km", p, out.set(-dir.x, -dir.y, -dir.z), zoomCentre = true)
-            }
-
-            // F5: 3 radii from PLANET I on its night side (~4.1e8 m from the star, where the glow's
+            // F5: 3 radii from Mercury on its night side (1.38 Gm from the star, where the glow's
             // fade-out cone is wider than a quad allows), nose away from / towards the star
             val ux = p1.pos.x - star.pos.x
             val uy = p1.pos.y - star.pos.y

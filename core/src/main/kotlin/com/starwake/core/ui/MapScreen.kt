@@ -93,13 +93,26 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         group.slop = 4f * u
     }
 
+    /** Distance (m) from the star of the farthest planet: the opening zoom fits this circle. */
+    private val outerOrbit: Double = run {
+        var r = 0.0
+        val s = system.bodies[system.star].pos
+        for (b in system.bodies) {
+            if (b.parent != system.star) continue
+            val dx = b.pos.x - s.x
+            val dz = b.pos.z - s.z
+            r = max(r, sqrt(dx * dx + dz * dz))
+        }
+        if (r > 0.0) r else system.edgeRadius
+    }
+
     /** Called when the map opens: centre on the ship and pick a zoom that shows its surroundings. */
     fun open(ship: DVec3, lockedKind: Int, lockedIndex: Int) {
         tab = TAB_SYSTEM
         centerX = ship.x
         centerZ = ship.z
-        // fit the whole system (~2.4e9 m radius) into the shorter screen side
-        metresPerPx = system.edgeRadius * 2.2 / min(w, h)
+        // fit the planets' orbits (Neptune at 20.5 Gm in Sol) into the shorter screen side
+        metresPerPx = clamp((outerOrbit * 2.2 / min(w, h)).toFloat(), MIN_MPP, MAX_MPP).toDouble()
         selKind = if (lockedKind == 2 || lockedKind == 3) lockedKind else 0
         selIndex = lockedIndex
         pid[0] = -1; pid[1] = -1
@@ -194,8 +207,10 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         var best = 0
         var bestIdx = -1
         var bestD = 28f * u
+        // only what is drawn can be picked: moons and stations once they stand clear of their parent
         for (i in system.stations.indices) {
             val p = system.stations[i].pos
+            if (!separated(p.x, p.z, system.stations[i].parent)) continue
             val d = screenDist(p, x, y)
             if (d < bestD) {
                 bestD = d; best = 2; bestIdx = i
@@ -203,6 +218,7 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         }
         for (i in system.bodies.indices) {
             val b = system.bodies[i]
+            if (isMoon(i) && !separated(b.pos.x, b.pos.z, b.parent)) continue
             val d = screenDist(b.pos, x, y) - bodyPx(b)
             if (d < bestD) {
                 bestD = d; best = 3; bestIdx = i
@@ -236,11 +252,33 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         return sqrt(dx * dx + dy * dy)
     }
 
-    /** Drawn radius: true scale when zoomed in, a readable minimum otherwise. */
+    /** Drawn radius: true scale when zoomed in, a readable minimum otherwise (moons smaller). */
     private fun bodyPx(b: StarSystem.Body): Float {
         val trueR = (b.radius / metresPerPx).toFloat()
-        val min = if (b.type == StarSystem.BodyType.STAR) 9f * u else 5f * u
+        val min = when {
+            b.isStar -> 9f * u
+            b.parent != system.star -> 3.5f * u
+            else -> 5f * u
+        }
         return max(trueR, min)
+    }
+
+    /**
+     * A moon or a station is drawn and named only once it stands clear of its parent on screen
+     * ([SEPARATE] u between the centres, beyond the parent's disc): zoomed out, Luna sits on Earth.
+     */
+    private fun separated(x: Double, z: Double, parent: Int): Boolean {
+        val p = system.bodies[parent]
+        val dx = (x - p.pos.x) / metresPerPx
+        val dz = (z - p.pos.z) / metresPerPx
+        val d = sqrt(dx * dx + dz * dz).toFloat()
+        return d > bodyPx(p) + SEPARATE * u
+    }
+
+    /** True when body [i] is a moon (its parent is not the star). */
+    private fun isMoon(i: Int): Boolean {
+        val p = system.bodies[i].parent
+        return p >= 0 && p != system.star
     }
 
     // ------------------------------------------------------------------ drawing
@@ -276,36 +314,39 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         val uw = ui.text(unit, bx + tw + 4f * u, by - 10f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a))
         lb.add(bx, by - 22f * u, bx + max(barPx, tw + 4f * u + uw), by + 7f * u)
 
-        ui.text(system.name, sl + 22f * u, st + 78f * u, 15f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, face = FontData.TITLE)
+        ui.text(system.displayName, sl + 22f * u, st + 78f * u, 15f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, face = FontData.TITLE)
         val hw = ui.text(HINT, sl + 22f * u, st + 96f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
         // tabs, title and hint (top left), CLOSE, and the selection card with LOCK TARGET
         lb.add(sl, 0f, max(tabGalaxy.r.x + tabGalaxy.r.w, sl + 22f * u + hw), st + 100f * u)
         lb.add(close.r.x, close.r.y, close.r.x + close.r.w, close.r.y + close.r.h)
         if (selKind != 0) lb.add(w - sr - 18f * u - CARD_W * u, h - sb - 18f * u - 44f * u - 12f * u - CARD_H * u, w - sr, h - sb)
 
-        val star = system.bodies[0]
-        val cx = screenX(star.pos.x)
-        val cy = screenY(star.pos.z)
-        // orbits (circles around the star through each planet, in the x/z plane)
-        for (i in 1 until system.bodies.size) {
+        val star = system.bodies[system.star]
+        // orbits: planets around the star, moons around their planet (once they stand clear of it),
+        // through each body's current position, in the x/z plane
+        for (i in system.bodies.indices) {
             val b = system.bodies[i]
-            val ox = b.pos.x - star.pos.x
-            val oz = b.pos.z - star.pos.z
+            if (b.parent < 0) continue
+            val p = system.bodies[b.parent]
+            val ox = b.pos.x - p.pos.x
+            val oz = b.pos.z - p.pos.z
             val r = (sqrt(ox * ox + oz * oz) / metresPerPx).toFloat()
-            if (r > 4f && r < 20000f) ui.circle(cx, cy, r, withAlpha(ORBIT, a), 1f * u)
+            if (b.parent != system.star && r < bodyPx(p) + SEPARATE * u) continue
+            if (r > 4f && r < 20000f) ui.circle(screenX(p.pos.x), screenY(p.pos.z), r, withAlpha(ORBIT, a * (if (b.parent == system.star) 1f else 0.7f)), 1f * u)
         }
         val edge = (system.edgeRadius / metresPerPx).toFloat()
-        if (edge < 20000f) ui.circle(cx, cy, edge, withAlpha(Theme.DANGER, a * 0.25f), 1f * u)
+        if (edge < 20000f) ui.circle(screenX(star.pos.x), screenY(star.pos.z), edge, withAlpha(Theme.DANGER, a * 0.25f), 1f * u)
 
         for (i in system.bodies.indices) {
             val b = system.bodies[i]
+            if (isMoon(i) && !separated(b.pos.x, b.pos.z, b.parent) && !(selKind == 3 && selIndex == i)) continue
             val x = screenX(b.pos.x)
             val y = screenY(b.pos.z)
             val r = bodyPx(b)
             if (x < -r - 200f || x > w + r + 200f || y < -r - 200f || y > h + r + 200f) continue
             val col = bodyColor(b)
             ui.circle(x, y, r, withAlpha(col, a))
-            if (b.hasRings) ui.circle(x, y, max(r * 1.9f, r + 4f * u), withAlpha(col, a * 0.5f), 1.2f * u)
+            if (b.hasRings) ui.circle(x, y, max((b.ringOuter / metresPerPx).toFloat(), r + 4f * u), withAlpha(ringColor(b), a * 0.6f), 1.2f * u)
             if (selKind == 3 && selIndex == i) ui.circle(x, y, r + 7f * u, withAlpha(Theme.LOCK, a), 1.6f * u)
             // small discs keep other labels off them; a zoomed-in planet is a backdrop text may cross
             val e = bodyExtent(b, r)
@@ -313,10 +354,12 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         }
         for (i in system.stations.indices) {
             val s = system.stations[i]
+            val sel = selKind == 2 && selIndex == i
+            if (!sel && !separated(s.pos.x, s.pos.z, s.parent)) continue
             val x = screenX(s.pos.x)
             val y = screenY(s.pos.z)
             if (x < -100f || x > w + 100f || y < -100f || y > h + 100f) continue
-            val col = if (selKind == 2 && selIndex == i) Theme.LOCK else Theme.ACCENT
+            val col = if (sel) Theme.LOCK else Theme.ACCENT
             ui.rect(x - 4f * u, y - 4f * u, 8f * u, 8f * u, withAlpha(col, a), -2f * u)
         }
 
@@ -335,21 +378,32 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         ui.line(x + hx * 11f * u, y + hz * 11f * u, x + (hx * 0.3f + hz * 0.8f) * 8f * u, y + (hz * 0.3f - hx * 0.8f) * 8f * u, 2f * u, withAlpha(Theme.OK, a))
         lb.add(x - SHIP_BOX * u, y - SHIP_BOX * u, x + SHIP_BOX * u, y + SHIP_BOX * u, LabelBoxes.OWNER_SHIP)
 
-        // labels by priority: the selection (always drawn), YOU, the star, the other bodies, stations
+        // labels by priority: the selection (always drawn), YOU, the star, the planets, the moons, stations
         if (selKind == 3) bodyLabel(ui, a, selIndex, true) else if (selKind == 2) stationLabel(ui, a, selIndex, true)
         val size = 9f * u
         if (lb.place(x, y, 12f * u, 10f * u, ui.textWidth(YOU, size, 0.2f), ui.capHeight(size), LABEL_PAD * u, YOU_SIDES, LabelBoxes.OWNER_SHIP, false)) {
             ui.text(YOU, lb.textX, lb.textY, size, withAlpha(Theme.OK, a), tracking = 0.2f)
         }
-        for (i in system.bodies.indices) if (selKind != 3 || selIndex != i) bodyLabel(ui, a, i, false)
-        // only label stations once zoomed in enough to separate them from their planet
-        if (metresPerPx < 2e6) for (i in system.stations.indices) if (selKind != 2 || selIndex != i) stationLabel(ui, a, i, false)
+        for (pass in 0..1) {
+            for (i in system.bodies.indices) {
+                if (isMoon(i) != (pass == 1)) continue
+                if (selKind == 3 && selIndex == i) continue
+                if (pass == 1 && !separated(system.bodies[i].pos.x, system.bodies[i].pos.z, system.bodies[i].parent)) continue
+                bodyLabel(ui, a, i, false)
+            }
+        }
+        // a station is named once it stands clear of its host
+        for (i in system.stations.indices) {
+            val s = system.stations[i]
+            if ((selKind != 2 || selIndex != i) && separated(s.pos.x, s.pos.z, s.parent)) stationLabel(ui, a, i, false)
+        }
 
         if (selKind != 0) drawSelection(ui, a, ship)
     }
 
     /** Ring radius for ringed worlds, else the disc radius: how far a label keeps from the centre. */
-    private fun bodyExtent(b: StarSystem.Body, r: Float): Float = if (b.hasRings) max(r * 1.9f, r + 4f * u) else r
+    private fun bodyExtent(b: StarSystem.Body, r: Float): Float =
+        if (b.hasRings) max((b.ringOuter / metresPerPx).toFloat(), r + 4f * u) else r
 
     /** Name under (or, when that spot is taken, above / right of / left of) body [i]. [sel] always draws it. */
     private fun bodyLabel(ui: UiRenderer, a: Float, i: Int, sel: Boolean) {
@@ -358,12 +412,14 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         val y = screenY(b.pos.z)
         val r = bodyPx(b)
         if (x < -r - 200f || x > w + r + 200f || y < -r - 200f || y > h + r + 200f) return
-        val size = 9.5f * u
+        val size = (if (isMoon(i)) 8.5f else 9.5f) * u
         val ch = ui.capHeight(size)
         // the old spacing (baseline 15u below the disc), never closer than the selection ring
         val gap = max(15f * u - ch, 8.5f * u)
-        if (labels.place(x, y, bodyExtent(b, r), gap, ui.textWidth(b.name, size, 0.18f), ch, LABEL_PAD * u, BODY_SIDES, i, sel, LABEL_FAR * u)) {
-            ui.text(b.name, labels.textX, labels.textY, size, withAlpha(if (sel) Theme.LOCK else Theme.TEXT, a), tracking = 0.18f)
+        val name = b.displayName
+        if (labels.place(x, y, bodyExtent(b, r), gap, ui.textWidth(name, size, 0.18f), ch, LABEL_PAD * u, BODY_SIDES, i, sel, LABEL_FAR * u)) {
+            val col = if (sel) Theme.LOCK else if (isMoon(i)) Theme.TEXT_DIM else Theme.TEXT
+            ui.text(name, labels.textX, labels.textY, size, withAlpha(col, a), tracking = 0.18f)
         }
     }
 
@@ -390,11 +446,12 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
             val s = system.stations[selIndex]
             name = s.name; pos = s.pos; radius = s.radius
             kindLabel = "STATION  ·  ORBITING"
-            parentName = system.bodies[s.parent].name
+            parentName = system.bodies[s.parent].displayName
         } else {
             val b = system.bodies[selIndex]
-            name = b.name; pos = b.pos; radius = b.radius
-            kindLabel = typeLabel(b.type)
+            name = b.displayName; pos = b.pos; radius = b.radius
+            kindLabel = b.classLabel
+            if (isMoon(selIndex)) parentName = system.bodies[b.parent].displayName
         }
         val pw = CARD_W * u
         val x = w - sr - 18f * u - pw
@@ -403,7 +460,10 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         ui.rect(x, y, pw, CARD_H * u, withAlpha(Theme.LOCK, a * 0.5f), -10f * u, 1.2f * u)
         ui.text(name, x + 14f * u, y + 26f * u, 15f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f, face = FontData.TITLE)
         val kw = ui.text(kindLabel, x + 14f * u, y + 44f * u, 9f * u, withAlpha(Theme.LOCK, a), tracking = 0.15f)
-        if (parentName != null) ui.text(parentName, x + 20f * u + kw, y + 44f * u, 9f * u, withAlpha(Theme.LOCK, a), tracking = 0.15f)
+        if (parentName != null) {
+            val ow = if (selKind == 2) 0f else ui.text(OF, x + 20f * u + kw, y + 44f * u, 9f * u, withAlpha(Theme.LOCK, a), tracking = 0.15f) + 6f * u
+            ui.text(parentName, x + 20f * u + kw + ow, y + 44f * u, 9f * u, withAlpha(Theme.LOCK, a), tracking = 0.15f)
+        }
         val dx = pos.x - ship.x
         val dy = pos.y - ship.y
         val dz = pos.z - ship.z
@@ -413,8 +473,7 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         ui.text("DISTANCE", x + 14f * u, y + 68f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
         val tw = ui.text(buf, x + 14f * u, y + 84f * u, 13f * u, withAlpha(Theme.TEXT, a), face = FontData.MONO)
         ui.text(unit, x + 18f * u + tw, y + 84f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a))
-        // estimated time at the cruise limit (3 Mm/s, slower near the ends)
-        val eta = (d / StarSystem.MAX_SPEED + 25.0).toInt()
+        val eta = etaSeconds(d).toInt()
         buf.clear().append("ETA ").append(eta / 60).append(':').appendPadded(eta % 60, 2)
         ui.text(buf, x + pw - 14f * u, y + 84f * u, 11f * u, withAlpha(Theme.TEXT_DIM, a), UiRenderer.RIGHT, face = FontData.MONO)
     }
@@ -432,54 +491,64 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         val pulse = 0.6f + 0.4f * kotlin.math.sin(time * 3f)
         ui.circle(cx, cy, 6f * u, withAlpha(Theme.OK, a))
         ui.circle(cx, cy, 14f * u, withAlpha(Theme.OK, a * pulse), 1.5f * u)
-        ui.text(system.name, cx, cy + 32f * u, 12f * u, withAlpha(Theme.TEXT, a), UiRenderer.CENTER, tracking = 0.2f, face = FontData.TITLE)
+        ui.text(system.displayName, cx, cy + 32f * u, 12f * u, withAlpha(Theme.TEXT, a), UiRenderer.CENTER, tracking = 0.2f, face = FontData.TITLE)
         ui.text("YOU ARE HERE", cx, cy + 48f * u, 9f * u, withAlpha(Theme.OK, a), UiRenderer.CENTER, tracking = 0.25f)
         ui.text("UNCHARTED SPACE  ·  OTHER SYSTEMS ARRIVE WITH THE FULL PORT", cx, h - sb - 24f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a), UiRenderer.CENTER, tracking = 0.15f)
     }
 
-    private fun bodyColor(b: StarSystem.Body): Int = when (b.type) {
-        StarSystem.BodyType.STAR -> 0xFFFFE2A8.toInt()
-        StarSystem.BodyType.LAVA -> 0xFFE0703A.toInt()
-        StarSystem.BodyType.TERRAN -> 0xFF5C9CE0.toInt()
-        StarSystem.BodyType.GAS -> 0xFFD9C3A0.toInt()
-        StarSystem.BodyType.ICE -> 0xFFCDE6FA.toInt()
-        StarSystem.BodyType.ROCK -> 0xFF9C8C7C.toInt()
-    }
+    /** The body's Roblox colour (maps use the data colour, 03-world.md 2.7.3), the star a warm white. */
+    private fun bodyColor(b: StarSystem.Body): Int = if (b.isStar) STAR_COLOUR else (0xFF000000.toInt() or b.colour)
 
-    private fun typeLabel(t: StarSystem.BodyType): String = when (t) {
-        StarSystem.BodyType.STAR -> "STAR"
-        StarSystem.BodyType.LAVA -> "VOLCANIC WORLD"
-        StarSystem.BodyType.TERRAN -> "OCEAN WORLD"
-        StarSystem.BodyType.GAS -> "RINGED GAS GIANT"
-        StarSystem.BodyType.ICE -> "ICE WORLD"
-        StarSystem.BodyType.ROCK -> "ROCKY WORLD"
-    }
+    private fun ringColor(b: StarSystem.Body): Int = 0xFF000000.toInt() or b.ringColour
 
     companion object {
         const val TAB_SYSTEM = 0
         const val TAB_GALAXY = 1
         private const val MAP_BG = 0xF2050A10.toInt()
         private const val ORBIT = 0x553F5F7A
-        private const val MIN_MPP = 50f
-        private const val MAX_MPP = 3.0e7f
+        private const val STAR_COLOUR = 0xFFFFE2A8.toInt()
+        const val MIN_MPP = 50f
+
+        /** Zoomed out to the play field's edge (27 Gm in Sol). */
+        const val MAX_MPP = 1.0e8f
         private const val HINT = "PINCH TO ZOOM  ·  DRAG TO PAN  ·  TAP TO SELECT"
         private const val YOU = "YOU"
+        private const val OF = "OF"
 
         // selection card size, clear margin around labels, the extra distance of the fallback
-        // label spots (clears the ship marker), ship marker half-size, and the disc radius above
-        // which labels may cross a body (all in u)
+        // label spots (clears the ship marker), ship marker half-size, the disc radius above
+        // which labels may cross a body, and how far a moon or station must stand clear of its
+        // parent's disc to be drawn and named (all in u)
         private const val CARD_W = 250f
         private const val CARD_H = 96f
         private const val LABEL_PAD = 2f
         private const val LABEL_FAR = 10f
         private const val SHIP_BOX = 13f
         private const val DISC_BLOCK = 32f
+        private const val SEPARATE = 14f
 
         // label spots to try, best first: bodies keep their name below, stations to the right,
         // YOU at the arrow's upper right
         private val BODY_SIDES = intArrayOf(LabelBoxes.BELOW, LabelBoxes.ABOVE, LabelBoxes.RIGHT, LabelBoxes.LEFT)
         private val STATION_SIDES = intArrayOf(LabelBoxes.RIGHT, LabelBoxes.LEFT, LabelBoxes.BELOW, LabelBoxes.ABOVE)
         private val YOU_SIDES = intArrayOf(LabelBoxes.UP_RIGHT, LabelBoxes.DOWN_RIGHT, LabelBoxes.UP_LEFT, LabelBoxes.DOWN_LEFT)
+
+        /**
+         * Rough trip time (s) to a target [d] metres away under the pre-port speed law
+         * ([StarSystem.speedLimit]): the approach limit is APPROACH_RATE·altitude, capped at
+         * MAX_SPEED, so the last stretch takes ln(d/1 km)/rate, plus the cruise at the cap and a
+         * departure allowance.
+         */
+        fun etaSeconds(d: Double): Double {
+            if (d <= 1000.0) return d / 220.0
+            val rate = StarSystem.APPROACH_RATE
+            val capAlt = StarSystem.MAX_SPEED / rate
+            val approach = if (d > capAlt) (d - capAlt) / StarSystem.MAX_SPEED + ln(capAlt / 1000.0) / rate else ln(d / 1000.0) / rate
+            return approach + ETA_DEPARTURE
+        }
+
+        /** Departure allowance of [etaSeconds] (s): leaving a station or a planet's low orbit. */
+        private const val ETA_DEPARTURE = 15.0
 
         /** 1, 2 or 5 × 10^n not above [m]. */
         fun niceLength(m: Double): Double {

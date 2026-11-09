@@ -123,9 +123,16 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val system = s.system
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         var warnY = frame.st + 52f * u
-        if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
+        if (here.nearestBody == system.star && here.altitude < system.bodies[system.star].radius * 0.5) {
             val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
             ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+            warnY += 20f * u
+        }
+        // the approach prompt of a giant (Roblox ShipAtmosphere reads LandingBlocked, DECISIONS 11)
+        if (here.zone == com.starwake.core.game.StarSystem.Zone.LOW_ALTITUDE && here.nearestBody >= 0 &&
+            system.bodies[here.nearestBody].landingBlocked != null
+        ) {
+            ui.textCentered(Session.LANDING_BLOCKED_GAS, cx, warnY, 11f * u, withAlpha(Theme.WARN, a), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
         }
         if (!ship.flightAssist) {
@@ -280,7 +287,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             }
             val ly = minOf(y + half + 16f * u, frame.h - frame.sb - 64f * u)
             labelAndDistance(ui, s, a, kind, i, x, ly, col, true, dist)
-        } else if (kind != Session.LOCK_ASTEROID) {
+        } else {
             val col = withAlpha(if (kind == Session.LOCK_STATION) Theme.ACCENT else Theme.TEXT, a * 0.85f)
             val r = maxOf(screenR, 5f * u)
             ui.circle(x, y, r, col, 1.2f * u)
