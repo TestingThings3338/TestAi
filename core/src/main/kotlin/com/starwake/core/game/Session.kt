@@ -162,6 +162,13 @@ class Session(
     private var wrecked = false
     private var heatWarned = false
 
+    /**
+     * The ground is coming up too fast (DECISIONS 16): below [PULL_UP_ALTITUDE], sinking faster
+     * than a landing ever does, with less than [PULL_UP_TIME] to the ground at this rate.
+     */
+    var pullUp = false
+        private set
+
     /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
     private var liftTime = 0f
 
@@ -510,6 +517,9 @@ class Session(
         if (ship.flightAssist != lastFlightAssist) lastFlightAssist = ship.flightAssist // 09: FA voice
         mark(FrameStep.C45)
         updateProximity()
+        val sink = -here.radialSpeed
+        pullUp = !mode.landed && !mode.docked && here.nearestBody > 0 && here.altitude < PULL_UP_ALTITUDE &&
+            sink > PULL_UP_SINK && here.altitude - spec.groundClearance < sink * PULL_UP_TIME
         mark(FrameStep.C46) // 09: callouts
         mark(FrameStep.C47)
         validateLock()
@@ -1791,6 +1801,15 @@ class Session(
 
         /** cos of the steepest ground the gear stands on (~22°). */
         const val LANDING_SLOPE = 0.927f
+
+        /**
+         * PULL UP: below this height (m; higher up the speed law itself slows a dive in step with
+         * the ground coming closer), sinking faster than this (m/s: no normal landing warns,
+         * DECISIONS 17d), with less than this many seconds to the ground.
+         */
+        const val PULL_UP_ALTITUDE = 1800.0
+        const val PULL_UP_SINK = 28.5f
+        const val PULL_UP_TIME = 6f
 
         /** The wreck: seconds until the recovery, and the fade to black and back. */
         const val WRECK_TIME = 3.2f

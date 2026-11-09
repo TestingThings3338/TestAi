@@ -124,11 +124,16 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         var warnY = frame.st + 52f * u
         // under the look strip's first-flight hint
-        if (drawFlightData(ui, s, cx, warnY + 12f * u, a, time)) warnY += 50f * u
+        if (drawFlightData(ui, s, cx, warnY + 16f * u, a, time)) warnY += 54f * u
         if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
             val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
             ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
             warnY += 20f * u
+        }
+        if (s.pullUp) {
+            val blink = if ((time * 5f).toInt() % 2 == 0) 1f else 0.35f
+            ui.textCentered("PULL UP", cx, warnY, 15f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+            warnY += 22f * u
         }
         if (!ship.flightAssist) {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f

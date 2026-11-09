@@ -499,7 +499,8 @@ void main() {
         // that includes the star (drawn before, being farther away): put the hidden part back,
         // dimmed and reddened by the sky
         vec3 sl = starLight(d);
-        if (sl.r + sl.g + sl.b > 0.0) tk = tonemap(sky + sl * (skyT * mix(1.0, skyA, u_starBehind)));
+        // (a cloud in front of it lets little of it through)
+        if (sl.r + sl.g + sl.b > 0.0) tk = tonemap(sky + sl * (skyT * (mix(1.0, skyA, u_starBehind) * (1.0 - 0.93 * cloudA))));
     }
     vec3 outC = ts * cov + tk * (1.0 - cov);
     float outA = 1.0 - (1.0 - cov) * (1.0 - skyA);

@@ -118,6 +118,11 @@ object SolScenarios {
         frames(30)
         shot("sol-launched-external")
         cmd("view cockpit")
+        cmd("map")
+        frames(20)
+        shot("sol-map")
+        cmd("resume")
+        frames(5)
         val (lat, lon) = earthTarget()
         report.note("descent over lat %.2f lon %.2f".format(lat, lon))
         cmd("throttle 0")
@@ -159,6 +164,77 @@ object SolScenarios {
         cmd("view external")
         frames(40)
         shot("sol-landed-external")
+    }
+
+    /**
+     * `sol-bodies`: the other worlds from 800 km, 15 km and 300 m over their sunlit side (each
+     * view waits for its tiles): the Moon, Mars, Venus under its cloud deck, Titan, Europa, Mercury.
+     */
+    val bodies = gameScenario("sol-bodies", "The other solid worlds of Sol from 800 km, 15 km and 300 m: Luna, Mars, Venus, Titan, Europa, Mercury", layout = StarSystem.Layout.SOL) {
+        cmd("launch space")
+        frames(5)
+        cmd("throttle 0")
+        val only = System.getenv("SOL_BODIES")?.split(',')?.map { it.trim().uppercase() }
+        for (name in listOf("LUNA", "MARS", "VENUS", "TITAN", "EUROPA", "MERCURY")) {
+            if (only != null && name !in only) continue
+            for (alt in listOf(800_000, 15_000, 300)) {
+                cmd("near $name $alt")
+                if (alt > 5_000) {
+                    cmd("stick 0 1")
+                    frames(if (alt > 100_000) 44 else 16)
+                    cmd("stick off")
+                    frames(40)
+                }
+                settle()
+                shot("sol-%s-%06dm".format(name.lowercase(), alt))
+                report.note("%s %d m: zone %s alt %s g %s air %s terrain %s".format(name, alt, state("zone"), state("alt"), state("g"), state("air"), state("terrain")))
+            }
+        }
+    }
+
+    /**
+     * `sol-perf`: the engine's own cost of a descent over the Earth on a no-op GL (no driver): CPU
+     * time and bytes allocated per frame on the game thread while the terrain streams under a
+     * moving ship. The per-frame path must not allocate (run with -Pnoea, see the perf scenario).
+     */
+    val perf = Scenario("sol-perf", "CPU ms and allocations per frame of a descent over the Earth on a no-op GL (use -Pnoea)") { env ->
+        val opts = env.opts
+        val r = env.report
+        val (lat, lon) = earthTarget()
+        val noop = NoopGl()
+        val platform = DesktopPlatform(opts.assetsDir, opts.settings)
+        val game = com.starwake.core.Game(platform, StarSystem.Layout.SOL)
+        val d = GameDriver(game, noop, null, platform, r, opts, opts.insets)
+        d.start()
+        d.cmd("launch space")
+        d.frames(5)
+        d.cmd("over EARTH $lat $lon 60000")
+        d.frames(5)
+        // a shallow dive at half throttle: from 60 km to the ground in about a minute
+        d.cmd("stick 0 0.35")
+        d.frames(40)
+        d.cmd("stick off")
+        d.cmd("throttle 0.5")
+        // warm-up: the JIT, the first tiles, the far look
+        for (i in 0 until 600) {
+            d.frame()
+            Thread.sleep(2)
+        }
+        val frames = opts.perfFrames.coerceAtLeast(600)
+        val meter = PerfMeter(frames) { val c = noop.drawCalls.toInt(); noop.resetCounters(); c }
+        meter.game = game
+        d.platform.quiet = true
+        d.observer = meter
+        for (i in 0 until frames) {
+            d.frame()
+            Thread.sleep(2)
+            val alt = Regex(" alt=(\\S+)").find(game.debugInfo)?.groupValues?.get(1)?.toDoubleOrNull() ?: 1e9
+            if (alt < 800.0) d.cmd("over EARTH $lat ${lon + 0.02 * i} 30000")
+        }
+        d.observer = null
+        d.platform.quiet = false
+        meter.summary("sol descent, no-op GL", 0, r)
+        r.note(game.terrainStats)
     }
 
     val entry = gameScenario("sol-entry", "A real-time dive into the Earth's air from 140 km at full throttle: glow, heat, drag, the ground coming up", layout = StarSystem.Layout.SOL) {

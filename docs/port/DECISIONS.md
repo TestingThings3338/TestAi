@@ -132,6 +132,43 @@ revisited.
 35. Fix obvious Roblox bugs in the port (silent crash debris, unreachable "request received"
     line, the stations-only collision alert gets its intended NPC check).
 
+## Sol milestone: what the build does today
+
+The user asked for a realistic planet game: real sizes, real physics, seamless entry into the
+Earth, graphics not spared on a strong phone. That request decides the points below; where one
+differs from a decision above, this section wins until the matching port replaces it.
+
+36. **The world is Sol** (`SolData.kt`, decision 1): the Lua's numbers at S = 3000, 18 bodies and
+    the 6 stations, at a **fixed epoch** (decision 6's first step). MERIDIAN hangs at 55° from the
+    Earth → Sun direction instead of the Lua's 90°, so the Earth below it is mostly lit. The
+    stations are still the two stand-in models. The asteroid field is gone from Sol (decision 13).
+37. **The test range stays** as `StarSystem()` (the gas giant, four smooth planets, the asteroid
+    field): the unit tests and the harness scenes written for the flight mechanics keep running
+    on it. `StarSystem.sol()` is the game.
+38. **Gravity is the real one**: 9.81 m/s² per g at the surface, inverse square above it, without
+    the landing scene's 35 % damping (this replaces decision 5 for now). Flight Assist cancels all
+    of it (the thrusters hold the ship); with Flight Assist off the ship falls and can orbit.
+39. **Air**: real ground densities and scale heights (Earth 1.225 kg/m³ and 8.5 km, Mars 0.020,
+    Venus 65, Titan 5.4), quadratic drag with Cd·A/m = 0.002 m²/kg, no lift. The speed laws are
+    the pre-port ones (limit ∝ clearance, floor at the hull's top speed).
+40. **Entry heating** (decision 17d): heat flux ∝ √ρ·v³. The glow follows it over two decades;
+    the skin's temperature follows with a 5 s time constant and costs hull beyond its limit. A
+    full-throttle dive under Flight Assist stays just inside the limit. The star heats a hull
+    within half a radius of its surface.
+41. **Hull and loss**: ground impacts above 12 m/s cost hull, only on ground that is already
+    drawn at full detail (04 9.10). At 0 the ship is lost: 3.2 s of black, then a new hull in
+    front of the nearest station (`SpawnRules.recoveryPose`). The crash cinematic of `05` is not
+    ported. Docking restores the hull.
+42. **Landing** is still the pre-port landing mode (LAND, gear down, touch down slowly), now on
+    the real ground: the gear follows slopes up to 22°; steeper ground refuses the touchdown.
+43. **Clouds** (decision 17a): one weather map for every world with air (cover and colour from
+    its surface profile, height = the middle of the profile's deck) plus tiling 3-D noise, shaded
+    as one thin deck by the impostor and the terrain alike, with shadows on the ground and fog
+    inside the deck. They drift at 12 m/s on the Earth's equator.
+44. **Far looks**: every solid body's image is baked on the device from its terrain functions
+    (decision 17a), 512 × 256 for all of them in the background after the start and 2048 × 1024
+    (HIGH) for the terrain body.
+
 ## Optional exports that would improve fidelity
 
 Not blocking; the port proceeds without them: Studio GUI exports or screenshots of SystemMap,

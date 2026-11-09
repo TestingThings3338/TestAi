@@ -308,6 +308,8 @@ object Scenarios {
 
         "sol" to SolScenarios.sol,
         "sol-entry" to SolScenarios.entry,
+        "sol-bodies" to SolScenarios.bodies,
+        "sol-perf" to SolScenarios.perf,
         "terrain" to Scenario(
             "terrain",
             "Seamless planet terrain: Earth, Luna, Mars from 20,000 km to 20 m (down and horizon, HIGH and LOW); impostor-to-terrain hand-over, ship and outposts on the ground through SceneRenderer; then real-time flight-speed descents",
