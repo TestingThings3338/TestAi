@@ -3,6 +3,7 @@ package com.starwake.core.math
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 const val PI_F = 3.1415927f
 const val TAU_F = 6.2831855f
@@ -19,6 +20,30 @@ fun smoothstep(e0: Float, e1: Float, x: Float): Float {
 
 /** Frame-rate independent smoothing factor: use as `x += (target - x) * expApproach(rate, dt)`. */
 fun expApproach(rate: Float, dt: Float): Float = 1f - exp(-rate * dt)
+
+/**
+ * Frame-rate independent exponential smoothing (Roblox ShipMath.smooth): [tau] is the time to cover
+ * 63 % of the gap; `tau <= 0` jumps to [target]. Config time constants port verbatim through this.
+ */
+fun smooth(current: Float, target: Float, tau: Float, dt: Float): Float =
+    if (tau <= 0f) target else current + (target - current) * (1f - exp(-dt / tau))
+
+/**
+ * Radial dead zone on a 2D input (Roblox ShipMath.applyDeadzone): magnitude m <= [dz] gives 0,
+ * otherwise the direction is kept and the magnitude rescaled to s = clamp((m - dz) / (1 - dz), 0, 1),
+ * raised to [curve]. Radial, not per axis (a square dead zone feels wrong on the diagonal), and the
+ * rescale starts the output at 0 at the edge instead of jumping. Writes (x, y) into [out].x/.y.
+ */
+fun applyDeadzone(x: Float, y: Float, dz: Float, curve: Float, out: Vec3): Vec3 {
+    val m = kotlin.math.sqrt(x * x + y * y)
+    if (m <= dz || m < 1e-6f) return out.set(0f, 0f, 0f)
+    var s = clamp((m - dz) / max(1f - dz, 1e-6f), 0f, 1f)
+    if (curve != 1f) s = s.toDouble().pow(curve.toDouble()).toFloat()
+    return out.set(x / m * s, y / m * s, 0f)
+}
+
+/** Luau's math.round: halves away from zero (2.5 → 3, −2.5 → −3). */
+fun roundHalfAway(x: Double): Double = if (x < 0.0) -kotlin.math.floor(-x + 0.5) else kotlin.math.floor(x + 0.5)
 
 /** Moves [current] towards [target] by at most [maxDelta]. */
 fun approach(current: Float, target: Float, maxDelta: Float): Float =

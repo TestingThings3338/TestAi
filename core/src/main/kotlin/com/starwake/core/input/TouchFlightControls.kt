@@ -6,7 +6,6 @@ import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.UiRenderer
 import com.starwake.core.math.clamp
 import com.starwake.core.math.deadZone
-import com.starwake.core.math.expoCurve
 import com.starwake.core.math.withAlpha
 import com.starwake.core.ui.Rect
 import com.starwake.core.ui.TextBuf
@@ -16,46 +15,49 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
- * Two-thumb touch flight controls.
+ * Two-thumb touch flight controls in the consolidated layout of 01-core-loop.md 5.6 (reference
+ * Xiaomi 15 landscape, 929 × 417 u, right-handed; "left-handed" mirrors everything). They write
+ * the pilot's input into an [InputFrame] once per frame ([write]); they hold no flight state of
+ * their own except the lever's latched position, which the game keeps in step with the session.
  *
- * Left thumb (anywhere in the left zone): a throttle *lever* – slide up/down to set the throttle,
- * it stays where you leave it; slide sideways for rudder (spring-centred). Double-tap = all stop.
- * Right thumb (anywhere in the right zone): a floating flight stick – up/down pitch, left/right roll
- * (or yaw, configurable). Buttons: BOOST, FA (flight assist), CAM, pause.
- * "Left-handed" mirrors the whole layout.
+ * - Left thumb (anywhere in the left 42 %): the throttle *lever*: slide up/down to set it, it stays
+ *   where you leave it; slide sideways for the key axis (yaw, or roll with STICK X = YAW).
+ *   Double-tap = lever to zero.
+ * - Right thumb (the rest): a floating flight stick, the Roblox cursor (springs back to centre).
+ * - Strafe cross ▲ ◀ ▶ ▼ beside the lever; BOOST, FA; the contextual ACTION pill; top bar
+ *   PAUSE · MAP · LOCK (tap: next target, hold 0.5 s: clear) · VIEW; the look strip along the top
+ *   (one-finger drag looks around, release returns the view).
+ *
+ * Every control of 5.6 is laid out; the ones whose feature does not exist yet (WALK, DATA, AUTO,
+ * SCAN/MINE, CANCEL JUMP) stay hidden until their port switches them on, so nothing moves later.
  */
 class TouchFlightControls(private val settings: Settings, private val host: UiHost) {
-    // ---- outputs
-    var pitch = 0f
-        private set
-    var yaw = 0f
-        private set
-    var roll = 0f
-        private set
-
-    /** Latched lever position, -1..1. */
+    /** Latched lever position, -1..1 (the game copies the session's throttle into it every frame). */
     var throttle = 0f
 
-    /** Vertical thrusters: +1 up, -1 down (held buttons). */
-    var vertical = 0f
-        private set
-
-    /** Raw stick deflection (screen space, -1..1, +y = down) for the HUD steering arrow. */
+    /** Stick deflection (cursor), X right, Y down, inside the unit circle: drawn as the steering arrow. */
     val stickVecX get() = stickOutX
     val stickVecY get() = stickOutY
-    private var lockEdge = false
-    private var boostEdge = false
-    private var faEdge = false
-    private var camEdge = false
-    private var pauseEdge = false
-    var boostHeld = false
-        private set
     var stickUsed = false
         private set
     var throttleUsed = false
         private set
 
-    // ---- layout
+    // ---- what the game shows this frame
+    /** Contextual action caption (LAND / DOCK / CANCEL / TAKE OFF ...); the pill hides when empty. */
+    var actionLabel = ""
+
+    /** The look strip takes touches (a view that can look around, flight controls owning the touches). */
+    var lookEnabled = true
+
+    /** Controls of later ports, laid out now and hidden until their feature exists. */
+    var walkVisible = false
+    var dataVisible = false
+    var autoVisible = false
+    var scanVisible = false
+    var cancelJumpVisible = false
+
+    // ---- layout (public for tests, the HUD and the harness)
     private var w = 1f
     private var h = 1f
     private var u = 1f
@@ -68,17 +70,28 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     val pauseBtn = Rect()
     val lockBtn = Rect()
     val mapBtn = Rect()
-
-    /** Contextual action (LAND / DOCK / TAKE OFF); hidden when [actionLabel] is empty. */
+    val walkBtn = Rect()
+    val dataBtn = Rect()
     val actionBtn = Rect()
-    var actionLabel = ""
+    val autoBtn = Rect()
+    val scanBtn = Rect()
+    val cancelJumpBtn = Rect()
     val upBtn = Rect()
     val downBtn = Rect()
+    val leftBtn = Rect()
+    val rightBtn = Rect()
+
+    /** The look strip (01 5.6: x 150–640, y 0–56 u from the safe insets). */
+    val lookStrip = Rect()
+
+    /** Plates of the first-flight hints: the lever's beside the gauge, the stick's above its rest ring. */
+    val throttleHint = Rect()
+    val stickHint = Rect()
     private var stickRadius = 1f
     private var stickRestX = 0f
     private var stickRestY = 0f
 
-    // ---- stick state
+    // ---- stick
     private var stickId = -1
     private var stickCx = 0f
     private var stickCy = 0f
@@ -89,16 +102,23 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     private var stickDrawDx = 0f
     private var stickDrawDy = 0f
 
-    // ---- throttle state
+    // ---- lever
     private var thrId = -1
     private var thrGrabY = 0f
     private var thrGrabX = 0f
     private var thrGrabGauge = 0f
-    private var thrX = 0f
     private var thrDownTime = 0f
     private var thrMoved = false
+    private var leverDirty = false
     private var lastTapTime = -10f
     private var rudder = 0f
+
+    // ---- look strip
+    private var lookId = -1
+    private var lookLastX = 0f
+    private var lookLastY = 0f
+    private var pendingLookX = 0f
+    private var pendingLookY = 0f
 
     // ---- buttons
     private var boostId = -1
@@ -106,12 +126,21 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
     private var camId = -1
     private var pauseId = -1
     private var lockId = -1
+    private var lockDownTime = 0f
+    private var lockHoldFired = false
     private var mapId = -1
     private var actionId = -1
-    private var actionEdge = false
-    private var mapEdge = false
     private var upId = -1
     private var downId = -1
+    private var leftId = -1
+    private var rightId = -1
+
+    /** Presses since the last [write], per action. */
+    private val pending = IntArray(Action.COUNT)
+
+    /** Presses of the contextual ACTION pill since the last [write]. */
+    private var pendingContext = 0
+    private var used = false
     private var time = 0f
     private val buf = TextBuf(32)
 
@@ -121,39 +150,65 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         mirror = settings.leftHanded
         zoneSplit = width * 0.42f
         stickRadius = 52f * u
-        // positions for the right-handed layout; mirrored afterwards
-        // build the right-handed layout; when mirrored, each side must keep its own inset
+        // build the right-handed layout; when mirrored, each side keeps its own inset
         val left = if (mirror) sr else sl
         val right = if (mirror) sl else sr
+        // vertical positions are fractions of the 417 u reference height (5.6: they scale by h / 417)
+        val k = height / REF_H
         gauge.set(left + 30f * u, height * 0.30f, 14f * u, height - sb - 52f * u - height * 0.30f)
+        // top bar
         pauseBtn.set(left + 14f * u, st + 12f * u, 46f * u, 38f * u)
+        walkBtn.set(left + 70f * u, st + 12f * u, 62f * u, 38f * u)
         camBtn.set(width - right - 14f * u - 56f * u, st + 12f * u, 56f * u, 38f * u)
-        val br = 31f * u
-        boostBtn.set(width - right - 30f * u - 2 * br, height * 0.40f - br, 2 * br, 2 * br)
-        val fr = 23f * u
-        faBtn.set(boostBtn.cx - 92f * u - fr, height * 0.26f - fr, 2 * fr, 2 * fr)
         lockBtn.set(camBtn.x - 10f * u - 62f * u, st + 12f * u, 62f * u, 38f * u)
         mapBtn.set(lockBtn.x - 10f * u - 56f * u, st + 12f * u, 56f * u, 38f * u)
+        dataBtn.set(mapBtn.x - 10f * u - 56f * u, st + 12f * u, 56f * u, 38f * u)
+        // the strip between WALK and DATA: x 150 u to 289 u short of the right inset (640 at 929 u)
+        lookStrip.set(left + 150f * u, st, maxOf(0f, width - right - 289f * u - (left + 150f * u)), 56f * u)
+        // right column: BOOST (moved down for AUTO), FA, ACTION and AUTO pills
+        val br = 31f * u
+        boostBtn.set(width - right - 30f * u - 2 * br, BOOST_Y * k - br, 2 * br, 2 * br)
+        val fr = 23f * u
+        faBtn.set(boostBtn.cx - 92f * u - fr, height * 0.26f - fr, 2 * fr, 2 * fr)
         actionBtn.set(boostBtn.cx - 46f * u, height * 0.22f - 17f * u, 92f * u, 34f * u)
-        val vr = 21f * u
-        val vx = gauge.x + gauge.w + 60f * u
-        upBtn.set(vx - vr, gauge.y + 4f * u, 2 * vr, 2 * vr)
-        downBtn.set(vx - vr, gauge.y + 4f * u + 2 * vr + 12f * u, 2 * vr, 2 * vr)
+        autoBtn.set(actionBtn.x, actionBtn.y + 42f * u, 92f * u, 32f * u)
+        // left column: SCAN/MINE above the strafe cross
+        scanBtn.set(left + 60f * u, 74f * k, 80f * u, 32f * u)
+        val sr2 = 19f * u
+        upBtn.set(left + 130f * u - sr2, 140f * k - sr2, 2 * sr2, 2 * sr2)
+        leftBtn.set(left + 86f * u - sr2, 177f * k - sr2, 2 * sr2, 2 * sr2)
+        rightBtn.set(left + 174f * u - sr2, 177f * k - sr2, 2 * sr2, 2 * sr2)
+        downBtn.set(left + 130f * u - sr2, 214f * k - sr2, 2 * sr2, 2 * sr2)
+        cancelJumpBtn.set(width * 0.5f - 70f * u, height * 0.62f, 140f * u, 36f * u)
         stickRestX = width - right - 150f * u
         stickRestY = height - sb - 110f * u
         if (mirror) {
-            for (r in arrayOf(gauge, pauseBtn, camBtn, boostBtn, faBtn, lockBtn, mapBtn, actionBtn, upBtn, downBtn)) r.x = width - r.x - r.w
+            for (r in arrayOf(
+                gauge, pauseBtn, walkBtn, camBtn, lockBtn, mapBtn, dataBtn, lookStrip, boostBtn, faBtn, actionBtn,
+                autoBtn, scanBtn, upBtn, downBtn, leftBtn, rightBtn, cancelJumpBtn,
+            )) r.x = width - r.x - r.w
+            // ◀ and ▶ keep their meaning: swap them back after the mirror
+            val lx = leftBtn.x
+            leftBtn.x = rightBtn.x
+            rightBtn.x = lx
             stickRestX = width - stickRestX
         }
+        // first-flight hints, on the inner side of the lever and above the stick's rest ring. BOOST
+        // (moved down to make room for AUTO) reaches into the stick hint's row on phone screens:
+        // there the plate moves inward, clear of the BOOST column, so it never covers a control
+        val hy = gauge.y + gauge.h * 0.64f
+        if (mirror) throttleHint.set(gauge.x - 270f * u, hy - 26f * u, 260f * u, 44f * u)
+        else throttleHint.set(gauge.x + gauge.w + 16f * u, hy - 26f * u, 260f * u, 44f * u)
+        val hintW = 280f * u
+        val hintH = 46f * u
+        val hintY = stickRestY - stickRadius - 44f * u
+        val gap = 8f * u
+        var hintX = stickRestX - hintW * 0.5f
+        if (hintY < boostBtn.y + boostBtn.h + gap && hintY + hintH > boostBtn.y - gap) {
+            hintX = if (mirror) maxOf(hintX, boostBtn.x + boostBtn.w + gap) else minOf(hintX, boostBtn.x - gap - hintW)
+        }
+        stickHint.set(hintX, hintY, hintW, hintH)
     }
-
-    fun consumeBoost() = boostEdge.also { boostEdge = false }
-    fun consumeFa() = faEdge.also { faEdge = false }
-    fun consumeCam() = camEdge.also { camEdge = false }
-    fun consumePause() = pauseEdge.also { pauseEdge = false }
-    fun consumeLock() = lockEdge.also { lockEdge = false }
-    fun consumeMap() = mapEdge.also { mapEdge = false }
-    fun consumeAction() = actionEdge.also { actionEdge = false }
 
     private fun inThrottleZone(x: Float) = if (mirror) x > w - zoneSplit else x < zoneSplit
 
@@ -166,6 +221,11 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         return dx * dx + dy * dy <= rr * rr
     }
 
+    private fun queue(a: Action) {
+        pending[a.ordinal]++
+        used = true
+    }
+
     fun onDown(id: Int, x: Float, y: Float): Boolean {
         val slop = 8f * u
         when {
@@ -173,35 +233,45 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 pauseId = id; host.haptic(Haptics.TAP)
             }
             camId < 0 && hit(camBtn, x, y, slop) -> {
-                camId = id; camEdge = true; host.haptic(Haptics.TAP)
+                camId = id; queue(Action.EXTERNAL_VIEW); host.haptic(Haptics.TAP)
             }
             lockId < 0 && hit(lockBtn, x, y, slop) -> {
-                lockId = id; lockEdge = true; host.haptic(Haptics.TAP)
+                lockId = id; lockDownTime = time; lockHoldFired = false; host.haptic(Haptics.TAP)
             }
             mapId < 0 && hit(mapBtn, x, y, slop) -> {
-                mapId = id; mapEdge = true; host.haptic(Haptics.TAP)
+                mapId = id; queue(Action.SYSTEM_MAP); host.haptic(Haptics.TAP)
             }
             actionId < 0 && actionLabel.isNotEmpty() && hit(actionBtn, x, y, slop) -> {
-                actionId = id; actionEdge = true; host.haptic(Haptics.TAP)
+                actionId = id; pendingContext++; used = true; host.haptic(Haptics.TAP)
             }
             upId < 0 && hitCircle(upBtn, x, y, slop * 0.5f) -> {
-                upId = id; host.haptic(Haptics.TICK)
+                upId = id; used = true; host.haptic(Haptics.TICK)
             }
             downId < 0 && hitCircle(downBtn, x, y, slop * 0.5f) -> {
-                downId = id; host.haptic(Haptics.TICK)
+                downId = id; used = true; host.haptic(Haptics.TICK)
+            }
+            leftId < 0 && hitCircle(leftBtn, x, y, slop * 0.5f) -> {
+                leftId = id; used = true; host.haptic(Haptics.TICK)
+            }
+            rightId < 0 && hitCircle(rightBtn, x, y, slop * 0.5f) -> {
+                rightId = id; used = true; host.haptic(Haptics.TICK)
             }
             boostId < 0 && hitCircle(boostBtn, x, y, slop) -> {
-                boostId = id; boostEdge = true; boostHeld = true
+                boostId = id; queue(Action.BOOST)
             }
             faId < 0 && hitCircle(faBtn, x, y, slop) -> {
-                faId = id; faEdge = true; host.haptic(Haptics.TICK)
+                faId = id; queue(Action.TOGGLE_FLIGHT_ASSIST); host.haptic(Haptics.TICK)
+            }
+            lookId < 0 && lookEnabled && hit(lookStrip, x, y, 0f) -> {
+                lookId = id; lookLastX = x; lookLastY = y; used = true
             }
             thrId < 0 && inThrottleZone(x) -> {
                 thrId = id
-                thrGrabX = x; thrGrabY = y; thrX = x
+                thrGrabX = x; thrGrabY = y
                 thrGrabGauge = gaugeOf(throttle)
                 thrDownTime = time
                 thrMoved = false
+                used = true
             }
             stickId < 0 && !inThrottleZone(x) -> {
                 stickId = id
@@ -215,6 +285,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 stickDrawDy = clamp(y, stickRadius + 10f * u, h - stickRadius - 10f * u) - y
                 stickX = x; stickY = y
                 updateStick()
+                used = true
             }
             else -> return false
         }
@@ -228,7 +299,6 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 updateStick()
             }
             thrId -> {
-                thrX = x
                 val travel = gauge.h
                 val g = clamp(thrGrabGauge + (thrGrabY - y) / travel, 0f, 1f)
                 // symmetric zero detent: the same screen distance either side of the zero line
@@ -237,13 +307,26 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 if ((t == 0f) != (throttle == 0f) || (t >= 1f && throttle < 1f) || (t <= -1f && throttle > -1f)) {
                     host.haptic(Haptics.TICK)
                 }
-                if (t != throttle) throttleUsed = true
+                if (t != throttle) {
+                    throttleUsed = true
+                    leverDirty = true
+                }
                 throttle = t
                 val dx = (x - thrGrabX) / (48f * u)
                 rudder = deadZone(clamp(dx, -1f, 1f), 0.18f)
             }
-            else -> return id == boostId || id == faId || id == camId || id == pauseId || id == lockId || id == mapId || id == actionId || id == upId || id == downId
+            lookId -> {
+                // 0.5° of look per u of finger travel x sensitivity (01 8.1.1); drag up looks up
+                val k = LOOK_DEG_PER_U * settings.sensitivity / u
+                val pitchSign = if (settings.pitchUpClimb) 1f else -1f
+                pendingLookX += (x - lookLastX) * k
+                pendingLookY += -(y - lookLastY) * k * pitchSign
+                lookLastX = x; lookLastY = y
+            }
+            else -> return id == boostId || id == faId || id == camId || id == pauseId || id == lockId ||
+                id == mapId || id == actionId || id == upId || id == downId || id == leftId || id == rightId
         }
+        used = true
         return true
     }
 
@@ -257,7 +340,9 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                 rudder = 0f
                 if (!thrMoved && time - thrDownTime < 0.25f) {
                     if (time - lastTapTime < 0.35f) {
+                        // double-tap: lever to zero
                         throttle = 0f
+                        leverDirty = true
                         host.haptic(Haptics.BUMP)
                         lastTapTime = -10f
                     } else {
@@ -265,31 +350,40 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
                     }
                 }
             }
-            boostId -> {
-                boostId = -1; boostHeld = false
-            }
+            lookId -> lookId = -1
+            boostId -> boostId = -1
             faId -> faId = -1
             camId -> camId = -1
-            lockId -> lockId = -1
+            lockId -> {
+                lockId = -1
+                // a short press steps to the next target; the hold already cleared it
+                if (!lockHoldFired && !cancelled) queue(Action.CYCLE_TARGET)
+            }
             mapId -> mapId = -1
             actionId -> actionId = -1
             upId -> upId = -1
             downId -> downId = -1
+            leftId -> leftId = -1
+            rightId -> rightId = -1
             pauseId -> {
                 pauseId = -1
-                if (!cancelled && hit(pauseBtn, x, y, 16f * u)) pauseEdge = true
+                if (!cancelled && hit(pauseBtn, x, y, 16f * u)) queue(Action.PAUSE)
             }
             else -> return false
         }
         return true
     }
 
+    /** Lets go of every touch (an overlay took the screen): the lever stays latched, the stick recentres. */
     fun releaseAll() {
         stickId = -1; thrId = -1; boostId = -1; faId = -1; camId = -1; pauseId = -1
-        lockId = -1; upId = -1; downId = -1; vertical = 0f; lockEdge = false
-        mapId = -1; mapEdge = false; actionId = -1; actionEdge = false
-        stickOutX = 0f; stickOutY = 0f; rudder = 0f; boostHeld = false
-        boostEdge = false; faEdge = false; camEdge = false; pauseEdge = false
+        lockId = -1; upId = -1; downId = -1; leftId = -1; rightId = -1; lookId = -1
+        mapId = -1; actionId = -1
+        stickOutX = 0f; stickOutY = 0f; rudder = 0f
+        pendingLookX = 0f; pendingLookY = 0f
+        leverDirty = false
+        pending.fill(0)
+        pendingContext = 0
     }
 
     private fun updateStick() {
@@ -305,36 +399,63 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             dx = stickX - stickCx
             dy = stickY - stickCy
         }
-        val nx = dx / r
-        val ny = dy / r
-        val mag = sqrt(nx * nx + ny * ny)
-        if (mag < 0.06f) {
-            stickOutX = 0f; stickOutY = 0f
-        } else {
-            // radial dead zone, then per-axis expo for fine aiming near centre
-            val scaled = ((mag - 0.06f) / 0.94f) / mag
-            stickOutX = expoCurve(nx * scaled, 0.25f)
-            stickOutY = expoCurve(ny * scaled, 0.25f)
-            stickUsed = true
-        }
+        // the cursor: offset / radius, inside the unit circle, no dead zone (the flight model has its own)
+        stickOutX = dx / r
+        stickOutY = dy / r
+        if (stickOutX * stickOutX + stickOutY * stickOutY > STICK_USED * STICK_USED) stickUsed = true
     }
 
-    /** Updates the axis outputs. Call once per frame. */
-    fun update(dt: Float) {
+    /**
+     * Writes this frame's touch input into [f] (call once per frame, after the pointer events and
+     * before the session frame). [dt] drives the long-press timers.
+     */
+    fun write(f: InputFrame, dt: Float) {
         time += dt
-        vertical = (if (upId >= 0) 1f else 0f) - (if (downId >= 0) 1f else 0f)
         val sens = settings.sensitivity
-        val sx = clamp(stickOutX * sens, -1f, 1f)
-        val sy = clamp(stickOutY * sens, -1f, 1f)
-        pitch = if (settings.pitchUpClimb) -sy else sy
-        if (settings.stickXRoll) {
-            roll = sx; yaw = rudder
-        } else {
-            yaw = sx; roll = rudder
+        val pitchSign = if (settings.pitchUpClimb) 1f else -1f
+        if (stickId >= 0) f.addAim(stickOutX * sens, stickOutY * sens * pitchSign)
+        if (rudder != 0f) f.keyAxis = clamp(f.keyAxis - rudder, -1f, 1f)
+        if (leverDirty) {
+            leverDirty = false
+            f.leverSet = true
+            f.lever = throttle
         }
+        if (upId >= 0) { f.lateralY += 1f; f.hold(Action.STRAFE_UP) }
+        if (downId >= 0) { f.lateralY -= 1f; f.hold(Action.STRAFE_DOWN) }
+        if (leftId >= 0) { f.lateralX -= 1f; f.hold(Action.STRAFE_LEFT) }
+        if (rightId >= 0) { f.lateralX += 1f; f.hold(Action.STRAFE_RIGHT) }
+        f.lateralX = clamp(f.lateralX, -1f, 1f)
+        f.lateralY = clamp(f.lateralY, -1f, 1f)
+        if (boostId >= 0) f.hold(Action.BOOST)
+        if (lookId >= 0) {
+            f.lookHeld = true
+            f.hold(Action.LOOK)
+        }
+        f.lookX += pendingLookX
+        f.lookY += pendingLookY
+        pendingLookX = 0f
+        pendingLookY = 0f
+        // LOCK held 0.5 s clears the target (06 9.1), with a tick
+        if (lockId >= 0 && !lockHoldFired && time - lockDownTime >= LOCK_HOLD) {
+            lockHoldFired = true
+            pending[Action.CLEAR_TARGET.ordinal]++
+            host.haptic(Haptics.TICK)
+        }
+        for (i in 0 until Action.COUNT) {
+            val n = pending[i]
+            if (n == 0) continue
+            pending[i] = 0
+            repeat(n) { f.press(Action.of(i)) }
+        }
+        // the pill sends what its label means (LAND or DOCK), as the game set it for this frame
+        val context = f.contextAction
+        if (context != null) repeat(pendingContext) { f.press(context) }
+        pendingContext = 0
+        if (used || thrId >= 0 || stickId >= 0) f.device = InputFrame.TOUCH
+        used = false
     }
 
-    // ---- throttle gauge mapping: bottom 22% of the gauge is reverse
+    // ---- lever gauge mapping: the bottom 22 % of the gauge is reverse
     private fun gaugeOf(t: Float): Float = if (t >= 0f) REV + (1f - REV) * t else REV * (1f + t)
     private fun throttleOf(g: Float): Float = if (g >= REV) (g - REV) / (1f - REV) else g / REV - 1f
 
@@ -375,7 +496,7 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         ui.textCentered("THR", g.cx, g.y - 30f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
         ui.textCentered(buf, g.cx, g.y - 15f * u, 12f * u, withAlpha(if (throttle < 0f) Theme.WARN else Theme.TEXT, a), face = FontData.MONO)
         if (active) {
-            // rudder indicator under the thumb
+            // key-axis indicator under the thumb
             val rx = thrGrabX
             val ry = thrGrabY + 46f * u
             ui.rect(rx - 48f * u, ry - 2f * u, 96f * u, 4f * u, withAlpha(Theme.PANEL_LIGHT, a * 0.9f), 2f * u)
@@ -400,6 +521,13 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             ui.circle(stickRestX, stickRestY, stickRadius * 0.4f, withAlpha(Theme.ACCENT, a * 0.12f))
         }
 
+        // -------- look strip: invisible until used (a faint band while a finger is in it)
+        if (lookId >= 0) {
+            val s = lookStrip
+            ui.rect(s.x, s.y, s.w, s.h, withAlpha(Theme.ACCENT, a * 0.06f), 8f * u)
+            ui.rect(s.x, s.y + s.h - 2f * u, s.w, 2f * u, withAlpha(Theme.ACCENT, a * 0.35f))
+        }
+
         // -------- buttons
         val boostCol = if (boostReady || boosting) Theme.ACCENT else Theme.TEXT_DIM
         ui.circle(boostBtn.cx, boostBtn.cy, boostBtn.w * 0.5f, withAlpha(if (boosting) Theme.ACCENT else Theme.PANEL, a * if (boosting) 0.85f else 0.8f))
@@ -417,18 +545,18 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         ui.textCentered("FA", faBtn.cx, faBtn.cy - 5f * u, 11f * u, withAlpha(faCol, a), weight = 0.03f)
         ui.textCentered(if (flightAssist) "ON" else "OFF", faBtn.cx, faBtn.cy + 8f * u, 8f * u, withAlpha(faCol, a), tracking = 0.1f)
 
-        ui.rect(camBtn.x, camBtn.y, camBtn.w, camBtn.h, withAlpha(Theme.PANEL, a * 0.8f), -6f * u)
-        ui.rect(camBtn.x, camBtn.y, camBtn.w, camBtn.h, withAlpha(Theme.ACCENT, a * 0.5f), -6f * u, 1.2f * u)
-        ui.textCentered("VIEW", camBtn.cx, camBtn.cy, 11f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f)
-
+        barButton(ui, camBtn, "VIEW", a)
         val lockCol = if (locked) Theme.LOCK else Theme.ACCENT
+        val holding = lockId >= 0 && !lockHoldFired
         ui.rect(lockBtn.x, lockBtn.y, lockBtn.w, lockBtn.h, withAlpha(if (locked) Theme.LOCK else Theme.PANEL, a * if (locked) 0.25f else 0.8f), -6f * u)
+        if (holding) {
+            // the hold-to-clear fills along the bottom edge
+            val k = clamp((time - lockDownTime) / LOCK_HOLD, 0f, 1f)
+            ui.rect(lockBtn.x, lockBtn.y + lockBtn.h - 3f * u, lockBtn.w * k, 3f * u, withAlpha(Theme.LOCK, a))
+        }
         ui.rect(lockBtn.x, lockBtn.y, lockBtn.w, lockBtn.h, withAlpha(lockCol, a * 0.6f), -6f * u, 1.2f * u)
         ui.textCentered("LOCK", lockBtn.cx, lockBtn.cy, 11f * u, withAlpha(if (locked) Theme.LOCK else Theme.TEXT, a), tracking = 0.12f)
-
-        ui.rect(mapBtn.x, mapBtn.y, mapBtn.w, mapBtn.h, withAlpha(Theme.PANEL, a * 0.8f), -6f * u)
-        ui.rect(mapBtn.x, mapBtn.y, mapBtn.w, mapBtn.h, withAlpha(Theme.ACCENT, a * 0.5f), -6f * u, 1.2f * u)
-        ui.textCentered("MAP", mapBtn.cx, mapBtn.cy, 11f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f)
+        barButton(ui, mapBtn, "MAP", a)
 
         if (actionLabel.isNotEmpty()) {
             val pulse = 0.75f + 0.25f * kotlin.math.sin(time * 4f)
@@ -437,12 +565,31 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
             ui.textCentered(actionLabel, actionBtn.cx, actionBtn.cy, 11.5f * u, withAlpha(if (actionId >= 0) Theme.DARK else Theme.LOCK, a), tracking = 0.15f, weight = 0.03f)
         }
 
-        for (b in 0..1) {
-            val r = if (b == 0) upBtn else downBtn
-            val held = if (b == 0) upId >= 0 else downId >= 0
+        // strafe cross
+        for (b in 0..3) {
+            val r = when (b) {
+                0 -> upBtn
+                1 -> downBtn
+                2 -> leftBtn
+                else -> rightBtn
+            }
+            val held = when (b) {
+                0 -> upId >= 0
+                1 -> downId >= 0
+                2 -> leftId >= 0
+                else -> rightId >= 0
+            }
             ui.circle(r.cx, r.cy, r.w * 0.5f, withAlpha(if (held) Theme.ACCENT else Theme.PANEL, a * if (held) 0.5f else 0.75f))
             ui.circle(r.cx, r.cy, r.w * 0.5f, withAlpha(Theme.ACCENT, a * 0.55f), 1.5f * u)
-            ui.textCentered(if (b == 0) "▲" else "▼", r.cx, r.cy, 11f * u, withAlpha(Theme.TEXT, a))
+            ui.textCentered(
+                when (b) {
+                    0 -> "▲"
+                    1 -> "▼"
+                    2 -> "◀"
+                    else -> "▶"
+                },
+                r.cx, r.cy, 10f * u, withAlpha(Theme.TEXT, a),
+            )
         }
 
         ui.rect(pauseBtn.x, pauseBtn.y, pauseBtn.w, pauseBtn.h, withAlpha(Theme.PANEL, a * 0.8f), -6f * u)
@@ -450,28 +597,53 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
         ui.rect(pauseBtn.cx - 6f * u, pauseBtn.cy - 7f * u, 4f * u, 14f * u, withAlpha(Theme.TEXT, a))
         ui.rect(pauseBtn.cx + 2f * u, pauseBtn.cy - 7f * u, 4f * u, 14f * u, withAlpha(Theme.TEXT, a))
 
-        // -------- first-flight hints
+        // -------- first-flight hints (below the strafe cross beside the lever, above the stick)
         if (hints > 0.01f) {
             val ha = a * hints
-            val tx = if (mirror) g.x - 20f * u else g.x + g.w + 26f * u
-            val al = if (mirror) UiRenderer.RIGHT else UiRenderer.LEFT
             if (!throttleUsed) {
-                val bw = 250f * u
-                ui.rect(if (mirror) tx - bw else tx - 10f * u, g.cy - 26f * u, bw + 10f * u, 44f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
-                ui.text("SLIDE UP/DOWN · THROTTLE", tx, g.cy - 8f * u, 12f * u, withAlpha(Theme.TEXT, ha), al, 0.08f, shadow = 0.8f)
+                val r = throttleHint
+                val tx = if (mirror) r.x + r.w - 10f * u else r.x + 10f * u
+                val al = if (mirror) UiRenderer.RIGHT else UiRenderer.LEFT
+                ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
+                ui.text("SLIDE UP/DOWN · THROTTLE", tx, r.y + 18f * u, 12f * u, withAlpha(Theme.TEXT, ha), al, 0.08f, shadow = 0.8f)
                 ui.text(if (settings.stickXRoll) "SIDEWAYS · YAW   DOUBLE-TAP · STOP" else "SIDEWAYS · ROLL   DOUBLE-TAP · STOP",
-                    tx, g.cy + 10f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), al, 0.08f, shadow = 0.8f)
+                    tx, r.y + 36f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), al, 0.08f, shadow = 0.8f)
             }
             if (!stickUsed) {
-                ui.rect(stickRestX - 140f * u, stickRestY - stickRadius - 44f * u, 280f * u, 46f * u, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
-                ui.textCentered("DRAG TO STEER", stickRestX, stickRestY - stickRadius - 22f * u, 12f * u, withAlpha(Theme.TEXT, ha), tracking = 0.1f, shadow = 0.8f)
+                val r = stickHint
+                ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.BLACK, ha * 0.45f), 8f * u, 0f, 12f * u)
+                ui.textCentered("DRAG TO STEER", r.cx, r.y + 22f * u, 12f * u, withAlpha(Theme.TEXT, ha), tracking = 0.1f, shadow = 0.8f)
                 ui.textCentered(if (settings.stickXRoll) "UP/DOWN · PITCH   SIDEWAYS · ROLL" else "UP/DOWN · PITCH   SIDEWAYS · YAW",
-                    stickRestX, stickRestY - stickRadius - 6f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), tracking = 0.08f, shadow = 0.8f)
+                    r.cx, r.y + 38f * u, 10f * u, withAlpha(Theme.TEXT_DIM, ha), tracking = 0.08f, shadow = 0.8f)
+            }
+            if (lookEnabled) {
+                ui.textCentered("DRAG HERE TO LOOK AROUND", lookStrip.cx, lookStrip.y + lookStrip.h - 8f * u, 9f * u, withAlpha(Theme.TEXT_DIM, ha * 0.8f), tracking = 0.15f, shadow = 0.8f)
             }
         }
     }
 
+    private fun barButton(ui: UiRenderer, r: Rect, label: String, a: Float) {
+        ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.PANEL, a * 0.8f), -6f * u)
+        ui.rect(r.x, r.y, r.w, r.h, withAlpha(Theme.ACCENT, a * 0.5f), -6f * u, 1.2f * u)
+        ui.textCentered(label, r.cx, r.cy, 11f * u, withAlpha(Theme.TEXT, a), tracking = 0.12f)
+    }
+
     companion object {
         private const val REV = 0.22f
+
+        /** Reference layout height, u (Xiaomi 15 landscape, 01 5.6). */
+        const val REF_H = 417f
+
+        /** BOOST centre at the reference height (5.6: moved down from 167 to make room for AUTO). */
+        private const val BOOST_Y = 192f
+
+        /** Touch look-around gain, degrees per u of finger travel (01 8.1.1). */
+        const val LOOK_DEG_PER_U = 0.5f
+
+        /** Long-press on LOCK that clears the target, s (06 9.1). */
+        const val LOCK_HOLD = 0.5f
+
+        /** A stick deflection above this counts as "the stick was used" (hints). */
+        private const val STICK_USED = 0.08f
     }
 }

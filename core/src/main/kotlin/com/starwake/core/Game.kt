@@ -4,13 +4,16 @@ import com.starwake.core.content.Content
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
 import com.starwake.core.game.AsteroidField
-import com.starwake.core.game.ChaseCamera
-import com.starwake.core.game.ControlInput
-import com.starwake.core.game.FlightModel
+import com.starwake.core.game.Branch
+import com.starwake.core.game.FrameTrace
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.OrbitCamera
+import com.starwake.core.game.Overlay
+import com.starwake.core.game.Session
+import com.starwake.core.game.SessionHost
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
+import com.starwake.core.game.ShipView
 import com.starwake.core.game.StarSystem
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.GL
@@ -18,15 +21,18 @@ import com.starwake.core.gfx.Gl
 import com.starwake.core.gfx.SceneFrame
 import com.starwake.core.gfx.SceneRenderer
 import com.starwake.core.gfx.UiRenderer
+import com.starwake.core.hud.SessionHud
+import com.starwake.core.input.Action
+import com.starwake.core.input.GamepadBindings
 import com.starwake.core.input.GamepadState
+import com.starwake.core.input.InputFrame
+import com.starwake.core.input.InputGate
 import com.starwake.core.input.InputQueue
 import com.starwake.core.input.PointerHandler
 import com.starwake.core.input.TouchFlightControls
 import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
-import com.starwake.core.math.clamp
-import com.starwake.core.math.expApproach
 import com.starwake.core.math.withAlpha
 import com.starwake.core.ui.Frame
 import com.starwake.core.ui.GameActions
@@ -38,18 +44,23 @@ import com.starwake.core.ui.SettingsScreen
 import com.starwake.core.ui.TextBuf
 import com.starwake.core.ui.Theme
 import java.util.concurrent.ConcurrentLinkedQueue
-import kotlin.math.abs
-import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Entry point of the game, driven by the platform's GL thread. Owns the state machine
- * (menu ⇄ flight, with settings/pause overlays), simulation, input routing and rendering.
- * The per-frame path performs no heap allocations.
+ * The platform-facing shell of the game, driven by the platform's GL thread (01-core-loop.md 9.1,
+ * DECISIONS 21d): the GPU lifecycle, the screens and the one overlay slot, pointer routing, the
+ * curtain and fade timeline (menu ⇄ LOADING → REVEAL → in world), Back and pause, the debug
+ * commands, and the [InputFrame] built each frame from touch and gamepad. It owns one [Session] per
+ * flight, which runs the Roblox frame order.
+ *
+ * Only PAUSE and SETTINGS freeze the simulation (DECISIONS 21): the map and the docked station
+ * services are overlays the flight keeps running under. The per-frame path performs no heap
+ * allocations.
  */
-class Game(private val platform: Platform) : GameActions, MapHost, PointerHandler {
+class Game(private val platform: Platform) : GameActions, MapHost, PointerHandler, SessionHost {
     /** Pointer events in render-surface pixels (push from any thread). */
     val input = InputQueue()
     val gamepad = GamepadState()
@@ -60,40 +71,66 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     var lastFrameCpuNanos = 0L
         private set
 
-    /** Current screen: "menu", "settings", "flight", "paused". */
+    /** Current screen: "menu", "loading", "flight", "map", "docked", "paused", "settings". */
     val stateName: String
         get() = when {
-            overlay == OVERLAY_SETTINGS -> "settings"
-            overlay == OVERLAY_PAUSE -> "paused"
-            overlay == OVERLAY_MAP -> "map"
-            overlay == OVERLAY_DOCKED -> "docked"
-            state == STATE_FLIGHT -> "flight"
+            overlay == Overlay.SETTINGS -> "settings"
+            overlay == Overlay.PAUSE -> "paused"
+            overlay == Overlay.MAP -> "map"
+            overlay == Overlay.SERVICES -> "docked"
+            phase == PHASE_LOADING -> "loading"
+            inWorld -> "flight"
             else -> "menu"
         }
 
     override val deviceInfo: String get() = platform.deviceInfo
 
-    /** Harness/test read-out of the flight state (allocates; never called per frame by the game). */
+    /** Harness/test read-out of the game and flight state (allocates; never called per frame by the game). */
     val debugInfo: String
-        get() = "state=$stateName landed=$landed landing=$landing docking=$docking docked=$docked " +
-            "ship=${model?.id} gear=${"%.2f".format(gearRig.downFraction)} stowed=${gearRig.stowed} " +
-            "alt=${"%.1f".format(here.altitude - spec.groundClearance)} speed=${"%.1f".format(ship.speed)} " +
-            "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex " +
-            "hull=${"%.1f".format(if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE)} " +
-            "prox=${"%.1f".format(proximity)}"
+        get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
+            "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
+            "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
+            (session?.debugState() ?: "menu")
+
+    /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
+    val messageLine: String get() = session?.message ?: ""
+
+    /** The step order of the last frame traced with the "trace" command ("F0 C1 C2 ..."), "" before. */
+    var frameTrace = ""
+        private set
+
+    /** Frame counter (rendered frames since the start). */
+    var frameCount = 0L
+        private set
+
+    /** The frame the current session was built in (LOADING), -1 without one. */
+    var buildFrame = -1L
+        private set
+
+    /** The last reveal came from the 12 s safety net, not from the rendered frames (diagnostics). */
+    var revealTimedOut = false
+        private set
 
     // ------------------------------------------------------------------ state
-    private var state = STATE_MENU
-    private var overlay = OVERLAY_NONE
-    private var pendingAction = ACTION_NONE
-    private var fade = 1f // 1 = black
-    private var fadeTarget = 0f
+    private var phase = PHASE_MENU
+    private var phaseTime = 0f
+    private var overlay = Overlay.NONE
+
+    /** Opacity of the black curtain drawn over everything (fades and LOADING). */
+    private var fade = 1f
+    private var menuTime = 0f
+    private var welcomed = false
+    private var session: Session? = null
+    private val inWorld: Boolean get() = session != null && phase != PHASE_MENU && phase != PHASE_FADE_OUT
 
     @Volatile private var backRequests = 0
     private var backHandled = 0
 
     @Volatile private var pauseRequested = false
     private val debugQueue = ConcurrentLinkedQueue<String>()
+    private val debugPresses = IntArray(Action.COUNT)
+    private var traceNext = false
+    private val trace = FrameTrace()
 
     // ------------------------------------------------------------------ GPU side
     private var gl: Gl? = null
@@ -107,7 +144,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private var surfaceH = 0
     private var displayApplied = false
 
-    // ------------------------------------------------------------------ simulation
+    // ------------------------------------------------------------------ ship, input, screens
     private var spec = ShipSpec.STANDARD
     override val shipSpec: ShipSpec get() = spec
 
@@ -117,15 +154,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private var shipIndex = -1
     private val gearRig = GearRig()
     private val system = StarSystem()
-    private val here = StarSystem.Locality()
-    private val dustOrigin = com.starwake.core.math.DVec3()
-    private val ship = ShipState()
     private val menuShip = ShipState()
-    private val flight = FlightModel(spec)
-    private val controls = ControlInput()
-    private val chase = ChaseCamera()
     private val orbit = OrbitCamera()
     private val touch = TouchFlightControls(settings, this)
+    private val pad = GamepadBindings(gamepad, settings)
+    private val inputFrame = InputFrame()
+    private val hud = SessionHud(frame, settings)
     private val menu = MainMenu(this)
     private val settingsScreen = SettingsScreen(this)
     private val pause = PauseScreen(this)
@@ -133,59 +167,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val dockedScreen = com.starwake.core.ui.DockedScreen(this)
     private var time = 0f
     private var lastFrameNanos = 0L
-    private var flightTime = 0f
-    private var hints = 1f
-    private var proximity = Float.MAX_VALUE
-    private var bumpCooldown = 0f
     private var settingsDirty = false
     private var activePlay = -1 // last value sent to Platform.setActivePlay (-1 = never)
     private var appliedQuality = -1
-    private var lockKind = LOCK_NONE
-    private var lockIndex = -1
-    private var aimKind = LOCK_NONE
-
-    // landing (L): mode, touchdown state; the gear itself animates in [gearRig] (legs 1.6 s, doors 0.6 s)
-    private var landing = false
-    private var landed = false
-    private var landedBody = -1
-    /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
-    private var liftTime = 0f
-
-    /** Gear position forced by the harness (null = follow landing), like ShipHull.gearForce. */
-    private var gearForce: Boolean? = null
-
-    /** 1 = gear down and locked, 0 = stowed (see GearRig.downFraction). */
-    private val gear: Float get() = gearRig.downFraction
-    private var message: String? = null
-    private var messageTime = 0f
-    private val upV = Vec3()
-    private val fwdV = Vec3()
-    private val rightV = Vec3()
-    private val landRot = Quat()
-
-    // docking (K): automatic approach into the slot, then the docked screen
-    private var docking = false
-    /** Parked in a slot: pause/resume returns to the docked screen, not free flight. */
-    private var docked = false
-    private var dockStation = -1
-    private var dockPhase = 0 // 0 approach point, 1 slide into the slot
-    private val dockPos = com.starwake.core.math.DVec3()
-    private val dockDir = Vec3()
-    private val portLocal = Vec3()
-    private val portDirLocal = Vec3()
-
-    // station hulls: collision proxies, auto-dock routing around them
-    private val stationCollision = com.starwake.core.game.StationCollision(flight)
-
-    // flight HUD target labels placed this frame (x0, y0, x1, y1), so they never overlap
-    private val labelBoxes = FloatArray(4 * MAX_LABELS)
-    private var labelCount = 0
-    private val dockWaypoint = com.starwake.core.math.DVec3()
-    private val hullPos = com.starwake.core.math.DVec3() // auto-dock: the hull's centre, world space
-    private var dockBoxedTime = 0f // how long the router has found no way out (it then holds still)
-    private var launchTime = -100f // last launch from a slot: no station proximity warning just after
-    private var aimIndex = -1
-    private var padZeroHold = false
 
     // menu orbit drag
     private var orbitPointer = -1
@@ -203,8 +187,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     // scratch
     private val tmp = Vec3()
     private val tmpQ = Quat()
-    private val screenPt = Vec3()
-    private val tmp2 = Vec3()
     private val buf = TextBuf(64)
     private val menuShipRot = Quat()
     private val menuCentre = com.starwake.core.math.DVec3()
@@ -228,8 +210,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     /**
      * Makes ship [index] (ShipCatalog) the flown one: loads its model once, takes its spec (Roblox
-     * collision probes, ground clearance), landing gear, camera framing and menu placement, and hands
-     * it to the renderer. GL thread; not per frame (the first load of a ship reads its asset).
+     * collision probes, ground clearance), landing gear and menu framing, hands it to the renderer and
+     * the session (cameras). GL thread; not per frame (the first load of a ship reads its asset).
      */
     private fun selectShip(index: Int) {
         val i = index.coerceIn(0, ShipCatalog.all.size - 1)
@@ -238,41 +220,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         shipIndex = i
         model = m
         spec = ShipSpec.fromModel(entry, m)
-        flight.spec = spec
-        gearRig.setModel(m, gearWanted())
-        configureCameras(entry, m)
-        scene?.setShipModel(m)
-    }
-
-    /**
-     * Camera framing from the Roblox external camera (ShipConfig.Ships[..].ExternalCamera: offset
-     * from the ship origin and pitch, seen at FieldOfView 80). The chase view takes that exact
-     * place and tilt; through its narrower lens the hull looks closer. The far chase backs off
-     * about the ship's centre until the hull fills the share of the screen it does in Roblox, and
-     * tilts so the centre sits at the same height on screen. The cockpit view sits at the pilot's
-     * eye (SeatOffset), and the menu orbit scales with the hull.
-     */
-    private fun configureCameras(entry: ShipCatalog.Entry, m: ShipModel) {
-        val ox = entry.cameraX - m.centreX
-        val oy = entry.cameraY - m.centreY
-        val oz = entry.cameraZ - m.centreZ
-        val tanRoblox = kotlin.math.tan(ROBLOX_FOV * 0.5f * DEG2RAD)
-        val tanChase = kotlin.math.tan(CHASE_FOV * 0.5f * DEG2RAD)
-        val k = tanRoblox / tanChase
-        tmp.set(ox, oy, oz)
-        tmp2.set(ox * k, oy * k, oz * k)
-        // angle from the camera down to the centre, minus Roblox's tilt = where the centre sits on screen
-        val a = kotlin.math.atan2(oy, oz)
-        val below = a + entry.cameraPitchDeg * DEG2RAD
-        val farTilt = a - kotlin.math.atan(kotlin.math.tan(below) * tanChase / tanRoblox)
-        screenPt.set(m.centreX, m.centreY, m.centreZ)
-        fwdV.set(m.eyeX, m.eyeY, m.eyeZ)
-        chase.configure(fwdV, screenPt, tmp, entry.cameraPitchDeg * DEG2RAD, tmp2, -farTilt)
+        gearRig.setModel(m, session?.gearWanted() ?: false)
         orbit.distance = m.radius * MENU_ORBIT
+        scene?.setShipModel(m)
+        session?.setShip(entry, spec, m)
     }
-
-    /** Gear position the game asks for: down while landing or landed (or as forced by the harness). */
-    private fun gearWanted(): Boolean = gearForce ?: (state == STATE_FLIGHT && (landing || landed))
 
     // ================================================================== platform callbacks
 
@@ -334,7 +286,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     /** First run only: weak GPUs start on LOW (resolution scale, fewer effects, smaller bakes). */
     private fun pickDefaultQuality(renderer: String) {
-        val r = renderer.lowercase()
         settings.quality = defaultQuality(renderer)
         settingsDirty = true
     }
@@ -347,16 +298,25 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         backRequests++
     }
 
-    /** App went to background (auto-pauses flight). Any thread. */
+    /** App went to background (pauses the flight). Any thread. */
     fun onPause() {
         pauseRequested = true
     }
 
     /**
-     * Scripting hook for tests / the preview harness. Commands: "launch", "menu", "settings",
-     * "pause", "resume", "fa", "boost", "camera", "ship" (next ship), "ship=<id>", "gear-down",
-     * "gear-up", "gear-auto" (force the landing gear like Roblox's ShipDebug gear switch), and the
-     * flight set-ups below. Any thread (applied next frame).
+     * Scripting hook for tests and the preview harness (Roblox ShipDebug equivalents, 01 9.6). Words
+     * separated by spaces; "x=y" forms of the older commands still work. Any thread (applied next
+     * frame, parsed off the frame path).
+     *
+     * Screens: `launch [space|fade]` (instant docked start / instant free-flight start / the real
+     * LAUNCH with fade, LOADING and reveal), `menu`, `settings`, `pause`, `resume`, `map`, `reveal`.
+     * Flight: `fa [on|off]`, `boost`, `throttle v`, `stick x y` / `stick off` (held cursor, radius
+     * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
+     * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
+     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
+     * `near <body> [alt]`, `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
+     * `behind-station [i]`, `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next
+     * frame's step order into [frameTrace]), `branch deck|destroyed|flight`.
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
@@ -372,8 +332,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         var dt = if (lastFrameNanos == 0L) 1f / 60f else (frameTimeNanos - lastFrameNanos) * 1e-9f
         lastFrameNanos = frameTimeNanos
         if (dt <= 0f) dt = 1f / 120f
-        dt = min(dt, 0.1f)
+        dt = min(dt, Session.MAX_DT)
         time += dt
+        frameCount++
 
         if (rebuildScene) {
             rebuildScene = false
@@ -388,7 +349,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 scene = SceneRenderer(gl, c, q).also { it.setShipModel(model) }
             }
             appliedQuality = q
-            if (lockKind == LOCK_ASTEROID && !c.field.active[lockIndex]) lockKind = LOCK_NONE
         }
 
         handleSystemEvents()
@@ -396,12 +356,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (settings.ship != shipIndex) selectShip(settings.ship)
         input.drain(this)
         update(dt)
-        val active = if (state == STATE_FLIGHT && overlay == OVERLAY_NONE) 1 else 0
+        val s = session
+        val active = if (s != null && inWorld && !overlay.pauses) 1 else 0
         if (active != activePlay) {
             activePlay = active
             platform.setActivePlay(active == 1)
         }
-        render(gl, dt)
+        render(gl)
         lastFrameCpuNanos = System.nanoTime() - cpuStart
         updateFps(dt)
     }
@@ -409,57 +370,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun handleSystemEvents() {
         while (true) {
             val cmd = debugQueue.poll() ?: break
-            when (cmd) {
-                "launch" -> if (state == STATE_MENU) { startFlight(); fade = 0f }
-                "menu" -> { enterMenu(); fade = 0f }
-                "settings" -> openSettings()
-                "pause" -> if (state == STATE_FLIGHT) openPause()
-                "resume" -> resume()
-                "fa" -> toggleFlightAssist()
-                "boost" -> controls.boost = true
-                "camera" -> chase.mode = (chase.mode + 1) % 3
-                "map" -> if (state == STATE_FLIGHT) openMap()
-                "lock" -> if (state == STATE_FLIGHT) toggleLock()
-                "action" -> if (state == STATE_FLIGHT) doAction()
-                "teleport-low" -> if (state == STATE_FLIGHT) debugTeleportLow()
-                "teleport-surface" -> if (state == STATE_FLIGHT) {
-                    debugTeleportLow()
-                    debugDrop(60.0)
-                }
-                "lock-outpost" -> if (state == STATE_FLIGHT) lockFromMap(LOCK_STATION, 1)
-                "dock" -> if (state == STATE_FLIGHT) requestDocking(0)
-                "docked" -> if (state == STATE_FLIGHT) debugDocked(0)
-                "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(0, 1500.0, 0f)
-                "ram-station" -> if (state == STATE_FLIGHT) debugBehindStation(0, 400.0, 120f)
-                "ship" -> {
-                    settings.ship = (settings.ship + 1) % ShipCatalog.all.size
-                    settingsDirty = true
-                }
-                "gear-down" -> gearForce = true
-                "gear-up" -> gearForce = false
-                "gear-auto" -> gearForce = null
-                else -> if (cmd.startsWith("ship=")) {
-                    val id = cmd.substring(5)
-                    val i = ShipCatalog.all.indexOfFirst { it.id == id }
-                    if (i >= 0) {
-                        settings.ship = i
-                        settingsDirty = true
-                    }
-                } else if (state == STATE_FLIGHT) {
-                    // the station commands for any station: "dock=1", "docked=1", "behind-station=1"
-                    val i = cmd.substringAfter('=', "").toIntOrNull() ?: -1
-                    if (i in system.stations.indices) when (cmd.substringBefore('=')) {
-                        "dock" -> requestDocking(i)
-                        "docked" -> debugDocked(i)
-                        "behind-station" -> debugBehindStation(i, 1500.0, 0f)
-                    }
-                }
-            }
+            runDebugCommand(cmd)
         }
         if (pauseRequested) {
             pauseRequested = false
             touch.releaseAll()
-            if (state == STATE_FLIGHT && overlay == OVERLAY_NONE) openPause()
+            if (inWorld && !overlay.pauses) openPause()
             saveSettingsIfDirty()
         }
         val br = backRequests
@@ -467,26 +383,27 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             backHandled++
             onBack()
         }
-        // gamepad buttons that act like system navigation
-        if (overlay == OVERLAY_DOCKED &&
-            (gamepad.consumePress(GamepadState.A) || gamepad.consumePress(GamepadState.START))
-        ) launchFromStation()
-        if (gamepad.consumePress(GamepadState.START)) {
-            if (state == STATE_FLIGHT) {
-                if (overlay == OVERLAY_PAUSE) resume() else if (overlay == OVERLAY_NONE) openPause()
-            } else if (overlay == OVERLAY_NONE) launch()
+        // gamepad buttons that act like system navigation (not while a fade runs)
+        if (overlay == Overlay.SERVICES && gamepad.consumePress(GamepadState.A)) launchFromStation()
+        if (gamepad.consumePress(GamepadState.START) && phase != PHASE_FADE_OUT && phase != PHASE_QUITTING) {
+            if (inWorld) {
+                if (overlay == Overlay.PAUSE) resume() else if (!overlay.pauses) openPause()
+            } else if (overlay == Overlay.NONE) {
+                launch()
+            }
         }
         if (gamepad.consumePress(GamepadState.B)) onBack()
-        if (state == STATE_MENU && overlay == OVERLAY_NONE && gamepad.consumePress(GamepadState.A)) launch()
+        if (phase == PHASE_MENU && overlay == Overlay.NONE && gamepad.consumePress(GamepadState.A)) launch()
     }
 
     private fun onBack() {
         when {
-            overlay == OVERLAY_SETTINGS -> closeSettings()
-            overlay == OVERLAY_MAP -> closeMap()
-            overlay == OVERLAY_DOCKED -> openPause()
-            overlay == OVERLAY_PAUSE -> resume()
-            state == STATE_FLIGHT -> openPause()
+            phase == PHASE_FADE_OUT || phase == PHASE_QUITTING -> Unit // a transition is running
+            overlay == Overlay.SETTINGS -> closeSettings()
+            overlay == Overlay.MAP -> closeMap()
+            overlay == Overlay.SERVICES -> openPause()
+            overlay == Overlay.PAUSE -> resume()
+            inWorld -> openPause()
             else -> exitApp()
         }
     }
@@ -494,20 +411,25 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     // ================================================================== input routing
 
     override fun onPointerDown(id: Int, x: Float, y: Float) {
-        if (fadeTarget > 0.5f) return // transition in progress
+        if (phase == PHASE_FADE_OUT || phase == PHASE_QUITTING) return // transition in progress
+        val s = session
         when {
-            overlay == OVERLAY_SETTINGS -> settingsScreen.group.down(id, x, y)
-            overlay == OVERLAY_PAUSE -> pause.group.down(id, x, y)
-            overlay == OVERLAY_MAP -> map.down(id, x, y)
-            overlay == OVERLAY_DOCKED -> dockedScreen.group.down(id, x, y)
-            state == STATE_MENU -> {
+            overlay == Overlay.SETTINGS -> settingsScreen.group.down(id, x, y)
+            overlay == Overlay.PAUSE -> pause.group.down(id, x, y)
+            overlay == Overlay.MAP -> map.down(id, x, y)
+            overlay == Overlay.SERVICES -> dockedScreen.group.down(id, x, y)
+            s == null || !inWorld -> {
                 if (!menu.group.down(id, x, y) && orbitPointer < 0) {
                     orbitPointer = id
                     orbitLastX = x; orbitLastY = y
                     orbitVelX = 0f; orbitVelY = 0f
                 }
             }
-            else -> touch.onDown(id, x, y)
+            else -> when (InputGate.owner(s.mode)) {
+                InputGate.OWNER_FLIGHT -> touch.onDown(id, x, y)
+                // nobody owns the touches (LOADING curtain, cinematic, warp tunnel): only PAUSE
+                InputGate.OWNER_NONE -> if (touch.pauseBtn.contains(x, y, 8f * frame.u)) touch.onDown(id, x, y)
+            }
         }
     }
 
@@ -515,7 +437,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (settingsScreen.group.move(id, x, y)) return
         if (pause.group.move(id, x, y)) return
         if (dockedScreen.group.move(id, x, y)) return
-        if (overlay == OVERLAY_MAP) {
+        if (overlay == Overlay.MAP) {
             map.move(id, x, y)
             return
         }
@@ -537,7 +459,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         settingsScreen.group.up(id, x, y, cancelled)
         pause.group.up(id, x, y, cancelled)
         dockedScreen.group.up(id, x, y, cancelled)
-        if (overlay == OVERLAY_MAP) map.up(id, x, y, cancelled)
+        if (overlay == Overlay.MAP) map.up(id, x, y, cancelled)
         menu.group.up(id, x, y, cancelled)
         if (id == orbitPointer) {
             orbitPointer = -1
@@ -546,57 +468,79 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         touch.onUp(id, x, y, cancelled)
     }
 
-    // ================================================================== actions (GameActions)
+    // ================================================================== actions (GameActions, MapHost, SessionHost)
 
     override fun haptic(type: Int) {
         if (settings.haptics) platform.haptic(type)
     }
 
+    /** LAUNCH in the menu: fade to black (0.9 s, sine in); after 1 s the world loads under the curtain. */
     override fun launch() {
-        if (state == STATE_MENU && pendingAction == ACTION_NONE) {
-            pendingAction = ACTION_LAUNCH
-            fadeTarget = 1f
-        }
+        if (phase == PHASE_MENU && overlay == Overlay.NONE) setPhase(PHASE_FADE_OUT)
     }
 
     override fun openSettings() {
-        overlay = OVERLAY_SETTINGS
+        overlay = Overlay.SETTINGS
         touch.releaseAll()
         screenChanged()
     }
 
     override fun closeSettings() {
-        overlay = if (state == STATE_FLIGHT) OVERLAY_PAUSE else OVERLAY_NONE
+        overlay = if (inWorld) Overlay.PAUSE else Overlay.NONE
         saveSettingsIfDirty()
         screenChanged()
     }
 
     override fun resume() {
-        if (state == STATE_FLIGHT) {
-            overlay = if (docked) OVERLAY_DOCKED else OVERLAY_NONE
+        val s = session ?: return
+        if (inWorld) {
+            overlay = if (s.mode.docked) Overlay.SERVICES else Overlay.NONE
             screenChanged()
         }
     }
 
-    private fun openMap() {
-        overlay = OVERLAY_MAP
+    private fun openPause() {
+        overlay = Overlay.PAUSE
         touch.releaseAll()
-        controls.clearAxes()
         screenChanged()
-        map.open(ship.pos, lockKind, lockIndex)
+    }
+
+    private fun openMap() {
+        val s = session ?: return
+        overlay = Overlay.MAP
+        touch.releaseAll()
+        screenChanged()
+        map.open(s.ship.pos, s.lockKind, s.lockIndex)
     }
 
     override fun closeMap() {
-        if (overlay == OVERLAY_MAP) {
-            overlay = OVERLAY_NONE
+        if (overlay == Overlay.MAP) {
+            overlay = if (session?.mode?.docked == true) Overlay.SERVICES else Overlay.NONE
             screenChanged()
         }
     }
 
     override fun lockFromMap(kind: Int, index: Int) {
-        lockKind = kind
-        lockIndex = index
-        haptic(Haptics.TICK)
+        session?.lock(kind, index)
+    }
+
+    override fun openServices(station: Int) {
+        // a pausing overlay stays on top; resume() shows the services while docked
+        if (overlay.pauses) return
+        overlay = Overlay.SERVICES
+        touch.releaseAll()
+        screenChanged()
+    }
+
+    override fun closeServices() {
+        if (overlay == Overlay.SERVICES) {
+            overlay = Overlay.NONE
+            screenChanged()
+        }
+    }
+
+    override fun releaseControls() {
+        touch.releaseAll()
     }
 
     /** Drops input that belonged to the previous screen (held widgets, queued pad presses). */
@@ -608,13 +552,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         menu.group.releaseAll()
         orbitPointer = -1
         gamepad.discardPresses()
+        pad.reset()
     }
 
     override fun quitToMenu() {
-        if (pendingAction == ACTION_NONE) {
-            pendingAction = ACTION_MENU
-            fadeTarget = 1f
-        }
+        if (inWorld && phase != PHASE_QUITTING) setPhase(PHASE_QUITTING)
     }
 
     override fun exitApp() {
@@ -637,74 +579,184 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         }
     }
 
-    private fun openPause() {
-        overlay = OVERLAY_PAUSE
-        touch.releaseAll()
-        controls.clearAxes()
-        screenChanged()
+    override fun launchFromStation() {
+        session?.launchFromStation()
     }
 
-    private fun startFlight() {
-        state = STATE_FLIGHT
-        overlay = OVERLAY_NONE
-        ship.reset()
-        ship.pos.set(system.home)
-        dustOrigin.set(system.home)
+    // ================================================================== the session's life
+
+    private fun setPhase(p: Int) {
+        phase = p
+        phaseTime = 0f
+    }
+
+    /**
+     * Builds the flight (Roblox: modules built, profile fetched, system built, ship placed): one
+     * [Session], placed by the start rule. [space] starts in free flight at the pre-port spawn (the
+     * harness' "launch space"); otherwise docked at the home station (D13).
+     */
+    private fun buildSession(space: Boolean): Session {
+        val c = content
+        val s = Session(system, c?.field, settings, this, gearRig)
+        s.setShip(ShipCatalog.get(shipIndex.coerceAtLeast(0)), spec, model)
+        if (space) s.startInSpace() else s.startDocked()
+        session = s
+        buildFrame = frameCount
+        overlay = Overlay.NONE
         touch.releaseAll()
-        touch.throttle = 0.3f
-        controls.clearAxes()
-        controls.throttle = 0.3f
-        ship.vel.set(0f, 0f, -0.3f * spec.maxSpeed)
-        chase.mode = 0
-        chase.snapTo(ship)
-        flightTime = 0f
-        launchTime = -100f
-        hints = 1f
+        touch.throttle = s.throttle
+        hud.resetHints()
         menu.dragHint = 0f
-        lockKind = LOCK_NONE
-        padZeroHold = false
-        landing = false
-        landed = false
-        docking = false
-        docked = false
-        liftTime = 0f
-        gearRig.update(0f, gearWanted(), true)
-        message = null
         screenChanged()
+        return s
+    }
+
+    /** LOADING: the curtain is black; the world is built in this frame and runs under it. */
+    private fun enterLoading(space: Boolean) {
+        buildSession(space)
+        setPhase(PHASE_LOADING)
+        fade = 1f
+        revealTimedOut = false
+    }
+
+    /** REVEAL: the curtain lifts over 0.6 s (sine out) while the cockpit comes alive (Roblox `reveal` + `afterReveal`). */
+    private fun startReveal() {
+        setPhase(PHASE_REVEAL)
+        session?.afterReveal(!welcomed)
+        welcomed = true
+    }
+
+    /** Debug fast path: the world at once, without the fades (the harness' "launch"). */
+    private fun enterWorldNow(space: Boolean) {
+        val s = buildSession(space)
+        setPhase(PHASE_WORLD)
+        fade = 0f
+        s.mode.curtain = false
+        s.afterReveal(!welcomed)
+        welcomed = true
     }
 
     private fun enterMenu() {
-        state = STATE_MENU
-        overlay = OVERLAY_NONE
+        session = null
+        buildFrame = -1L
+        setPhase(PHASE_MENU)
+        menuTime = 0f
+        overlay = Overlay.NONE
         touch.releaseAll()
-        controls.clearAxes()
         orbit.idle = 10f
-        lockKind = LOCK_NONE
-        docked = false
-        gearRig.update(0f, gearWanted(), true)
+        gearRig.update(0f, false, true)
         screenChanged()
-    }
-
-    private fun toggleFlightAssist() {
-        ship.flightAssist = !ship.flightAssist
-        haptic(Haptics.TICK)
     }
 
     // ================================================================== update
 
     private fun update(dt: Float) {
-        // fade transitions
-        fade += (fadeTarget - fade) * expApproach(if (fadeTarget > fade) 14f else 5f, dt)
-        if (pendingAction != ACTION_NONE && fade > 0.97f) {
-            when (pendingAction) {
-                ACTION_LAUNCH -> startFlight()
-                ACTION_MENU -> enterMenu()
+        phaseTime += dt
+        when (phase) {
+            PHASE_MENU -> {
+                menuTime += dt
+                // the menu fades in over 1.4 s (sine out)
+                fade = if (menuTime < MENU_FADE_IN) 1f - sin(HALF_PI * menuTime / MENU_FADE_IN) else 0f
+                updateMenu(dt)
             }
-            pendingAction = ACTION_NONE
-            fade = 1f
-            fadeTarget = 0f
+            PHASE_FADE_OUT -> {
+                fade = sineIn(phaseTime / LAUNCH_FADE)
+                updateMenu(dt)
+                if (phaseTime >= LAUNCH_DELAY) enterLoading(false)
+            }
+            else -> updateWorld(dt)
         }
-        if (state == STATE_MENU) updateMenu(dt) else updateFlight(dt)
+    }
+
+    private fun updateWorld(dt: Float) {
+        val s = session ?: return
+        when (phase) {
+            PHASE_LOADING -> {
+                fade = 1f
+                // two frames rendered after the build frame, then the reveal; 12 s safety net
+                val timedOut = phaseTime > REVEAL_TIMEOUT
+                if (frameCount - buildFrame >= REVEAL_AFTER_FRAMES || timedOut) {
+                    if (timedOut) revealTimedOut = true
+                    startReveal()
+                    // the tween's first step shows in this frame already, as Roblox's reveal tween
+                    phaseTime = dt
+                }
+            }
+            PHASE_QUITTING -> {
+                fade = sineIn(phaseTime / LAUNCH_FADE)
+                if (phaseTime >= LAUNCH_DELAY) {
+                    enterMenu()
+                    return
+                }
+            }
+        }
+        if (phase == PHASE_REVEAL) {
+            fade = 1f - sin(HALF_PI * min(phaseTime / REVEAL_TIME, 1f))
+            if (phaseTime >= REVEAL_TIME) {
+                setPhase(PHASE_WORLD)
+                fade = 0f
+            }
+        }
+        val mode = s.mode
+        mode.curtain = phase == PHASE_LOADING
+        mode.overlay = overlay
+        buildInput(dt, s)
+        handleShellActions(s)
+        mode.overlay = overlay
+        if (!overlay.pauses && phase != PHASE_QUITTING) {
+            if (traceNext) {
+                traceNext = false
+                s.trace = trace
+                s.frame(dt, inputFrame)
+                s.trace = null
+                frameTrace = trace.toString()
+            } else {
+                s.frame(dt, inputFrame)
+            }
+            // the first-flight hints count only the time the pilot can see them (not under the
+            // services of a docked start, a map or the LOADING curtain)
+            if (flightHudShown(s) && !mode.curtain) hud.updateHints(dt, touch)
+        }
+        // the touch controls mirror the session: the latched lever, the action pill, the look strip
+        touch.throttle = s.throttle
+        touch.actionLabel = s.actionLabel
+        touch.lookEnabled = mode.view != ShipView.CHASE
+    }
+
+    /** The flight HUD and the touch controls are on screen: no overlay, the flight branch (render and the hint clock agree). */
+    private fun flightHudShown(s: Session): Boolean = overlay == Overlay.NONE && s.mode.branch == Branch.FLIGHT
+
+    /** One [InputFrame] from touch and gamepad for whoever owns the input this frame (01 9.2). */
+    private fun buildInput(dt: Float, s: Session) {
+        val f = inputFrame
+        f.begin()
+        f.contextAction = s.actionTarget
+        val owner = InputGate.owner(s.mode)
+        if (owner == InputGate.OWNER_FLIGHT || owner == InputGate.OWNER_NONE) {
+            // under the curtain only PAUSE gets through to here (see onPointerDown)
+            touch.write(f, dt)
+            if (owner == InputGate.OWNER_FLIGHT) pad.write(f, dt, s.throttle, this)
+        }
+        for (i in 0 until Action.COUNT) {
+            val n = debugPresses[i]
+            if (n == 0) continue
+            debugPresses[i] = 0
+            repeat(n) { f.press(Action.of(i)) }
+        }
+    }
+
+    /** The actions that belong to the shell: pause and the maps. The rest goes to the session. */
+    private fun handleShellActions(s: Session) {
+        val f = inputFrame
+        if (f.consume(Action.PAUSE)) {
+            openPause()
+            return
+        }
+        if (f.consume(Action.BACK)) onBack()
+        val mapAsked = f.consume(Action.SYSTEM_MAP) or f.consume(Action.STAR_MAP)
+        if (mapAsked && InputGate.allows(Action.SYSTEM_MAP, s.mode)) {
+            if (overlay == Overlay.MAP) closeMap() else if (!overlay.pauses) openMap()
+        }
     }
 
     private fun updateMenu(dt: Float) {
@@ -722,7 +774,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (m != null) menuShip.rot.rotate(m.centreX, m.centreY, m.centreZ, tmp) else tmp.zero()
         menuShip.pos.set(menuCentre.x - tmp.x, menuCentre.y - tmp.y, menuCentre.z - tmp.z)
         menuShip.engineOutput = 0.12f + 0.03f * sin(time * 3f)
-        gearRig.update(dt, gearWanted(), false)
+        gearRig.update(dt, false, false)
+    }
+
+    /** The menu backdrop's camera and scene (the orbit around the showcase ship). */
+    private fun menuScene() {
+        val m = model
         val cam = sceneFrame.camera
         orbit.apply(menuCentre, cam.pos, cam.rot)
         cam.fovY = 42f * DEG2RAD
@@ -732,1138 +789,186 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         sceneFrame.dustVelocity.zero()
         sceneFrame.dustIntensity = 0.35f
         sceneFrame.dustOrigin.set(cam.pos)
+        sceneFrame.drawField = true
         sceneFrame.ship = menuShip
         sceneFrame.shipView = ShipModel.VIEW_EXTERIOR
         sceneFrame.shipReach = orbit.distance + (m?.radius ?: 0f)
         updateLighting(menuShip.pos)
     }
 
-    private fun updateFlight(dt: Float) {
-        val paused = overlay != OVERLAY_NONE
-        if (!paused) {
-            flightTime += dt
-            touch.update(dt)
-            readControls(dt)
-            if (touch.consumeFa() || gamepad.consumePress(GamepadState.X)) toggleFlightAssist()
-            if (touch.consumeCam() || gamepad.consumePress(GamepadState.Y)) {
-                chase.mode = (chase.mode + 1) % 3
-            }
-            if (touch.consumePause()) openPause()
-            if (touch.consumeBoost() || gamepad.consumePress(GamepadState.A)) controls.boost = true
-            if (touch.consumeLock() || gamepad.consumePress(GamepadState.DPAD_UP)) toggleLock()
-            if (touch.consumeMap() || gamepad.consumePress(GamepadState.SELECT)) openMap()
-            if (touch.consumeAction() || gamepad.consumePress(GamepadState.DPAD_DOWN)) doAction()
+    // ================================================================== debug commands
 
-            system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-            gearRig.update(dt, gearWanted(), false)
-            if (landed) holdLanded(dt)
-            // landing mode: the vertical thrusters give a gentle, safe descent rate
-            if (landing && !landed) controls.strafeY *= LANDING_VERTICAL
-            if (liftTime > 0f) {
-                liftTime -= dt
-                controls.strafeY = maxOf(controls.strafeY, 1f)
+    private fun runDebugCommand(raw: String) {
+        val cmd = raw.trim()
+        // older "name=value" forms: ship=<id>, dock=1, docked=1, behind-station=1
+        val words = if ('=' in cmd && ' ' !in cmd) listOf(cmd.substringBefore('='), cmd.substringAfter('=')) else cmd.split(Regex("\\s+"))
+        val name = words[0].lowercase()
+        val arg = words.getOrNull(1)
+        fun num(i: Int): Double? = words.getOrNull(i)?.toDoubleOrNull()
+        val s = session
+        val flying = s != null && inWorld
+        when (name) {
+            "launch" -> if (phase == PHASE_MENU) when (arg) {
+                "fade" -> launch()
+                "space" -> enterWorldNow(true)
+                else -> enterWorldNow(false)
             }
-            if (docking) {
-                updateDocking(dt)
-                if (docking && (abs(touch.pitch) > 0.5f || abs(touch.roll) > 0.5f || abs(touch.yaw) > 0.5f)) {
-                    docking = false
-                    showMessage("DOCKING CANCELLED")
+            "menu" -> {
+                enterMenu()
+                menuTime = MENU_FADE_IN
+                fade = 0f
+            }
+            "settings" -> openSettings()
+            "pause" -> if (inWorld) openPause()
+            "resume" -> resume()
+            "reveal" -> if (phase == PHASE_LOADING) startReveal()
+            "map" -> if (flying) openMap()
+            "state" -> Unit // debugInfo always carries the full state list
+            "trace" -> traceNext = true
+            "ship" -> {
+                if (arg == null) {
+                    settings.ship = (settings.ship + 1) % ShipCatalog.all.size
+                    settingsDirty = true
+                } else {
+                    val i = ShipCatalog.all.indexOfFirst { it.id == arg.lowercase() }
+                    if (i >= 0) {
+                        settings.ship = i
+                        settingsDirty = true
+                    }
                 }
             }
-            val limit = if (landing) minOf(here.speedLimit, LANDING_SPEED) else here.speedLimit
-            val steps = clamp(ceil(dt / MAX_STEP).toInt().toFloat(), 1f, 8f).toInt()
-            val h = dt / steps
-            for (i in 0 until steps) {
-                if (landed || docking || overlay != OVERLAY_NONE) break
-                if (flight.step(ship, controls, h, limit)) {
-                    haptic(Haptics.HEAVY)
-                    chase.addShake(0.8f)
+            "gear-down" -> s?.gearForce = true
+            "gear-up" -> s?.gearForce = false
+            "gear-auto" -> s?.gearForce = null
+            "gear" -> s?.gearForce = when (arg) {
+                "down" -> true
+                "up" -> false
+                else -> null
+            }
+            "key" -> Action.parse(arg ?: "")?.let { debugPresses[it.ordinal]++ }
+            "fov" -> num(1)?.let {
+                settings.fovDeg = it.toFloat()
+                settingsDirty = true
+            }
+            "quality" -> num(1)?.let {
+                settings.quality = it.toInt().coerceIn(0, 2)
+                settingsChanged(display = true, renderer = true)
+            }
+            "branch" -> if (s != null) when (arg) {
+                "deck" -> s.decks.begin()
+                "destroyed" -> s.destruction.start((num(2) ?: 2.0).toFloat())
+                else -> {
+                    s.decks.end()
+                    s.destruction.finish()
                 }
-                controls.boost = false
-                // collide every substep so fast ships can't tunnel through small rocks
-                collide(h)
-                collideBodies(h)
-                collideStation()
             }
-            // a press while landed, docking or as an overlay opens is dropped, not latched
-            controls.boost = false
-            system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-            // station hulls join the proximity warning. Not while auto-docking (it flies its own clear
-            // route, and collide() did not run to refresh the value) or landed, nor just after a launch,
-            // which starts 40 m off the slot
-            // (an overlay opened this frame, e.g. on docking, skipped collide() too)
-            if (docking || docked || landed || overlay != OVERLAY_NONE) {
-                proximity = Float.MAX_VALUE
-            } else if (here.nearestStation >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
-                proximity = minOf(proximity, stationCollision.clearance(ship, system.stations[here.nearestStation]))
-            }
-            if (landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
-                landing = false
-                if (!landed) showMessage("LANDING CANCELLED")
-            }
-            touch.actionLabel = actionLabel()
-            if (message != null && time - messageTime > 3f) message = null
-            validateLock()
-            if (touch.throttleUsed && touch.stickUsed) hints -= dt * 0.8f
-            else if (flightTime > 25f) hints -= dt * 0.3f
-            hints = clamp(hints, 0f, 1f)
+            else -> if (flying) flightCommand(s!!, name, arg, words)
         }
-        val speedFrac = ship.speed / spec.maxSpeed
-        if (!paused) chase.update(ship, dt, clamp(speedFrac, 0f, 1.8f), spec.maxSpeed)
-        val cam = sceneFrame.camera
-        cam.pos.set(chase.pos)
-        chase.renderRotation(cam.rot)
-        val boostFov = if (ship.boosting) 9f else 0f
-        chase.fovBoost += (boostFov - chase.fovBoost) * expApproach(4f, dt)
-        val cockpit = chase.mode == 2
-        cam.fovY = (if (cockpit) COCKPIT_FOV else CHASE_FOV + clamp(speedFrac, 0f, 1.8f) * 3f + chase.fovBoost) * DEG2RAD
-        cam.shiftX = 0f
-        cam.shiftY = 0f
-        // speed lines move at a capped "visual" speed so they stay readable at Mm/s
-        val sp = ship.speed
-        val visScale = if (sp > DUST_VISUAL_SPEED) DUST_VISUAL_SPEED / sp else 1f
-        tmp.set(ship.vel).scale(visScale)
-        if (!paused) dustOrigin.addScaled(tmp, dt.toDouble())
-        sceneFrame.dustOrigin.set(dustOrigin)
-        // longer streaks the faster you go (logarithmic above the visual cap)
-        val streak = if (sp > DUST_VISUAL_SPEED) 1f + 0.6f * kotlin.math.log10(sp / DUST_VISUAL_SPEED) else 1f
-        sceneFrame.dustVelocity.set(tmp).scale(streak)
-        sceneFrame.dustIntensity = 0.6f
-        // speed lines: white in open space, blue in a gravity well, red for danger or heat
-        val zone = here.zone
-        val star = here.nearestBody == 0
-        val danger = proximity < 80f || (star && here.altitude < system.bodies[0].radius)
-        val well = zone == StarSystem.Zone.GRAVITY_WELL || zone == StarSystem.Zone.LOW_ALTITUDE
-        val dc = sceneFrame.dustColor
-        val k = expApproach(4f, dt)
-        val tr = if (danger) 1.0f else if (well) 0.40f else 0.66f
-        val tg = if (danger) 0.30f else if (well) 0.62f else 0.72f
-        val tb = if (danger) 0.26f else if (well) 1.0f else 0.80f
-        dc.x += (tr - dc.x) * k
-        dc.y += (tg - dc.y) * k
-        dc.z += (tb - dc.z) * k
-        sceneFrame.drawField = nearField(cam.pos)
-        updateLighting(ship.pos)
-        // the real hull in every view: from the seat without the canopy cage (and with the pilot)
-        sceneFrame.ship = ship
-        sceneFrame.shipView = if (cockpit) ShipModel.VIEW_COCKPIT else ShipModel.VIEW_EXTERIOR
-        sceneFrame.shipReach = chase.viewDistance * (1f + chase.speedPull * 1.8f) + (model?.radius ?: 0f) + PLUME_REACH
     }
 
-    private fun readControls(dt: Float) {
-        val c = controls
-        c.pitch = touch.pitch
-        c.yaw = touch.yaw
-        c.roll = touch.roll
-        c.strafeX = 0f
-        c.strafeY = touch.vertical
-        if (gamepad.connected) {
-            val gp = gamepad
-            val sens = settings.sensitivity
-            // the platform already applies a radial dead zone and rescales
-            val lx = gp.leftX * sens
-            val ly = gp.leftY * sens
-            val rx = gp.rightX * sens
-            val ry = gp.rightY
-            if (lx != 0f || ly != 0f || rx != 0f) {
-                val gpPitch = if (settings.pitchUpClimb) -ly else ly
-                c.pitch = clamp(c.pitch + gpPitch, -1f, 1f)
-                c.roll = clamp(c.roll + lx, -1f, 1f)
-                c.yaw = clamp(c.yaw + rx, -1f, 1f)
-            }
-            c.strafeY = clamp(c.strafeY - ry, -1f, 1f)
-            if (gp.isHeld(GamepadState.LB)) c.strafeX -= 1f
-            if (gp.isHeld(GamepadState.RB)) c.strafeX += 1f
-            val thr = gp.rightTrigger - gp.leftTrigger
-            if (abs(thr) > 0.05f) {
-                val old = touch.throttle
-                var t = clamp(old + thr * 0.8f * dt, -1f, 1f)
-                // zero detent: crossing zero stops at zero until the triggers are released
-                if (padZeroHold || (old > 0f && t <= 0f) || (old < 0f && t >= 0f)) {
-                    if (!padZeroHold) haptic(Haptics.TICK)
-                    t = 0f
-                    padZeroHold = true
-                }
-                touch.throttle = t
-            } else {
-                padZeroHold = false
-                if (abs(touch.throttle) < 0.03f) touch.throttle = 0f
-            }
-        }
-        c.throttle = touch.throttle
-    }
-
-    private fun collide(dt: Float) {
-        val field = content?.field ?: return
-        bumpCooldown -= dt
-        if (!nearField(ship.pos)) {
-            proximity = Float.MAX_VALUE
-            return
-        }
-        var nearest = Float.MAX_VALUE
-        val ox = field.origin.x
-        val oy = field.origin.y
-        val oz = field.origin.z
-        val sx = (ship.pos.x - ox).toFloat()
-        val sy = (ship.pos.y - oy).toFloat()
-        val sz = (ship.pos.z - oz).toFloat()
-        for (i in 0 until field.total) {
-            if (!field.active[i]) continue
-            val dx = field.px[i] - sx
-            val dy = field.py[i] - sy
-            val dz = field.pz[i] - sz
-            val r = field.collisionRadius[i]
-            val reach = r + 400f + spec.reach
-            if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) continue
-            // the probes all lie within spec.reach of the origin: a rock this lower bound keeps clear
-            // of every probe, and farther than the nearest one so far, needs no closer look
-            val bound = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.reach
-            if (bound > 0f && bound >= nearest) continue
-            val d = flight.clearance(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r.toDouble()).toFloat()
-            if (d < nearest) nearest = d
-            if (d < 0f) {
-                val impact = flight.collideSphere(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r.toDouble())
-                if (impact > 2f && bumpCooldown <= 0f) {
-                    bumpCooldown = 0.25f
-                    haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
-                    chase.addShake(clamp(impact / 50f, 0.2f, 1.2f))
+    /** Commands that need a flight. */
+    private fun flightCommand(s: Session, name: String, arg: String?, words: List<String>) {
+        fun num(i: Int): Double? = words.getOrNull(i)?.toDoubleOrNull()
+        val station = arg?.toIntOrNull()?.takeIf { it in system.stations.indices }
+        when (name) {
+            "fa" -> if (arg == null || (arg == "on") != s.ship.flightAssist) s.toggleFlightAssist()
+            "boost" -> s.requestBoost()
+            "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
+            "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
+            "look" -> if (arg == "off" || arg == null) s.debugLook(false, 0f, 0f) else s.debugLook(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
+            "view" -> when (arg) {
+                "cockpit" -> s.setView(ShipView.COCKPIT)
+                "external" -> s.setView(ShipView.EXTERNAL)
+                "chase" -> {
+                    if (!settings.chaseView) {
+                        settings.chaseView = true
+                        settingsDirty = true
+                    }
+                    s.setView(ShipView.CHASE)
                 }
             }
+            "camera" -> s.toggleView()
+            "lock" -> if (arg == "clear") s.clearTarget() else s.cycleTarget()
+            "action" -> s.contextAction()
+            "undock" -> s.launchFromStation()
+            "teleport" -> {
+                val x = num(1)
+                val y = num(2)
+                val z = num(3)
+                if (x != null && y != null && z != null) {
+                    val lx = num(4)
+                    val ly = num(5)
+                    val lz = num(6)
+                    val look = lx != null && ly != null && lz != null
+                    s.teleport(x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look)
+                }
+            }
+            "near" -> nearTarget(words, system)?.let { (i, alt) -> s.near(i, alt) }
+            "teleport-low" -> s.debugTeleportLow()
+            "teleport-surface" -> {
+                s.debugTeleportLow()
+                s.debugDrop(60.0)
+            }
+            "lock-outpost" -> s.lock(Session.LOCK_STATION, 1)
+            "dock" -> s.requestDocking(station ?: 0)
+            "docked" -> s.debugDocked(station ?: 0)
+            "behind-station" -> s.debugBehindStation(station ?: 0, 1500.0, 0f)
+            "ram-station" -> s.debugBehindStation(0, 400.0, 120f)
         }
-        proximity = nearest
     }
 
     // ================================================================== render
 
-    private fun render(gl: Gl, dt: Float) {
+    private fun render(gl: Gl) {
         val scene = scene ?: return
         val ui = ui ?: return
         val f = sceneFrame
         f.time = time
         f.quality = scene.quality
         f.pxScale = surfaceH / 1080f
+        val s = session
+        val world = s != null && inWorld
+        if (world) {
+            s!!.writeScene(f)
+            f.gear = gearRig
+            updateLighting(s.ship.pos)
+        } else {
+            menuScene()
+        }
         f.camera.update(surfaceW, surfaceH)
         scene.render(f)
 
         ui.begin(surfaceW, surfaceH)
         val u = frame.u
-        if (state == STATE_MENU) {
-            if (overlay == OVERLAY_NONE) menu.draw(ui, frame, 1f, time)
-        } else {
-            if (overlay == OVERLAY_NONE) drawHud(ui, 1f)
+        if (!world) {
+            if (overlay == Overlay.NONE) menu.draw(ui, frame, 1f, time)
+        } else if (flightHudShown(s!!)) {
+            hud.draw(ui, s, f.camera, touch, 1f, time)
         }
         when (overlay) {
-            OVERLAY_SETTINGS -> settingsScreen.draw(ui, frame, 1f)
-            OVERLAY_PAUSE -> pause.draw(ui, frame, 1f)
-            OVERLAY_MAP -> map.draw(ui, 1f, ship.pos, ship.rot, time)
-            OVERLAY_DOCKED -> dockedScreen.draw(ui, frame, 1f, system.stations[dockStation].name)
+            Overlay.SETTINGS -> settingsScreen.draw(ui, frame, 1f)
+            Overlay.PAUSE -> pause.draw(ui, frame, 1f)
+            Overlay.MAP -> if (s != null) map.draw(ui, 1f, s.ship.pos, s.ship.rot, time)
+            Overlay.SERVICES -> if (s != null && s.dockStation >= 0) dockedScreen.draw(ui, frame, 1f, system.stations[s.dockStation].name)
+            Overlay.NONE -> Unit
         }
+        // the message line over an overlay that leaves room for it (the services: the welcome lines
+        // of a docked start show there, D31); with no overlay the HUD draws it
+        if (world && overlay != Overlay.NONE && overlay.showsMessages) hud.drawMessage(ui, s!!, 1f)
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
             ui.text(buf, frame.w - frame.sr - 14f * u, frame.st + 66f * u, 10f * u, withAlpha(Theme.OK, 0.9f), UiRenderer.RIGHT, shadow = 0.7f)
         }
+        // the curtain, above everything (Roblox: the menu GUI at DisplayOrder 1000)
         if (fade > 0.003f) ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(Theme.BLACK, fade))
+        if (phase == PHASE_LOADING && phaseTime > LOADING_CAPTION_AFTER) {
+            ui.textCentered("PREPARING YOUR SHIP ...", frame.w * 0.5f, frame.h * 0.5f, 11f * u, withAlpha(Theme.TEXT_DIM, 1f), tracking = 0.2f)
+            val t = (phaseTime % 1.6f) / 1.6f
+            ui.rect(frame.w * 0.5f - 60f * u, frame.h * 0.5f + 14f * u, 120f * u, 2f * u, withAlpha(Theme.PANEL_LIGHT, 1f))
+            ui.rect(frame.w * 0.5f - 60f * u + 90f * u * t, frame.h * 0.5f + 14f * u, 30f * u, 2f * u, withAlpha(Theme.TEXT_DIM, 1f))
+        }
         ui.end()
         gl.invalidateDepth()
-    }
-
-    private fun drawHud(ui: UiRenderer, alpha: Float) {
-        val u = frame.u
-        val cam = sceneFrame.camera
-        val a = alpha
-        // reticle where the nose points (800 m ahead) and the velocity vector marker
-        ship.rot.rotate(0f, 0f, -800f, tmp)
-        relToCam(tmp)
-        if (cam.project(tmp.x, tmp.y, tmp.z, screenPt)) {
-            val x = screenPt.x
-            val y = screenPt.y
-            val col = withAlpha(Theme.TEXT, a * 0.85f)
-            ui.circle(x, y, 13f * u, col, 1.5f * u)
-            ui.rect(x - 24f * u, y - 0.75f * u, 9f * u, 1.5f * u, col)
-            ui.rect(x + 15f * u, y - 0.75f * u, 9f * u, 1.5f * u, col)
-            ui.rect(x - 0.75f * u, y - 24f * u, 1.5f * u, 9f * u, col)
-            ui.circle(x, y, 1.6f * u, col)
-        }
-        if (ship.speed > 3f) {
-            tmp.set(ship.vel).scale(800f / ship.speed)
-            relToCam(tmp)
-            if (cam.project(tmp.x, tmp.y, tmp.z, screenPt)) {
-                val x = screenPt.x
-                val y = screenPt.y
-                val col = withAlpha(if (ship.flightAssist) Theme.ACCENT else Theme.WARN, a * 0.9f)
-                ui.circle(x, y, 7f * u, col, 1.5f * u)
-                ui.rect(x - 0.75f * u, y - 15f * u, 1.5f * u, 8f * u, col)
-                ui.rect(x - 15f * u, y - 0.75f * u, 8f * u, 1.5f * u, col)
-                ui.rect(x + 7f * u, y - 0.75f * u, 8f * u, 1.5f * u, col)
-            }
-        }
-
-        drawSteeringArrow(ui, a)
-        drawTargets(ui, a)
-        drawLandingHud(ui, a)
-
-        // speed readout beside the throttle lever (keeps the centre clear for the ship)
-        val g = touch.gauge
-        val mirrored = settings.leftHanded
-        val sx = if (mirrored) g.x - 26f * u else g.x + g.w + 26f * u
-        val align = if (mirrored) UiRenderer.RIGHT else UiRenderer.LEFT
-        val sy = g.y + g.h
-        val speed = ship.forwardSpeed
-        val unit = formatSpeed(buf.clear(), abs(speed))
-        val numW = ui.text(buf, sx, sy - 12f * u, 28f * u, withAlpha(if (speed < -1f) Theme.WARN else Theme.TEXT, a), align, 0f, 0.02f, shadow = 0.7f, face = FontData.MONO)
-        val unitX = if (mirrored) sx - numW - 6f * u else sx + numW + 6f * u
-        ui.text(unit, unitX, sy - 12f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), align, tracking = 0.15f, shadow = 0.7f)
-        // boost capacitor bar
-        val bw = 104f * u
-        val bx = if (mirrored) sx - bw else sx
-        ui.rect(bx, sy - 3f * u, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
-        val capCol = if (ship.capacitor >= spec.boostCost) Theme.ACCENT else Theme.TEXT_DIM
-        ui.rect(bx, sy - 3f * u, bw * ship.capacitor, 4f * u, withAlpha(capCol, a), 2f * u)
-        ui.rect(bx + bw * spec.boostCost, sy - 6f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
-        // zone, flight-assist and proximity warnings (top centre)
-        val cx = frame.w * 0.5f
-        ui.textCentered(here.zone.label, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
-        var warnY = frame.st + 52f * u
-        if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
-            val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
-            ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
-            warnY += 20f * u
-        }
-        if (!ship.flightAssist) {
-            val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
-            ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
-            warnY += 20f * u
-        }
-        val msg = message
-        if (msg != null) {
-            ui.textCentered(msg, cx, frame.h * 0.30f, 13f * u, withAlpha(Theme.LOCK, a), tracking = 0.25f, shadow = 0.8f)
-        }
-        if (proximity < 60f) {
-            val blink = if ((time * 4f).toInt() % 2 == 0) 1f else 0.4f
-            ui.textCentered("PROXIMITY", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
-        }
-
-        touch.draw(
-            ui, a, ship.forwardSpeed / spec.maxSpeed, ship.flightAssist,
-            ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, lockKind != LOCK_NONE,
-        )
-    }
-
-    /** Arrow from the screen centre showing which way the stick is turning the ship. */
-    private fun drawSteeringArrow(ui: UiRenderer, a: Float) {
-        val vx = touch.stickVecX
-        val vy = touch.stickVecY
-        val mag = sqrt(vx * vx + vy * vy)
-        if (mag < 0.05f) return
-        val u = frame.u
-        val cx = frame.w * 0.5f
-        val cy = frame.h * 0.5f
-        val ux = vx / mag
-        val uy = vy / mag
-        val len = 30f * u + 58f * u * min(mag, 1f)
-        val ex = cx + ux * len
-        val ey = cy + uy * len
-        val col = withAlpha(Theme.TEXT, a * (0.35f + 0.5f * min(mag, 1f)))
-        ui.line(cx + ux * 20f * u, cy + uy * 20f * u, ex, ey, 2f * u, col)
-        // arrow head: back vector rotated ±30°
-        val bx = -ux
-        val by = -uy
-        val hl = 11f * u
-        ui.line(ex, ey, ex + (bx * 0.866f - by * 0.5f) * hl, ey + (bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
-        ui.line(ex, ey, ex + (bx * 0.866f + by * 0.5f) * hl, ey + (-bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
-    }
-
-    // ================================================================== landing (L)
-
-    /** Solid bodies only: no landing on the star or the gas giant. */
-    private fun landable(i: Int): Boolean {
-        if (i < 0) return false
-        val t = system.bodies[i].type
-        return t != StarSystem.BodyType.STAR && t != StarSystem.BodyType.GAS
-    }
-
-    private fun actionLabel(): String = when {
-        landed -> "TAKE OFF"
-        landing || docking -> "CANCEL"
-        here.zone == StarSystem.Zone.STATION_ZONE -> "DOCK"
-        here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> "LAND"
-        else -> ""
-    }
-
-    private fun doAction() {
-        when {
-            landed -> takeOff()
-            docking -> {
-                docking = false
-                showMessage("DOCKING CANCELLED")
-            }
-            landing -> {
-                landing = false
-                showMessage("LANDING CANCELLED")
-            }
-            here.zone == StarSystem.Zone.STATION_ZONE -> requestDocking(here.nearestStation)
-            here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> {
-                landing = true
-                showMessage("LANDING MODE  ·  GEAR DOWN")
-            }
-            else -> haptic(Haptics.BUMP)
-        }
-    }
-
-    private fun takeOff() {
-        if (!landed) return
-        landed = false
-        // leave landing mode: otherwise the touchdown test re-lands the ship on the next substep
-        landing = false
-        liftTime = LIFT_TIME
-        val b = system.bodies[landedBody]
-        upV.set(
-            (ship.pos.x - b.pos.x).toFloat(), (ship.pos.y - b.pos.y).toFloat(), (ship.pos.z - b.pos.z).toFloat(),
-        ).normalize()
-        ship.vel.set(upV).scale(25f)
-        showMessage("LIFT OFF")
-        haptic(Haptics.TICK)
-    }
-
-    /** While landed: stand on the gear, level out, and wait for a take-off input. */
-    private fun holdLanded(dt: Float) {
-        val b = system.bodies[landedBody]
-        val dx = ship.pos.x - b.pos.x
-        val dy = ship.pos.y - b.pos.y
-        val dz = ship.pos.z - b.pos.z
-        val d = sqrt(dx * dx + dy * dy + dz * dz)
-        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-        val rest = b.radius + spec.groundClearance
-        ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
-        ship.vel.zero()
-        ship.angVel.zero()
-        ship.speed = 0f
-        ship.forwardSpeed = 0f
-        // settle level: keep the heading, align the ship's up with the surface normal
-        ship.rot.rotate(0f, 0f, -1f, fwdV)
-        fwdV.addScaled(upV, -fwdV.dot(upV))
-        if (fwdV.lengthSq() > 1e-6f) {
-            fwdV.normalize()
-            landRot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
-            ship.rot.slerp(ship.rot, landRot, expApproach(3f, dt))
-        }
-        if (touch.vertical > 0f || touch.throttle > 0.05f || controls.strafeY > 0.2f) takeOff()
-    }
-
-    private fun showMessage(m: String) {
-        message = m
-        messageTime = time
-    }
-
-    /** Harness hook: drop the ship 20 km above PLANET II's day side, nose level, in landing range. */
-    private fun debugTeleportLow() {
-        val b = system.bodies.first { it.name == "PLANET II" }
-        val d = sqrt(b.pos.x * b.pos.x + b.pos.y * b.pos.y + b.pos.z * b.pos.z)
-        val ux = -b.pos.x / d
-        val uy = -b.pos.y / d
-        val uz = -b.pos.z / d
-        val alt = b.radius + 20_000.0
-        ship.pos.set(b.pos.x + ux * alt, b.pos.y + uy * alt, b.pos.z + uz * alt)
-        upV.set(ux.toFloat(), uy.toFloat(), uz.toFloat())
-        // heading: any direction along the surface
-        fwdV.set(0f, 1f, 0f).addScaled(upV, -upV.y).normalize()
-        ship.rot.lookRotation(fwdV.x - upV.x * 0.25f, fwdV.y - upV.y * 0.25f, fwdV.z - upV.z * 0.25f, upV.x, upV.y, upV.z)
-        ship.vel.zero()
-        touch.throttle = 0.2f
-        chase.snapTo(ship)
-        dustOrigin.set(ship.pos)
-    }
-
-    /** Harness hook: puts the ship [dist] m behind station [i] (opposite its slot), nose on the hub, flying at it at [speed]. */
-    private fun debugBehindStation(i: Int, dist: Double, speed: Float) {
-        stationPort(i)
-        val st = system.stations[i]
-        ship.pos.set(st.pos.x - dockDir.x * dist, st.pos.y - dockDir.y * dist, st.pos.z - dockDir.z * dist)
-        st.rot.rotate(0f, 1f, 0f, upV)
-        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
-        ship.vel.set(dockDir).scale(speed)
-        ship.angVel.zero()
-        touch.throttle = if (speed > 0f) 0.6f else 0f
-        landed = false
-        landing = false
-        liftTime = 0f
-        gearRig.update(0f, gearWanted(), true)
-        docking = false
-        chase.snapTo(ship)
-        dustOrigin.set(ship.pos)
-    }
-
-    /**
-     * Harness hook: auto-dock into station [i], already lined up with the hull's centre 20 m in front
-     * of the slot ([updateDocking] glides it in).
-     */
-    private fun debugDocked(i: Int) {
-        if (!requestDocking(i)) return
-        stationPort(i)
-        system.stations[i].rot.rotate(0f, 1f, 0f, upV)
-        ship.rot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
-        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
-        ship.pos.set(dockPos.x + dockDir.x * 20.0 - tmp.x, dockPos.y + dockDir.y * 20.0 - tmp.y, dockPos.z + dockDir.z * 20.0 - tmp.z)
-        ship.vel.zero()
-        ship.angVel.zero()
-        dockPhase = 1
-        chase.snapTo(ship)
-        dustOrigin.set(ship.pos)
-    }
-
-    /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
-    private fun debugDrop(alt: Double) {
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-        val b = system.bodies[here.nearestBody]
-        val dx = ship.pos.x - b.pos.x
-        val dy = ship.pos.y - b.pos.y
-        val dz = ship.pos.z - b.pos.z
-        val d = sqrt(dx * dx + dy * dy + dz * dz)
-        val r = b.radius + spec.groundClearance + alt
-        ship.pos.set(b.pos.x + dx / d * r, b.pos.y + dy / d * r, b.pos.z + dz / d * r)
-        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-        ship.rot.rotate(0f, 0f, -1f, fwdV)
-        fwdV.addScaled(upV, -fwdV.dot(upV)).normalize()
-        ship.rot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
-        ship.vel.zero()
-        ship.angVel.zero()
-        touch.throttle = 0f
-        chase.snapTo(ship)
-        dustOrigin.set(ship.pos)
-    }
-
-    /**
-     * Pitch ladder (±10° steps relative to the local horizon) with PITCH and ALT boxes. Shown only
-     * in landing mode, like the Roblox version's L landing.
-     */
-    private fun drawLandingHud(ui: UiRenderer, a: Float) {
-        if (!(landing || landed)) {
-            if (gear > 0f) drawGear(ui, a)
-            return
-        }
-        val i = if (landed) landedBody else here.nearestBody
-        if (i < 0) return
-        val b = system.bodies[i]
-        val u = frame.u
-        val cam = sceneFrame.camera
-        val dx = ship.pos.x - b.pos.x
-        val dy = ship.pos.y - b.pos.y
-        val dz = ship.pos.z - b.pos.z
-        val d = sqrt(dx * dx + dy * dy + dz * dz)
-        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-        ship.rot.rotate(0f, 0f, -1f, fwdV)
-        val pitchDeg = kotlin.math.asin(clamp(fwdV.dot(upV), -1f, 1f)) * 57.29578f
-        // horizon heading and right vectors
-        fwdV.addScaled(upV, -fwdV.dot(upV))
-        if (fwdV.lengthSq() < 1e-6f) ship.rot.rotate(0f, 1f, 0f, fwdV).addScaled(upV, -fwdV.dot(upV))
-        fwdV.normalize()
-        rightV.cross(fwdV, upV).normalize()
-        val col = withAlpha(Theme.OK, a * 0.85f)
-        val dim = withAlpha(Theme.OK, a * 0.5f)
-        val half = 70f * u
-        // rungs every 10°, only near the current pitch
-        var deg = -90
-        while (deg <= 90) {
-            if (kotlin.math.abs(deg - pitchDeg) <= 32f) {
-                val rad = deg * 0.017453292f
-                val c = kotlin.math.cos(rad)
-                val sn = kotlin.math.sin(rad)
-                // a far point in that direction, camera relative (ship is near the camera)
-                val px = (fwdV.x * c + upV.x * sn) * 5000f + (ship.pos.x - cam.pos.x).toFloat()
-                val py = (fwdV.y * c + upV.y * sn) * 5000f + (ship.pos.y - cam.pos.y).toFloat()
-                val pz = (fwdV.z * c + upV.z * sn) * 5000f + (ship.pos.z - cam.pos.z).toFloat()
-                if (cam.project(px, py, pz, screenPt)) {
-                    val x0 = screenPt.x
-                    val y0 = screenPt.y
-                    if (cam.project(px + rightV.x * 500f, py + rightV.y * 500f, pz + rightV.z * 500f, tmp2)) {
-                        var ex = tmp2.x - x0
-                        var ey = tmp2.y - y0
-                        val el = sqrt(ex * ex + ey * ey).coerceAtLeast(1e-3f)
-                        ex /= el; ey /= el
-                        val gap = 26f * u
-                        val wdt = if (deg == 0) 1.8f * u else 1.2f * u
-                        val cc = if (deg == 0) col else dim
-                        ui.line(x0 - ex * half, y0 - ey * half, x0 - ex * gap, y0 - ey * gap, wdt, cc)
-                        ui.line(x0 + ex * gap, y0 + ey * gap, x0 + ex * half, y0 + ey * half, wdt, cc)
-                        if (deg != 0) {
-                            buf.clear().append(deg)
-                            ui.text(buf, x0 + ex * (half + 14f * u), y0 + ey * (half + 14f * u) + 4f * u, 9f * u, dim, UiRenderer.CENTER, face = FontData.MONO)
-                        }
-                    }
-                }
-            }
-            deg += 10
-        }
-        // PITCH and ALT boxes either side of the centre
-        val cx = frame.w * 0.5f
-        val cy = frame.h * 0.5f
-        val bw = 74f * u
-        val bh = 36f * u
-        val lx = cx - 150f * u - bw
-        val rx = cx + 150f * u
-        for (k in 0..1) {
-            val x = if (k == 0) lx else rx
-            ui.rect(x, cy - bh * 0.5f, bw, bh, withAlpha(Theme.PANEL, a * 0.8f), -5f * u)
-            ui.rect(x, cy - bh * 0.5f, bw, bh, col, -5f * u, 1.2f * u)
-            ui.text(if (k == 0) "PITCH" else "ALT", x + bw * 0.5f, cy - bh * 0.5f - 5f * u, 8.5f * u, col, UiRenderer.CENTER, tracking = 0.2f, shadow = 0.6f)
-            buf.clear()
-            if (k == 0) {
-                buf.append(pitchDeg, 0).append('°')
-                ui.textCentered(buf, x + bw * 0.5f, cy, 13f * u, col, face = FontData.MONO)
-            } else {
-                val alt = maxOf(0.0, d - b.radius - spec.groundClearance)
-                val unit = MapScreen.distanceText(buf, alt)
-                val tw = ui.textWidth(buf, 13f * u, face = FontData.MONO)
-                ui.textCentered(buf, x + bw * 0.5f - 6f * u, cy, 13f * u, col, face = FontData.MONO)
-                ui.text(unit, x + bw * 0.5f - 6f * u + tw * 0.5f + 3f * u, cy + 4f * u, 8f * u, col)
-            }
-        }
-        // vertical speed under the ALT box, total speed under the PITCH box (touchdown limits)
-        val vs = ship.vel.dot(upV)
-        buf.clear().append(vs, 1).append(" M/S")
-        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs <= -TOUCHDOWN_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
-        buf.clear().append(ship.speed, 0).append(" M/S")
-        ui.text(buf, lx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (ship.speed >= TOUCHDOWN_MAX_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
-        drawGear(ui, a)
-    }
-
-    private fun drawGear(ui: UiRenderer, a: Float) {
-        val u = frame.u
-        val label = when {
-            gear >= 1f -> if (landed) "LANDED" else "GEAR DOWN"
-            gearRig.doorsMoving -> "GEAR · DOORS"
-            else -> "GEAR · LEGS"
-        }
-        val x = frame.w * 0.5f
-        val y = frame.h - frame.sb - 30f * u
-        val col = withAlpha(if (gear >= 1f) Theme.OK else Theme.WARN, a)
-        ui.textCentered(label, x, y - 12f * u, 10f * u, col, tracking = 0.25f, shadow = 0.6f)
-        ui.rect(x - 50f * u, y, 100f * u, 4f * u, withAlpha(Theme.PANEL, a), 2f * u)
-        ui.rect(x - 50f * u, y, 100f * u * gear, 4f * u, col, 2f * u)
-    }
-
-    // ================================================================== docking (K)
-
-    /**
-     * Docking port of station [i] in world space: [dockPos] = slot entrance, [dockDir] = outward
-     * direction a ship approaches along.
-     */
-    private fun stationPort(i: Int) {
-        val st = system.stations[i]
-        stationPortLocal(st.model, portLocal, portDirLocal)
-        st.rot.rotate(portLocal, tmp)
-        dockPos.set(st.pos.x + tmp.x, st.pos.y + tmp.y, st.pos.z + tmp.z)
-        st.rot.rotate(portDirLocal, dockDir)
-        dockDir.normalize()
-    }
-
-    private fun stationPortLocal(model: Int, outPos: Vec3, outDir: Vec3) {
-        com.starwake.core.content.StationMesh.dockPort(model, outPos, outDir)
-    }
-
-    /**
-     * How far inside the slot entrance the hull's centre parks: half the tunnel depth, or less so the
-     * nose stays [PARK_NOSE_GAP] off the back wall (a hull longer than the tunnel sticks out of it).
-     */
-    private fun slotParkDepth(i: Int): Double {
-        com.starwake.core.content.StationMesh.slotSize(system.stations[i].model, tmp2)
-        return minOf(tmp2.z * 0.5f, tmp2.z - spec.sizeZ * 0.5f - PARK_NOSE_GAP).toDouble()
-    }
-
-    /** Engages auto-dock into station [i]'s slot; false (with a message) when the hull does not fit it. */
-    private fun requestDocking(i: Int): Boolean {
-        if (i < 0) return false
-        // auto-dock flies without collision: only into a slot the hull clears on every side (every
-        // hull fits both stand-in slots, as every Roblox hangar takes every ship)
-        if (!com.starwake.core.content.StationMesh.slotFits(system.stations[i].model, spec.sizeX, spec.sizeY)) {
-            showMessage("DOCKING DENIED  ·  SLOT TOO SMALL")
-            haptic(Haptics.BUMP)
-            return false
-        }
-        docking = true
-        dockStation = i
-        dockPhase = 0
-        dockBoxedTime = 0f
-        landing = false
-        showMessage("DOCKING GRANTED  ·  AUTO-DOCK ENGAGED")
-        haptic(Haptics.TICK)
-        return true
-    }
-
-    /**
-     * Auto-dock: around the hull if needed, to a point in front of the slot, line up, then slide in.
-     * The route and the slot place the hull's centre (the ship turns about it), not the ship's
-     * origin: that is the pilot's eye, well forward and up on the bigger hulls.
-     */
-    private fun updateDocking(dt: Float) {
-        stationPort(dockStation)
-        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
-        hullPos.set(ship.pos.x + tmp.x, ship.pos.y + tmp.y, ship.pos.z + tmp.z)
-        // phase 0: detour around the hull while the router asks for it, then hold in front of the
-        // slot; phase 1: glide in and park inside the tunnel
-        val detour = dockPhase == 0 && stationCollision.dockWaypoint(system.stations[dockStation], hullPos, dockWaypoint)
-        // the router found no way out (it holds the ship still): give up rather than wait for ever
-        dockBoxedTime = if (detour && stationCollision.boxedIn) dockBoxedTime + dt else 0f
-        if (dockBoxedTime > DOCK_BOXED_GRACE) {
-            docking = false
-            ship.vel.zero()
-            showMessage("DOCKING ABORTED  ·  MOVE CLEAR OF THE HULL")
-            return
-        }
-        val standOff = if (dockPhase == 0) DOCK_STANDOFF else -slotParkDepth(dockStation)
-        val tx = if (detour) dockWaypoint.x else dockPos.x + dockDir.x * standOff
-        val ty = if (detour) dockWaypoint.y else dockPos.y + dockDir.y * standOff
-        val tz = if (detour) dockWaypoint.z else dockPos.z + dockDir.z * standOff
-        val dx = tx - hullPos.x
-        val dy = ty - hullPos.y
-        val dz = tz - hullPos.z
-        val d = sqrt(dx * dx + dy * dy + dz * dz)
-        // nose along the route while going round the hull, otherwise into the slot (against the
-        // outward direction); roll matched to the station's up
-        system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
-        if (detour && d > 5.0) landRot.lookRotation((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat(), upV.x, upV.y, upV.z)
-        else landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
-        val turn = if (dockPhase == 0) 1.5f else 3f
-        ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
-        val speed = if (detour) DOCK_APPROACH_SPEED else if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
-        val k = if (d > 0.5) minOf(1.0, speed * dt / d) else 0.0
-        if (d > 0.5) ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
-        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
-        ship.pos.set(hullPos.x + dx * k - tmp.x, hullPos.y + dy * k - tmp.y, hullPos.z + dz * k - tmp.z)
-        ship.speed = speed
-        ship.forwardSpeed = speed
-        ship.angVel.zero()
-        ship.engineOutput += (0.3f - ship.engineOutput) * expApproach(4f, dt)
-        if (dockPhase == 0 && !detour && d < 15.0) {
-            dockPhase = 1
-            showMessage("ENTERING SLOT")
-        } else if (dockPhase == 1 && d < 2.0) {
-            docking = false
-            docked = true
-            ship.vel.zero()
-            ship.speed = 0f
-            ship.forwardSpeed = 0f
-            touch.throttle = 0f
-            controls.clearAxes()
-            overlay = OVERLAY_DOCKED
-            touch.releaseAll()
-            screenChanged()
-            haptic(Haptics.BUMP)
-            message = null
-        }
-    }
-
-    override fun launchFromStation() {
-        if (overlay != OVERLAY_DOCKED) return
-        stationPort(dockStation)
-        // out of the slot, nose outward, the hull on the slot axis with its tail LAUNCH_CLEAR metres
-        // off the entrance, at a gentle push
-        system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
-        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
-        val out = spec.sizeZ * 0.5 + LAUNCH_CLEAR
-        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
-        ship.pos.set(dockPos.x + dockDir.x * out - tmp.x, dockPos.y + dockDir.y * out - tmp.y, dockPos.z + dockDir.z * out - tmp.z)
-        ship.vel.set(dockDir).scale(60f)
-        touch.throttle = 0.3f
-        controls.clearAxes()
-        chase.snapTo(ship)
-        docked = false
-        launchTime = flightTime
-        overlay = OVERLAY_NONE
-        screenChanged()
-        showMessage("LAUNCHED  ·  " + system.stations[dockStation].name)
-    }
-
-    // ================================================================== targets, lock and markers
-
-    /**
-     * Finds the target closest to the nose: asteroids (when near the field), stations and bodies.
-     * Writes [aimKind]/[aimIndex]; the score is the angle off the nose minus the target's
-     * angular radius, so big bodies are easy to pick.
-     */
-    private fun findAimed(maxAngleCos: Float, maxAngleSin: Float) {
-        aimKind = LOCK_NONE
-        aimIndex = -1
-        ship.rot.rotate(0f, 0f, -1f, tmp)
-        var bestScore = Float.MAX_VALUE
-        val field = content?.field
-        if (field != null && nearField(ship.pos)) {
-            for (i in 0 until field.total) {
-                if (!field.active[i]) continue
-                val dx = field.origin.x + field.px[i] - ship.pos.x
-                val dy = field.origin.y + field.py[i] - ship.pos.y
-                val dz = field.origin.z + field.pz[i] - ship.pos.z
-                val score = aimScore(dx, dy, dz, field.radius[i].toDouble(), maxAngleCos, maxAngleSin, LOCK_RANGE.toDouble())
-                if (score < bestScore) {
-                    bestScore = score; aimKind = LOCK_ASTEROID; aimIndex = i
-                }
-            }
-        }
-        for (i in system.stations.indices) {
-            val st = system.stations[i]
-            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
-            if (score < bestScore) {
-                bestScore = score; aimKind = LOCK_STATION; aimIndex = i
-            }
-        }
-        for (i in system.bodies.indices) {
-            val b = system.bodies[i]
-            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
-            if (score < bestScore) {
-                bestScore = score; aimKind = LOCK_BODY; aimIndex = i
-            }
-        }
-    }
-
-    /** Angle (radians) between the nose ([tmp]) and the target's edge; MAX_VALUE if not eligible. */
-    private fun aimScore(
-        dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, maxAngleSin: Float, range: Double,
-    ): Float {
-        if (range < Double.MAX_VALUE) {
-            // cheap box reject before the square root (asteroids: most are out of range)
-            val reach = range + radius
-            if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) return Float.MAX_VALUE
-        }
-        val d = sqrt(dx * dx + dy * dy + dz * dz)
-        if (d < 1.0 || d - radius > range) return Float.MAX_VALUE
-        val cos = ((dx * tmp.x + dy * tmp.y + dz * tmp.z) / d).toFloat()
-        // exact trig-free test for "angle - angular radius > cone": cos(angle) < cos(cone + angRadius)
-        // (valid because cone + angRadius < 180°)
-        val sr = minOf(1.0, radius / d).toFloat()
-        if (cos < maxAngleCos * sqrt(1f - sr * sr) - maxAngleSin * sr) return Float.MAX_VALUE
-        val angle = kotlin.math.acos(clamp(cos, -1f, 1f))
-        val angRadius = kotlin.math.asin(minOf(1.0, radius / d)).toFloat()
-        val off = maxOf(0f, angle - angRadius)
-        if (kotlin.math.cos(off) < maxAngleCos) return Float.MAX_VALUE
-        // tiny distance tie-breaker so the nearer of two overlapping targets wins
-        return off + (d * 1e-12).toFloat()
-    }
-
-    private fun toggleLock() {
-        if (lockKind != LOCK_NONE) {
-            lockKind = LOCK_NONE
-            haptic(Haptics.TICK)
-            return
-        }
-        findAimed(LOCK_CONE_COS, LOCK_CONE_SIN)
-        lockKind = aimKind
-        lockIndex = aimIndex
-        haptic(if (lockKind != LOCK_NONE) Haptics.TICK else Haptics.BUMP)
-    }
-
-    private fun validateLock() {
-        if (lockKind == LOCK_ASTEROID) {
-            val field = content?.field ?: return
-            if (!field.active[lockIndex] || targetDistance(LOCK_ASTEROID, lockIndex) > LOCK_RANGE * 1.5f) lockKind = LOCK_NONE
-        }
-    }
-
-    /** Target centre relative to [origin] into [out] (camera-relative when origin = camera). */
-    private fun targetRel(kind: Int, i: Int, origin: com.starwake.core.math.DVec3, out: Vec3) {
-        when (kind) {
-            LOCK_ASTEROID -> {
-                val f = content!!.field
-                out.set(
-                    (f.origin.x + f.px[i] - origin.x).toFloat(),
-                    (f.origin.y + f.py[i] - origin.y).toFloat(),
-                    (f.origin.z + f.pz[i] - origin.z).toFloat(),
-                )
-            }
-            LOCK_STATION -> system.stations[i].pos.relativeTo(origin, out)
-            else -> system.bodies[i].pos.relativeTo(origin, out)
-        }
-    }
-
-    private fun targetRadius(kind: Int, i: Int): Double = when (kind) {
-        LOCK_ASTEROID -> content!!.field.collisionRadius[i].toDouble()
-        LOCK_STATION -> system.stations[i].radius
-        else -> system.bodies[i].radius
-    }
-
-    /** Distance from the ship to the target's surface, in metres (double precision). */
-    private fun targetDistance(kind: Int, i: Int): Double {
-        val dx: Double
-        val dy: Double
-        val dz: Double
-        when (kind) {
-            LOCK_ASTEROID -> {
-                val f = content!!.field
-                dx = f.origin.x + f.px[i] - ship.pos.x; dy = f.origin.y + f.py[i] - ship.pos.y; dz = f.origin.z + f.pz[i] - ship.pos.z
-            }
-            LOCK_STATION -> {
-                val p = system.stations[i].pos
-                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
-            }
-            else -> {
-                val p = system.bodies[i].pos
-                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
-            }
-        }
-        return maxOf(0.0, sqrt(dx * dx + dy * dy + dz * dz) - targetRadius(kind, i))
-    }
-
-    private fun targetName(kind: Int, i: Int): String = when (kind) {
-        LOCK_STATION -> system.stations[i].name
-        LOCK_BODY -> system.bodies[i].name
-        else -> "ASTEROID"
-    }
-
-    /**
-     * Uppercase markers on stations and bodies; amber brackets on the locked target. Distance is
-     * shown only for the locked target, or the one the nose is aimed at when nothing is locked.
-     */
-    private fun drawTargets(ui: UiRenderer, a: Float) {
-        // toggleLock runs its own wider search, so nothing needs the aim while a target is locked
-        if (lockKind == LOCK_NONE) findAimed(AIM_CONE_COS, AIM_CONE_SIN) else { aimKind = LOCK_NONE; aimIndex = -1 }
-        val showKind = if (lockKind != LOCK_NONE) lockKind else aimKind
-        val showIndex = if (lockKind != LOCK_NONE) lockIndex else aimIndex
-        // labels claim screen space in priority order (locked/aimed, stations, bodies); a label
-        // that would overlap one already placed is left out (its marker ring still shows)
-        labelCount = 0
-        if (showKind != LOCK_NONE) drawMarker(ui, a, showKind, showIndex, showKind, showIndex)
-        for (i in system.stations.indices) {
-            if (showKind != LOCK_STATION || i != showIndex) drawMarker(ui, a, LOCK_STATION, i, showKind, showIndex)
-        }
-        for (i in system.bodies.indices) {
-            if (showKind != LOCK_BODY || i != showIndex) drawMarker(ui, a, LOCK_BODY, i, showKind, showIndex)
-        }
-    }
-
-    /**
-     * Claims the screen box of a label at ([x], [y]) reaching [left]/[right] from x, [lines] lines; false
-     * (nothing claimed) if it would overlap a label already placed this frame.
-     */
-    private fun claimLabel(x: Float, y: Float, left: Float, right: Float, lines: Int, force: Boolean): Boolean {
-        val u = frame.u
-        val x0 = x - left - 3f * u
-        val x1 = x + right + 3f * u
-        val y0 = y - 9f * u
-        val y1 = y + (if (lines > 1) 20f else 5f) * u
-        if (!force) {
-            for (k in 0 until labelCount) {
-                val o = k * 4
-                if (x0 < labelBoxes[o + 2] && x1 > labelBoxes[o] && y0 < labelBoxes[o + 3] && y1 > labelBoxes[o + 1]) return false
-            }
-        }
-        if (labelCount < MAX_LABELS) {
-            val o = labelCount * 4
-            labelBoxes[o] = x0; labelBoxes[o + 1] = y0; labelBoxes[o + 2] = x1; labelBoxes[o + 3] = y1
-            labelCount++
-        }
-        return true
-    }
-
-    private fun drawMarker(ui: UiRenderer, a: Float, kind: Int, i: Int, showKind: Int, showIndex: Int) {
-        val cam = sceneFrame.camera
-        targetRel(kind, i, cam.pos, tmp)
-        val locked = kind == lockKind && i == lockIndex
-        val onScreen = cam.project(tmp.x, tmp.y, tmp.z, screenPt)
-        val u = frame.u
-        val x = screenPt.x
-        val y = screenPt.y
-        val inside = onScreen && x >= 0f && y >= 0f && x <= frame.w && y <= frame.h
-        if (!inside) {
-            // the locked target always shows where it is: an arrow on the screen edge
-            if (locked) drawLockArrow(ui, a, kind, i)
-            return
-        }
-        val shown = kind == showKind && i == showIndex
-        // hidden behind a planet: no marker (the lock brackets still show where it is)
-        if (!locked && hiddenBehindBody(kind, i)) return
-        val dist = targetDistance(kind, i)
-        val pxPerUnit = frame.h * 0.5f / cam.tanHalfY / screenPt.z
-        val screenR = (targetRadius(kind, i) * pxPerUnit).toFloat()
-        // a body filling the view needs no marker (the zone label names it)
-        if (screenR > frame.h * 0.35f && !locked) return
-        if (locked) {
-            // big bodies: keep the brackets and the distance readable on screen
-            val half = minOf(maxOf(screenR * 1.05f, 16f * u), 0.42f * min(frame.w, frame.h))
-            val arm = maxOf(half * 0.3f, 8f * u)
-            val col = withAlpha(Theme.LOCK, a)
-            val w = 2f * u
-            for (sxs in 0..1) for (sys in 0..1) {
-                val sxv = if (sxs == 0) -1f else 1f
-                val syv = if (sys == 0) -1f else 1f
-                val px = x + sxv * half
-                val py = y + syv * half
-                ui.line(px, py, px - sxv * arm, py, w, col)
-                ui.line(px, py, px, py - syv * arm, w, col)
-            }
-            val ly = minOf(y + half + 16f * u, frame.h - frame.sb - 64f * u)
-            labelAndDistance(ui, a, kind, i, x, ly, col, true, dist)
-        } else if (kind != LOCK_ASTEROID) {
-            val col = withAlpha(if (kind == LOCK_STATION) Theme.ACCENT else Theme.TEXT, a * 0.85f)
-            val r = maxOf(screenR, 5f * u)
-            ui.circle(x, y, r, col, 1.2f * u)
-            labelAndDistance(ui, a, kind, i, x, y + r + 13f * u, col, shown, dist)
-        }
-    }
-
-    /**
-     * Amber chevron on an ellipse near the screen edge, pointing towards the locked target ([tmp]
-     * = target relative to the camera), with its name and distance just inside it.
-     */
-    private fun drawLockArrow(ui: UiRenderer, a: Float, kind: Int, i: Int) {
-        val cam = sceneFrame.camera
-        val u = frame.u
-        // view-space direction (camera looks down -Z, +Y up); screen y grows downwards
-        cam.rot.rotateInverse(tmp, tmp2)
-        var dx = tmp2.x
-        var dy = -tmp2.y
-        val len = sqrt(dx * dx + dy * dy)
-        if (len < 1e-6f * (abs(tmp2.z) + 1f)) {
-            dx = 0f; dy = 1f // dead astern: point down
-        } else {
-            dx /= len; dy /= len
-        }
-        // a ring around the crosshair, clear of the control columns at the screen edges
-        val cx = frame.w * 0.5f
-        val cy = frame.h * 0.5f
-        val ex = cx + dx * frame.w * 0.27f
-        val ey = cy + dy * frame.h * 0.36f
-        val col = withAlpha(Theme.LOCK, a)
-        // chevron: tip at (ex, ey), arms swept back ±40°
-        val hl = 16f * u
-        val bx = -dx
-        val by = -dy
-        val c = 0.766f
-        val sn = 0.643f
-        ui.line(ex, ey, ex + (bx * c - by * sn) * hl, ey + (bx * sn + by * c) * hl, 3f * u, col)
-        ui.line(ex, ey, ex + (bx * c + by * sn) * hl, ey + (-bx * sn + by * c) * hl, 3f * u, col)
-        // name + distance: inward beside a side arrow, to the right of a top/bottom one (the
-        // message line sits under the top of the ring)
-        val lx: Float
-        val ly: Float
-        if (abs(dx) > 0.6f) {
-            lx = ex - dx * 64f * u
-            ly = ey - 4f * u
-        } else {
-            lx = ex + 58f * u
-            ly = ey - 2f * u
-        }
-        labelAndDistance(ui, a, kind, i, lx, ly, col, true, targetDistance(kind, i))
-    }
-
-    private fun labelAndDistance(ui: UiRenderer, a: Float, kind: Int, i: Int, x: Float, y: Float, col: Int, withDistance: Boolean, dist: Double) {
-        val u = frame.u
-        val name = targetName(kind, i)
-        // measure the whole label (name, and the distance line with its unit to the right)
-        val nameHalf = ui.textWidth(name, 9f * u, 0.18f) * 0.5f
-        var left = nameHalf
-        var right = nameHalf
-        var unit = ""
-        var numW = 0f
-        if (withDistance) {
-            unit = formatDistance(buf.clear(), dist.toFloat())
-            numW = ui.textWidth(buf, 11f * u, 0f, FontData.MONO)
-            left = maxOf(left, numW * 0.5f)
-            right = maxOf(right, numW * 0.5f + 4f * u + ui.textWidth(unit, 8.5f * u))
-        }
-        // the locked/aimed label always shows (it is placed first, so nothing is under it yet)
-        if (!claimLabel(x, y, left, right, if (withDistance) 2 else 1, withDistance)) return
-        ui.text(name, x, y, 9f * u, col, UiRenderer.CENTER, tracking = 0.18f, shadow = 0.7f)
-        if (withDistance) {
-            ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
-            ui.text(unit, x + numW * 0.5f + 4f * u, y + 14f * u, 8.5f * u, col, shadow = 0.7f)
-        }
-    }
-
-    /** True if a body other than the target itself blocks the line of sight from the camera. */
-    private fun hiddenBehindBody(kind: Int, i: Int): Boolean {
-        val eye = sceneFrame.camera.pos
-        val p = when (kind) {
-            LOCK_STATION -> system.stations[i].pos
-            LOCK_BODY -> system.bodies[i].pos
-            else -> return false
-        }
-        val dx = p.x - eye.x
-        val dy = p.y - eye.y
-        val dz = p.z - eye.z
-        val len = sqrt(dx * dx + dy * dy + dz * dz)
-        if (len < 1.0) return false
-        for (j in system.bodies.indices) {
-            if (kind == LOCK_BODY && j == i) continue
-            val b = system.bodies[j]
-            val cx = b.pos.x - eye.x
-            val cy = b.pos.y - eye.y
-            val cz = b.pos.z - eye.z
-            val t = (cx * dx + cy * dy + cz * dz) / len
-            if (t <= 0.0 || t >= len) continue
-            val c2 = cx * cx + cy * cy + cz * cz
-            if (c2 - t * t < b.radius * b.radius) return true
-        }
-        return false
-    }
-
-    /** True when [p] is close enough to the asteroid field to draw and collide with it. */
-    private fun nearField(p: com.starwake.core.math.DVec3): Boolean {
-        val o = system.fieldOrigin
-        val dx = p.x - o.x
-        val dy = p.y - o.y
-        val dz = p.z - o.z
-        return dx * dx + dy * dy + dz * dz < FIELD_RANGE * FIELD_RANGE
-    }
-
-    /** Station hulls are solid (coarse proxies, see StationCollision). */
-    private fun collideStation() {
-        val i = here.nearestStation
-        if (i < 0) return
-        val impact = stationCollision.collide(ship, system.stations[i])
-        if (impact > 2f && bumpCooldown <= 0f) {
-            bumpCooldown = 0.25f
-            haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
-            chase.addShake(clamp(impact / 50f, 0.2f, 1.2f))
-        }
-    }
-
-    /** Planet/star surfaces are solid. */
-    private fun collideBodies(dt: Float) {
-        val i = here.nearestBody
-        if (i < 0) return
-        val b = system.bodies[i]
-        if (here.altitude > maxOf(spec.reach, spec.groundClearance) * 2 + ship.speed * dt * 2) return
-        if (landing && landable(i)) {
-            // touchdown: slow, gear down and roughly level -> stand on the gear (RootToGround)
-            val dx = ship.pos.x - b.pos.x
-            val dy = ship.pos.y - b.pos.y
-            val dz = ship.pos.z - b.pos.z
-            val d = sqrt(dx * dx + dy * dy + dz * dz)
-            if (d - b.radius < spec.groundClearance + 0.5) {
-                upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-                val radial = ship.vel.dot(upV)
-                ship.rot.rotate(0f, 1f, 0f, tmp)
-                val level = tmp.dot(upV)
-                if (radial < 0.5f) {
-                    if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
-                        landed = true
-                        landedBody = i
-                        ship.vel.zero()
-                        ship.angVel.zero()
-                        touch.throttle = 0f
-                        // a thumb still on the throttle lever must not lift off by accident
-                        touch.releaseAll()
-                        controls.clearAxes()
-                        haptic(Haptics.BUMP)
-                        showMessage("TOUCHDOWN  ·  " + b.name)
-                        return
-                    }
-                    showMessage(
-                        when {
-                            gear < 1f -> "GEAR NOT DOWN"
-                            radial <= -TOUCHDOWN_SPEED -> "HARD LANDING"
-                            ship.speed >= TOUCHDOWN_MAX_SPEED -> "TOO FAST  ·  TOUCH DOWN BELOW 40 M/S"
-                            else -> "LEVEL OUT TO TOUCH DOWN"
-                        },
-                    )
-                }
-            }
-        }
-        val impact = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius)
-        if (impact > 2f && bumpCooldown <= 0f) {
-            bumpCooldown = 0.25f
-            haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
-            chase.addShake(clamp(impact / 50f, 0.2f, 1.2f))
-        }
     }
 
     /** Sun direction/visibility (eclipses) and the fill light bounced off the nearest planet. */
@@ -1893,40 +998,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val lit = 0.5f + 0.5f * -(f.fillDir.dot(f.sunDir))
         val k = size * lit * 1.4f
         f.fillColor[0] = 0.10f * k; f.fillColor[1] = 0.085f * k; f.fillColor[2] = 0.07f * k
-    }
-
-    /** Appends a speed value in m/s, km/s or Mm/s to [b]; returns the unit label. */
-    private fun formatSpeed(b: TextBuf, mps: Float): String = when {
-        mps < 1000f -> {
-            b.appendPadded(mps.toInt(), 3); "M/S"
-        }
-        mps < 1_000_000f -> {
-            b.append(mps / 1000f, 2); "KM/S"
-        }
-        else -> {
-            b.append(mps / 1_000_000f, 2); "MM/S"
-        }
-    }
-
-    /** Appends a distance in m, km or Mm to [b]; returns the unit label. */
-    private fun formatDistance(b: TextBuf, m: Float): String = when {
-        m < 1000f -> {
-            b.append(maxOf(m, 0f).toInt()); "M"
-        }
-        m < 1_000_000f -> {
-            b.append(m / 1000f, 2); "KM"
-        }
-        else -> {
-            b.append(m / 1_000_000f, 2); "MM"
-        }
-    }
-
-    /** Converts a ship-relative offset into camera-relative coordinates (in place). */
-    private fun relToCam(v: Vec3) {
-        val c = sceneFrame.camera.pos
-        v.x += (ship.pos.x - c.x).toFloat()
-        v.y += (ship.pos.y - c.y).toFloat()
-        v.z += (ship.pos.z - c.z).toFloat()
     }
 
     private fun updateFps(dt: Float) {
@@ -1968,72 +1039,57 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             return if (weak) 0 else if (mid) 1 else 2
         }
 
-        private const val STATE_MENU = 0
-        private const val STATE_FLIGHT = 1
-        private const val OVERLAY_NONE = 0
-        private const val OVERLAY_SETTINGS = 1
-        private const val OVERLAY_PAUSE = 2
-        private const val OVERLAY_MAP = 3
-        private const val OVERLAY_DOCKED = 4
-        private const val ACTION_NONE = 0
-        private const val ACTION_LAUNCH = 1
-        private const val ACTION_MENU = 2
-        private const val MAX_STEP = 1f / 120f
-        private const val ORBIT_PX_PER_RAD = 260f
-        private const val LOCK_RANGE = 8000f
-        private const val LOCK_CONE_COS = 0.951f // 18°
-        private const val LOCK_CONE_SIN = 0.30920f // sqrt(1 - LOCK_CONE_COS²)
-        private const val AIM_CONE_COS = 0.9986f // 3°
-        private const val AIM_CONE_SIN = 0.052896f
-        private const val LOCK_NONE = 0
-        private const val LOCK_ASTEROID = 1
-        private const val LOCK_STATION = 2
-        private const val LOCK_BODY = 3
-        private const val FIELD_RANGE = 60_000.0
-        private const val DUST_VISUAL_SPEED = 400f
-        private const val LANDING_SPEED = 200f
-        private const val TOUCHDOWN_SPEED = 8f
-        private const val TOUCHDOWN_MAX_SPEED = 40f
-        /** cos of the largest tilt from level that still touches down (~37°). */
-        private const val TOUCHDOWN_LEVEL = 0.8f
-        private const val LIFT_TIME = 1.2f
-        /** Vertical thruster authority in landing mode: 0.1 x 70 m/s = a 7 m/s descent, under the touchdown limit. */
-        private const val LANDING_VERTICAL = 0.1f
-
-        /** Roblox's camera FieldOfView (ShipConfig.Camera, vertical degrees): the external offsets are made for it. */
-        private const val ROBLOX_FOV = 80f
-
-        /** Vertical FOV of the chase views at rest (they widen with speed and boost). */
-        private const val CHASE_FOV = 52f
-
         /**
-         * Cockpit FOV: Roblox's, so the 3D cockpit is framed as built (dashboard and screens in
-         * view). Nothing of the cockpit comes closer than 0.69 m to the eye (Roblox scale: the pilot
-         * is 5 studs tall), so the camera's 0.5 m near plane holds here too.
+         * The debug command "near <body> [alt]" (01 9.6) as (body index, altitude m), or null for an
+         * unknown body. The body is a name (a '-' stands for a space: "PLANET-II") or an index; a
+         * number counts as the altitude only after the body, so "near 3" is body 3 at
+         * [NEAR_ALTITUDE]. Debug path, allocates.
          */
-        private const val COCKPIT_FOV = 80f
+        internal fun nearTarget(words: List<String>, system: StarSystem): Pair<Int, Double>? {
+            val alt = if (words.size > 2) words.last().toDoubleOrNull() else null
+            val key = words.subList(minOf(1, words.size), if (alt != null) words.size - 1 else words.size).joinToString(" ")
+            val i = key.toIntOrNull() ?: system.bodies.indexOfFirst { it.name.equals(key.replace('-', ' '), ignoreCase = true) }
+            return if (i in system.bodies.indices) i to (alt ?: NEAR_ALTITUDE) else null
+        }
+
+        /** Altitude of "near <body>" without one, m. */
+        const val NEAR_ALTITUDE = 20_000.0
+
+        /** Sine-in ease of a 0..1 progress (Roblox EasingStyle.Sine, In). */
+        private fun sineIn(t: Float): Float = 1f - cos(HALF_PI * t.coerceIn(0f, 1f))
+
+        private const val HALF_PI = 1.5707964f
+
+        // app phases (01 4.1, port version)
+        private const val PHASE_MENU = 0
+        private const val PHASE_FADE_OUT = 1
+        private const val PHASE_LOADING = 2
+        private const val PHASE_REVEAL = 3
+        private const val PHASE_WORLD = 4
+        private const val PHASE_QUITTING = 5
+        private val PHASE_NAMES = arrayOf("MENU", "FADE_OUT", "LOADING", "REVEAL", "WORLD", "QUITTING")
+
+        /** The menu fades in over 1.4 s, sine out (ShipMenu, `07` 4.2). */
+        const val MENU_FADE_IN = 1.4f
+
+        /** LAUNCH fades to black over 0.9 s, sine in; the world starts loading after 1 s (`07` 4.2). */
+        const val LAUNCH_FADE = 0.9f
+        const val LAUNCH_DELAY = 1.0f
+
+        /** Frames from the build frame to the reveal: the build frame and two more render under the curtain. */
+        const val REVEAL_AFTER_FRAMES = 3L
+
+        /** The curtain lifts over 0.6 s, sine out (ShipMenu REVEAL_DEFAULT). */
+        const val REVEAL_TIME = 0.6f
+
+        /** Safety net: the curtain opens by itself this long after LOADING began (REVEAL_TIMEOUT). */
+        const val REVEAL_TIMEOUT = 12f
+
+        /** "PREPARING YOUR SHIP ..." shows when LOADING lasts longer than this (01 5.1). */
+        const val LOADING_CAPTION_AFTER = 0.8f
+        private const val ORBIT_PX_PER_RAD = 260f
 
         /** Menu orbit distance relative to the hull's bounding radius. */
         private const val MENU_ORBIT = 3.6f
-
-        /** Longest exhaust plume (m) beyond the hull, for the near depth slice. */
-        private const val PLUME_REACH = 40f
-        private const val DOCK_STANDOFF = 300.0
-        private const val DOCK_APPROACH_SPEED = 180f
-
-        /** Auto-dock gives up after the router has been boxed in this long (s). */
-        private const val DOCK_BOXED_GRACE = 0.5f
-
-        /** No station proximity warning for this long (s) after a launch from a slot. */
-        private const val LAUNCH_GRACE = 1.5f
-
-        /** A launch puts the tail this far (m) off the slot entrance. */
-        private const val LAUNCH_CLEAR = 30.0
-
-        /** A parked hull's nose stays this far (m) off the slot's back wall. */
-        private const val PARK_NOSE_GAP = 5f
-
-        /** Most target labels the flight HUD places per frame. */
-        private const val MAX_LABELS = 32
     }
 }

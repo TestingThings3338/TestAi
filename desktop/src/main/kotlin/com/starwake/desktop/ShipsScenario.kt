@@ -16,7 +16,7 @@ import org.lwjgl.opengles.GLES20
 /**
  * The eight Roblox ships through the real SceneRenderer: each from a 3/4 front and a side view under
  * the same light, far from the field and the stations, from the pilot's seat, and standing on its
- * gear; the VARROW's gear half-way and stowed; then the real Game: chase, far chase and cockpit
+ * gear; the VARROW's gear half-way and stowed; then the real Game: the cockpit, external and chase
  * views in flight, gear down in flight, the menu backdrop for every ship (cycled with "ship"), and
  * every hull docking in both stand-in stations' slots. [holograms] shows the holograms aboard.
  */
@@ -259,31 +259,34 @@ object ShipsScenario {
             d.start()
             d.frames(90)
             d.shot("ships-menu-varrow")
-            d.cmd("launch")
+            d.cmd("launch space")
             d.frames(60)
             Scenarios.run { d.throttleUp(0.35f, 30) }
             d.frames(60)
             d.log(game.debugInfo)
-            d.shot("ships-chase")
-            d.cmd("camera")
-            d.frames(40)
-            d.shot("ships-far-chase")
-            d.cmd("camera")
-            d.frames(40)
+            // the Roblox views: cockpit (default) and the ship's external camera; the chase view on request
             d.shot("ships-cockpit")
+            d.cmd("view external")
+            d.frames(40)
+            d.shot("ships-external")
+            d.cmd("view chase")
+            d.frames(40)
+            d.shot("ships-chase")
+            d.cmd("view cockpit")
+            d.frames(10)
             // steer a little: the cockpit and the world around it
             val right = d.pointer(1).down(0.75f * d.w, 0.65f * d.h)
             right.dragTo(0.75f * d.w - 40f, 0.65f * d.h - 30f, 20)
             d.frames(30)
             d.shot("ships-cockpit-turn")
             right.up()
-            d.cmd("camera")
+            d.cmd("view external")
             d.frames(20)
             d.cmd("gear-down")
             d.frames(170)
             d.log(game.debugInfo)
             check(Regex("gear=1.00").containsMatchIn(game.debugInfo)) { "gear not down after 2.8 s: ${game.debugInfo}" }
-            d.shot("ships-gear-down-chase")
+            d.shot("ships-gear-down-external")
             d.cmd("gear-up")
             d.frames(170)
             d.log(game.debugInfo)
@@ -309,7 +312,7 @@ object ShipsScenario {
                 d.frames(5)
                 d.cmd("ship=$id")
                 d.frames(5)
-                d.cmd("launch")
+                d.cmd("launch space")
                 d.frames(30)
             }
 

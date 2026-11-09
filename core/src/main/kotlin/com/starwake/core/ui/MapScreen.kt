@@ -1,6 +1,7 @@
 package com.starwake.core.ui
 
 import com.starwake.core.gfx.FontData
+import com.starwake.core.hud.Units
 import com.starwake.core.gfx.UiRenderer
 import com.starwake.core.game.StarSystem
 import com.starwake.core.math.DVec3
@@ -33,7 +34,7 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
     private val tabGalaxy = group.add(Button("GALAXY") { tab = TAB_GALAXY })
     private val close = group.add(Button("CLOSE") { host.closeMap() })
     private val lock = group.add(Button("LOCK TARGET", primary = true) {
-        if (selKind != 0) {
+        if (selKind == 3) {
             host.lockFromMap(selKind, selIndex)
             host.closeMap()
         }
@@ -245,7 +246,8 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
     // ------------------------------------------------------------------ drawing
 
     fun draw(ui: UiRenderer, a: Float, ship: DVec3, shipRot: Quat, time: Float) {
-        lock.visible = tab == TAB_SYSTEM && selKind != 0
+        // stations are selectable for their card but not lockable from the map (Roblox, DECISIONS 21)
+        lock.visible = tab == TAB_SYSTEM && selKind == 3
         ui.rect(0f, 0f, w, h, withAlpha(MAP_BG, a))
         if (tab == TAB_SYSTEM) drawSystem(ui, a, ship, shipRot, time) else drawGalaxy(ui, a, time)
         // tab highlight
@@ -269,7 +271,7 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         ui.rect(bx, by - 5f * u, 1.5f * u, 12f * u, withAlpha(Theme.TEXT_DIM, a))
         ui.rect(bx + barPx - 1.5f * u, by - 5f * u, 1.5f * u, 12f * u, withAlpha(Theme.TEXT_DIM, a))
         buf.clear()
-        val unit = distanceText(buf, barM)
+        val unit = Units.distanceParts(buf, barM)
         val tw = ui.text(buf, bx, by - 10f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), face = FontData.MONO)
         val uw = ui.text(unit, bx + tw + 4f * u, by - 10f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a))
         lb.add(bx, by - 22f * u, bx + max(barPx, tw + 4f * u + uw), by + 7f * u)
@@ -407,7 +409,7 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         val dz = pos.z - ship.z
         val d = max(0.0, sqrt(dx * dx + dy * dy + dz * dz) - radius)
         buf.clear()
-        val unit = distanceText(buf, d)
+        val unit = Units.distanceParts(buf, d)
         ui.text("DISTANCE", x + 14f * u, y + 68f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.15f)
         val tw = ui.text(buf, x + 14f * u, y + 84f * u, 13f * u, withAlpha(Theme.TEXT, a), face = FontData.MONO)
         ui.text(unit, x + 18f * u + tw, y + 84f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a))
@@ -489,19 +491,6 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
                 f >= 5 -> 5.0
                 f >= 2 -> 2.0
                 else -> 1.0
-            }
-        }
-
-        /** Appends a distance number to [b] and returns its unit (M, KM, MM). */
-        fun distanceText(b: TextBuf, m: Double): String = when {
-            m < 1000.0 -> {
-                b.append(m.toInt()); "M"
-            }
-            m < 1.0e6 -> {
-                b.append((m / 1000.0).toFloat(), if (m < 1.0e4) 2 else 1); "KM"
-            }
-            else -> {
-                b.append((m / 1.0e6).toFloat(), if (m < 1.0e7) 2 else 0); "MM"
             }
         }
     }

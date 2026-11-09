@@ -112,7 +112,7 @@ object Perf {
      * rudder), right thumb circles the stick. Every frame both pointers send a MOVE.
      */
     fun drive(d: GameDriver, frames: Int, meter: PerfMeter) {
-        d.cmd("launch")
+        d.cmd("launch space")
         d.frames(30)
         val left = d.pointer(0)
         val right = d.pointer(1)

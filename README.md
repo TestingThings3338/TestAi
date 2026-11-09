@@ -1,6 +1,6 @@
 # Untitled Space Exploration (Android)
 
-A native Android version of **Untitled Space Exploration**, a game by AFloidDEV originally built on Roblox. It is single-player for now. The goal is a 1:1 port of the Roblox game: its ships, cockpits, flight feel, HUD and look. It is built to run smoothly at 120 Hz on phones such as the Xiaomi 15.
+A native Android version of **Untitled Space Exploration**, a game by AFloidDEV originally built on Roblox. It is single-player for now. The goal is a 1:1 port of the Roblox game: its ships, cockpits, flight feel, HUD and look. It runs at 60 fps by default, and smoothly up to 120 Hz (Settings) on phones such as the Xiaomi 15.
 
 **Status:** port milestone 1. It has the engine, the main menu, the flight model and touch controls, in an asteroid field next to a ringed gas giant.
 
@@ -18,15 +18,20 @@ Every push builds a signed release APK on GitHub Actions and publishes it as the
 
 The game is played in landscape with two thumbs.
 
+A flight starts **docked at the home station**: tap **LAUNCH** on the station screen to fly out. The default view is the **cockpit**.
+
 | Control | Action |
 |---|---|
 | **Left thumb** (left side of the screen) | Throttle lever. Slide up or down to set your speed; the throttle stays where you leave it. The bottom part of the lever is reverse. Slide sideways for **yaw**. Double-tap to stop. |
-| **Right thumb** (right side of the screen) | Floating flight stick. Up/down **pitches**, sideways **rolls** (you can switch sideways to yaw in Settings). An arrow from the screen centre shows the turn direction. |
-| **▲ / ▼** | Vertical thrusters (up/down). |
+| **Right thumb** (right side of the screen) | Floating flight stick. Up/down **pitches**, sideways **rolls** (you can switch sideways to yaw in Settings). It springs back to centre when you let go. An arrow from the screen centre shows the turn direction. |
+| **▲ ▼ ◀ ▶** | Thrusters: up, down, left, right. |
+| **Top strip** | Drag a finger along the top of the screen to look around (up to 140° to each side, 80° up, 70° down). Let go and the view swings back. |
 | **BOOST** | A short burst up to 400 m/s. It uses one capacitor charge (the pips), which recharge over time. |
 | **FA** | Flight Assist. **On:** the ship flies where it points. **Off:** Newtonian drift. |
-| **LOCK** | Locks the target nearest your nose. Amber brackets mark it and show its distance. Tap again to release. |
-| **VIEW** | Cycles chase, far chase and cockpit views. |
+| **LOCK** | Tap: locks the target nearest your nose, or the next one farther away when something is locked. Amber brackets mark it and show its distance. Hold for half a second: release the lock. |
+| **MAP** | System map. The ship keeps flying while it is open. |
+| **VIEW** | Cockpit and external view (behind and above the ship). The old chase camera can be added in Settings. |
+| **LAND / DOCK** | Appears near a planet or a station: landing mode, auto-dock, take-off, cancel. |
 | **II** / Back | Pause. |
 
 **Gamepads (Bluetooth controllers) are supported:**
@@ -35,19 +40,25 @@ The game is played in landscape with two thumbs.
 |---|---|
 | Left stick | Pitch and roll |
 | Right stick | Yaw (sideways) and vertical thrust (up/down) |
+| L3 (left stick click) held + right stick | Look around |
+| R3 (right stick click) held | Full stop |
 | RT / LT | Throttle up / down. The throttle stops at zero when it crosses it. |
 | LB / RB | Strafe left / right |
-| A | Boost |
+| A | Boost (on the station screen: launch) |
 | X | Flight Assist |
 | Y | View |
-| D-pad up | Lock |
+| D-pad up | Next target; hold to release the lock |
+| D-pad down | Land / dock / take off (the action shown on screen) |
+| Select | Map |
 | Start | Pause |
 | B | Back |
 
 **Settings:**
 
 - Graphics quality. On first launch it is picked automatically from the phone's GPU.
-- Frame-rate limit: max / 60 / 30.
+- Frame-rate limit: max / 60 / 30 (60 by default).
+- Field of view (60–100°, 80 by default) and camera shake.
+- Chase view: adds the old lagging chase camera as a third VIEW step.
 - FPS counter.
 - Stick axis mapping and pitch direction.
 - Stick sensitivity.
@@ -67,7 +78,7 @@ The game is played in landscape with two thumbs.
   - The depth buffer is cleared once per frame (the sky and the near scene use separate depth ranges instead of a second clear) and is discarded instead of being written back to memory.
 - **Frame pacing.**
   - Each frame is triggered by the display's refresh signal (vsync), so motion stays smooth at 60, 90 or 120 Hz.
-  - The game asks Android for the highest refresh-rate display mode and reports frame work to Android's performance-hint system.
+  - With the MAX frame-rate setting the game asks Android for the highest refresh-rate display mode; it reports frame work to Android's performance-hint system.
   - Menus and the pause screen drop to 60 fps, and the screen is only kept awake while you are flying.
 - **No garbage-collection stutter.** The per-frame code makes no memory allocations.
 - **Big coordinates without jitter.** World positions are stored with high precision and drawn relative to the camera.

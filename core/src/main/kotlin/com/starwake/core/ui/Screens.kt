@@ -125,6 +125,8 @@ class SettingsScreen(private val game: GameActions) {
     private val graphics = arrayListOf<Widget>()
     private val controls = arrayListOf<Widget>()
     private val back: Button
+    private var infoX = 0f
+    private var infoY = 0f
 
     init {
         graphics += group.add(Selector("QUALITY", arrayOf("LOW", "MEDIUM", "HIGH"), { s.quality }, {
@@ -132,6 +134,17 @@ class SettingsScreen(private val game: GameActions) {
         }))
         graphics += group.add(Selector("FRAME RATE", arrayOf("MAX", "60 FPS", "30 FPS"), { s.fpsMode }, {
             s.fpsMode = it; game.settingsChanged(display = true, renderer = false)
+        }))
+        // Roblox FIELD OF VIEW 60–100° (vertical) and CAMERA SHAKE 0–100 %
+        graphics += group.add(Slider("FIELD OF VIEW", Settings.FOV_MIN, Settings.FOV_MAX, { s.fovDeg }, {
+            s.fovDeg = it; game.settingsChanged(false, false)
+        }, step = 1f, format = Slider.FORMAT_DEGREES))
+        graphics += group.add(Slider("CAMERA SHAKE", 0f, 1f, { s.cameraShake }, {
+            s.cameraShake = it; game.settingsChanged(false, false)
+        }, step = 0.05f, format = Slider.FORMAT_PERCENT))
+        // the lagging chase camera of the pre-port game as a third VIEW step (DECISIONS 21a)
+        graphics += group.add(Selector("CHASE VIEW", arrayOf("OFF", "ON"), { if (s.chaseView) 1 else 0 }, {
+            s.chaseView = it == 1; game.settingsChanged(false, false)
         }))
         graphics += group.add(Selector("SHOW FPS", arrayOf("OFF", "ON"), { if (s.showFps) 1 else 0 }, {
             s.showFps = it == 1; game.settingsChanged(false, false)
@@ -157,15 +170,20 @@ class SettingsScreen(private val game: GameActions) {
     fun layout(f: Frame) {
         val u = f.u
         val pw = min(f.w - f.sl - f.sr - 32f * u, 720f * u)
-        val ph = min(f.h - f.st - f.sb - 24f * u, 340f * u)
+        val ph = min(f.h - f.st - f.sb - 24f * u, 360f * u)
         panel.set(f.sl + (f.w - f.sl - f.sr - pw) * 0.5f, f.st + (f.h - f.st - f.sb - ph) * 0.5f, pw, ph)
         val pad = 22f * u
         val colW = (pw - pad * 3f) * 0.5f
-        val top = panel.y + 74f * u
-        val rowH = 40f * u
+        val top = panel.y + 72f * u
+        val doneY = panel.y + ph - pad - 42f * u
+        // six rows above DONE: 40 u each where there is room, never below 32 u (touch targets)
+        val rows = maxOf(graphics.size, controls.size)
+        val rowH = maxOf(32f * u, minOf(40f * u, (doneY - 10f * u - top) / rows))
         for ((i, wdg) in graphics.withIndex()) wdg.r.set(panel.x + pad, top + i * rowH, colW, rowH)
         for ((i, wdg) in controls.withIndex()) wdg.r.set(panel.x + pad * 2f + colW, top + i * rowH, colW, rowH)
-        back.r.set(panel.x + pad, panel.y + ph - pad - 42f * u, 150f * u, 42f * u)
+        back.r.set(panel.x + pad, doneY, 150f * u, 42f * u)
+        infoX = panel.x + pad + 150f * u + 18f * u
+        infoY = doneY + 17f * u
         group.slop = 2f * u
     }
 
@@ -179,12 +197,11 @@ class SettingsScreen(private val game: GameActions) {
         ui.text("SETTINGS", p.x + 22f * u, p.y + 36f * u, 20f * u, withAlpha(Theme.TEXT, a), tracking = 0.2f, face = FontData.TITLE)
         val pad = 22f * u
         val colW = (p.w - pad * 3f) * 0.5f
-        ui.text("GRAPHICS", p.x + pad, p.y + 62f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
-        ui.text("CONTROLS", p.x + pad * 2f + colW, p.y + 62f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
+        ui.text("GRAPHICS & VIEW", p.x + pad, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
+        ui.text("CONTROLS", p.x + pad * 2f + colW, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
         group.draw(ui, u, a)
-        val infoY = p.y + 74f * u + 3 * 40f * u + 22f * u
-        ui.text(game.deviceInfo, p.x + pad, infoY, 9.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.05f)
-        ui.text("QUALITY sets resolution, stars, dust and asteroid count.", p.x + pad, infoY + 16f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
+        ui.text(game.deviceInfo, infoX, infoY, 9.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.05f)
+        ui.text("QUALITY sets resolution, stars, dust and asteroid count.", infoX, infoY + 15f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
     }
 }
 

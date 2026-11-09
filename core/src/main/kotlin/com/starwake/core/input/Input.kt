@@ -138,6 +138,12 @@ class GamepadState {
         const val DPAD_DOWN = 9
         const val DPAD_LEFT = 10
         const val DPAD_RIGHT = 11
-        const val BUTTONS = 12
+
+        /** Left stick click: the look modifier (01 8.2). */
+        const val L3 = 12
+
+        /** Right stick click: full stop while held (01 8.2). */
+        const val R3 = 13
+        const val BUTTONS = 14
     }
 }

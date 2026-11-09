@@ -17,8 +17,9 @@ import kotlin.math.sqrt
  *   [GamepadState] stick values to be already dead-zoned and applies none of its own.
  * - Triggers: max(LTRIGGER, BRAKE) / max(RTRIGGER, GAS), merged with digital L2/R2 keys.
  * - HAT_X/HAT_Y and DPAD keys -> DPAD buttons.
- * - Face/shoulder/start/select keys -> buttons. KEYCODE_BACK / KEYCODE_MENU coming *from a
- *   controller* map to B / START, so a controller's B never acts as the system back.
+ * - Face/shoulder/start/select keys and the stick clicks (L3, R3) -> buttons. KEYCODE_BACK /
+ *   KEYCODE_MENU coming *from a controller* map to B / START, so a controller's B never acts as
+ *   the system back.
  * All other controller buttons are consumed so Android does not synthesise fallback keys
  * (BUTTON_B -> BACK, BUTTON_A -> DPAD_CENTER, ...) for them.
  */
@@ -106,7 +107,7 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
                     if (!down) pad.buttonUp(button) else if (e.repeatCount == 0) pad.buttonDown(button)
                     return true
                 }
-                // Swallow the remaining controller buttons (thumb clicks, C/Z, 1..16) to suppress
+                // Swallow the remaining controller buttons (C/Z, 1..16) to suppress
                 // fallback keys. BUTTON_MODE (guide/home) is left to the system.
                 return KeyEvent.isGamepadButton(code) && code != KeyEvent.KEYCODE_BUTTON_MODE
             }
@@ -212,6 +213,9 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
             KeyEvent.KEYCODE_BUTTON_R1 -> GamepadState.RB
             KeyEvent.KEYCODE_BUTTON_START -> GamepadState.START
             KeyEvent.KEYCODE_BUTTON_SELECT -> GamepadState.SELECT
+            // stick clicks: L3 = look modifier, R3 = full stop (01-core-loop.md 8.2)
+            KeyEvent.KEYCODE_BUTTON_THUMBL -> GamepadState.L3
+            KeyEvent.KEYCODE_BUTTON_THUMBR -> GamepadState.R3
             KeyEvent.KEYCODE_DPAD_UP -> GamepadState.DPAD_UP
             KeyEvent.KEYCODE_DPAD_DOWN -> GamepadState.DPAD_DOWN
             KeyEvent.KEYCODE_DPAD_LEFT -> GamepadState.DPAD_LEFT
