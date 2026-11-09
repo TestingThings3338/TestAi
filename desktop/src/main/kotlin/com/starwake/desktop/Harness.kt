@@ -146,6 +146,9 @@ class GameDriver(
     var observer: FrameObserver? = null
     private var lastState: String? = null
 
+    /** Warn when a stick/lever touch lands on a control (switch off for touches meant for a control). */
+    var warnOnButtons = true
+
     /** UI unit (px per layout dp) exactly as Game.onSurfaceChanged derives it; keep the two in sync. */
     private val unit = run {
         val d = if (dp > 0f) dp else 1f
@@ -154,8 +157,8 @@ class GameDriver(
 
     /**
      * The in-flight touch layout, computed by core's own [TouchFlightControls] with the game's
-     * settings and this surface, so scripted touches can be checked against the button rects
-     * (VIEW, LOCK, pause, up/down thrusters, BOOST, FA) instead of trusting hard-coded fractions.
+     * settings and this surface, so scripted touches can be checked against the control rects
+     * (top bar, strafe cross, BOOST, FA, look strip) instead of trusting hard-coded fractions.
      */
     val touchLayout = TouchFlightControls(
         game.settings,
@@ -164,22 +167,42 @@ class GameDriver(
         },
     ).also { it.layout(w, h, unit, insets[0], insets[1], insets[2], insets[3]) }
 
-    /** Name of the flight button under (x, y), including the controls' touch slop, or null. */
+    /** Name of the flight control under (x, y), including the controls' touch slop, or null. */
     fun flightButtonAt(x: Float, y: Float): String? {
         val c = touchLayout
         val slop = 8f * unit
         fun Rect.hit() = contains(x, y, slop)
+        fun Rect.hitCircle(s: Float): Boolean {
+            val dx = x - cx
+            val dy = y - cy
+            val r = w * 0.5f + s
+            return dx * dx + dy * dy <= r * r
+        }
         return when {
             c.pauseBtn.hit() -> "pause"
             c.camBtn.hit() -> "VIEW"
             c.lockBtn.hit() -> "LOCK"
-            c.upBtn.hit() -> "thrust up"
-            c.downBtn.hit() -> "thrust down"
-            c.boostBtn.hit() -> "BOOST"
-            c.faBtn.hit() -> "FA"
+            c.mapBtn.hit() -> "MAP"
+            c.upBtn.hitCircle(slop * 0.5f) -> "thrust up"
+            c.downBtn.hitCircle(slop * 0.5f) -> "thrust down"
+            c.leftBtn.hitCircle(slop * 0.5f) -> "thrust left"
+            c.rightBtn.hitCircle(slop * 0.5f) -> "thrust right"
+            c.boostBtn.hitCircle(slop) -> "BOOST"
+            c.faBtn.hitCircle(slop) -> "FA"
+            c.lookStrip.contains(x, y, 0f) -> "look strip"
             else -> null
         }
     }
+
+    /** A field of [Game.debugInfo] ("name=value"), or null. */
+    fun field(name: String): String? = Regex("(?:^| )$name=([^ ]+)").find(game.debugInfo)?.groupValues?.get(1)
+
+    /** A numeric field of [Game.debugInfo]; fails when it is missing. */
+    fun num(name: String): Double = field(name)?.toDouble() ?: throw IllegalStateException("no $name in ${game.debugInfo}")
+
+    /** A vector field "x,y,z" of [Game.debugInfo]. */
+    fun vec(name: String): DoubleArray = (field(name) ?: throw IllegalStateException("no $name in ${game.debugInfo}"))
+        .split(',').map { it.toDouble() }.toDoubleArray()
 
     fun start() {
         game.onSurfaceCreated(gl)
@@ -226,10 +249,12 @@ class GameDriver(
         game.requestBack()
     }
 
-    fun shot(name: String) {
-        val s = session ?: return
+    /** Saves a screenshot and returns its content statistics (null without a GL session). */
+    fun shot(name: String): ImageStats? {
+        val s = session ?: return null
         log("screenshot $name (state ${game.stateName})")
         s.screenshot(name, if (insets[0] > 0f) insets[0] else 0f)
+        return report.shots.last().second
     }
 
     fun pointer(id: Int) = Pointer(id)
@@ -247,9 +272,9 @@ class GameDriver(
             private set
 
         fun down(x: Float, y: Float): Pointer {
-            if (game.stateName == "flight") {
+            if (game.stateName == "flight" && warnOnButtons) {
                 flightButtonAt(x, y)?.let {
-                    report.note("WARNING: pointer $id down at (%.0f, %.0f) lands on the $it button; the script meant a stick/throttle touch".format(x, y))
+                    report.note("WARNING: pointer $id down at (%.0f, %.0f) lands on the $it control; the script meant a stick/throttle touch".format(x, y))
                 }
             }
             this.x = x; this.y = y; isDown = true

@@ -40,6 +40,18 @@ class TextBuf(capacity: Int = 64) : CharSequence {
         len = 0; return this
     }
 
+    /** Replaces the character at [index] (< [length]). */
+    fun set(index: Int, c: Char) {
+        if (index in 0 until len) chars[index] = c
+    }
+
+    /** True when the text equals [s] (no allocation, unlike toString()). */
+    fun contentEquals(s: CharSequence): Boolean {
+        if (s.length != len) return false
+        for (i in 0 until len) if (chars[i] != s[i]) return false
+        return true
+    }
+
     fun append(s: CharSequence): TextBuf {
         for (i in 0 until s.length) if (len < chars.size) chars[len++] = s[i]
         return this
@@ -50,15 +62,20 @@ class TextBuf(capacity: Int = 64) : CharSequence {
         return this
     }
 
-    fun append(v: Int): TextBuf {
+    fun append(v: Int): TextBuf = append(v.toLong())
+
+    fun append(v: Long): TextBuf {
         var n = v
         if (n < 0) {
-            append('-'); n = -n
+            append('-')
+            // Long.MIN_VALUE has no positive counterpart: print its digits from the negative side
+            if (n == Long.MIN_VALUE) return append("9223372036854775808")
+            n = -n
         }
-        if (n == 0) return append('0')
+        if (n == 0L) return append('0')
         val start = len
         while (n > 0 && len < chars.size) {
-            chars[len++] = '0' + (n % 10)
+            chars[len++] = '0' + (n % 10).toInt()
             n /= 10
         }
         // reverse the digits
@@ -67,6 +84,32 @@ class TextBuf(capacity: Int = 64) : CharSequence {
         while (i < j) {
             val t = chars[i]; chars[i] = chars[j]; chars[j] = t
             i++; j--
+        }
+        return this
+    }
+
+    /**
+     * Fixed-point formatting of a double with [decimals] digits, rounded half up in double precision
+     * (`floor(v·10^d + 0.5)`), like Lua's `%.Nf` for every value that is not an exact binary tie.
+     * Computing in Float instead would print 6.845 km as "6.84" vs "6.85" at random (6.8449998).
+     */
+    fun append(v: Double, decimals: Int): TextBuf {
+        var x = v
+        if (x < 0.0) {
+            append('-'); x = -x
+        }
+        var mul = 1L
+        repeat(decimals) { mul *= 10 }
+        val scaled = kotlin.math.floor(x * mul + 0.5).toLong()
+        append(scaled / mul)
+        if (decimals > 0) {
+            append('.')
+            val frac = scaled % mul
+            var div = mul / 10
+            while (div > 0) {
+                append('0' + ((frac / div) % 10).toInt())
+                div /= 10
+            }
         }
         return this
     }
@@ -284,13 +327,19 @@ fun interface FloatSink {
     fun set(v: Float)
 }
 
-/** Horizontal slider row. Only presses on the track move it (not the label or value text). */
+/**
+ * Horizontal slider row. Only presses on the track move it (not the label or value text). Values
+ * snap to [step] from [min] with a haptic tick per step; the value prints as [format]
+ * ([FORMAT_TIMES] "1.25×", [FORMAT_DEGREES] "80°", [FORMAT_PERCENT] "35 %", as the Roblox menu).
+ */
 class Slider(
     private val label: String,
     private val min: Float,
     private val max: Float,
     private val get: FloatSource,
     private val set: FloatSink,
+    private val step: Float = 0.05f,
+    private val format: Int = FORMAT_TIMES,
 ) : Widget() {
     private val buf = TextBuf(16)
     private var lastStep = -1
@@ -310,12 +359,12 @@ class Slider(
         if (!tracking) return
         val t = clamp01((x - trackX0()) / (trackX1() - trackX0()))
         val v = min + (max - min) * t
-        val step = (v * 20f).toInt()
-        // snap to 0.05 steps with a haptic tick per step
-        set.set(step / 20f)
-        if (step != lastStep) {
+        val n = ((v - min) / step + 0.5f).toInt()
+        // snap to the steps with a haptic tick per step
+        set.set(min + n * step)
+        if (n != lastStep) {
             if (lastStep >= 0) host.haptic(Haptics.TICK)
-            lastStep = step
+            lastStep = n
         }
     }
 
@@ -335,7 +384,23 @@ class Slider(
         ui.rect(x0, r.cy - 2f * u, x1 - x0, 4f * u, withAlpha(Theme.PANEL_LIGHT, alpha), 2f * u)
         ui.rect(x0, r.cy - 2f * u, (x1 - x0) * t, 4f * u, withAlpha(Theme.ACCENT, alpha), 2f * u)
         ui.circle(x0 + (x1 - x0) * t, r.cy, (if (pressed) 10f else 8f) * u, withAlpha(Theme.ACCENT, alpha))
-        buf.clear().append(value, 2).append('×')
+        buf.clear()
+        when (format) {
+            FORMAT_DEGREES -> buf.append((value + 0.5f).toInt()).append('°')
+            FORMAT_PERCENT -> buf.append((value * 100f + 0.5f).toInt()).append(" %")
+            else -> buf.append(value, 2).append('×')
+        }
         ui.textCentered(buf, r.x + r.w, r.cy, 12.5f * u, withAlpha(Theme.TEXT, alpha), UiRenderer.RIGHT)
+    }
+
+    companion object {
+        /** "1.25×" (Roblox multiplier format). */
+        const val FORMAT_TIMES = 0
+
+        /** "80°". */
+        const val FORMAT_DEGREES = 1
+
+        /** "35 %". */
+        const val FORMAT_PERCENT = 2
     }
 }

@@ -154,16 +154,16 @@ class AsteroidField(seed: Long, val maxCount: Int, val variants: Int) {
 }
 
 /**
- * Third-person chase camera with rotational lag (shows the ship banking into turns), and the
- * cockpit view from the pilot's eye.
+ * The lagging third-person chase camera: the optional third view (DECISIONS 21a; Roblox has only
+ * the cockpit and the rigid external view, see [ShipCamera]). Its rotation lags the ship's, so the
+ * hull banks into turns, and it backs off a little at speed.
  *
- * The chase views circle the ship's centre [centre] (ship space) at [chaseOffset] / [farOffset]
- * (ship space, relative to that centre), each with its own downward tilt; see [configure].
+ * It circles the ship's centre [centre] (ship space) at [chaseOffset] (ship space, relative to that
+ * centre) with a downward tilt; see [configure].
  */
 class ChaseCamera {
     val pos = DVec3()
     val rot = Quat()
-    var mode = 0 // 0 chase, 1 far chase, 2 cockpit
     var fovBoost = 0f
     private val offset = Vec3()
     private val shake = Vec3()
@@ -171,39 +171,26 @@ class ChaseCamera {
     private var shakeTime = 0f
     private var shakeAmount = 0f
     private val chaseTilt = Quat().setAxisAngle(1f, 0f, 0f, -0.06f)
-    private val farTilt = Quat().setAxisAngle(1f, 0f, 0f, -0.06f)
 
-    /** Pilot's eye (ship space). */
-    val eye = Vec3(0f, 1.05f, -2.6f)
-
-    /** Point the chase views look after (ship space). */
+    /** Point the chase view looks after (ship space). */
     val centre = Vec3()
     val chaseOffset = Vec3(0f, 4f, 16.5f)
-    val farOffset = Vec3(0f, 7f, 28f)
 
     /** Extra distance at top speed, as a share of the offset (the camera falls back as you speed up). */
     var speedPull = 3f / 16.5f
 
     /**
-     * Sets the views for a ship: eye, centre, chase and far offsets (ship space, from the centre)
-     * and their tilts (radians, negative = looking down).
+     * Sets the view for a ship: its centre and the chase offset (ship space, from the centre) and
+     * tilt (radians, negative = looking down).
      */
-    fun configure(eye: Vec3, centre: Vec3, chase: Vec3, chasePitch: Float, far: Vec3, farPitch: Float) {
-        this.eye.set(eye)
+    fun configure(centre: Vec3, chase: Vec3, chasePitch: Float) {
         this.centre.set(centre)
         chaseOffset.set(chase)
-        farOffset.set(far)
         chaseTilt.setAxisAngle(1f, 0f, 0f, chasePitch)
-        farTilt.setAxisAngle(1f, 0f, 0f, farPitch)
     }
 
-    /** Distance from the camera to the ship's centre in the current view (no speed pull). */
-    val viewDistance: Float
-        get() = when (mode) {
-            0 -> chaseOffset.length()
-            1 -> farOffset.length()
-            else -> eye.distance(centre)
-        }
+    /** Distance from the camera to the ship's centre (no speed pull). */
+    val viewDistance: Float get() = chaseOffset.length()
 
     fun snapTo(ship: ShipState) {
         rot.set(ship.rot)
@@ -216,19 +203,14 @@ class ChaseCamera {
 
     /** [speedFrac] 0..1 of max speed. */
     fun update(ship: ShipState, dt: Float, speedFrac: Float, maxSpeed: Float) {
-        if (mode == 2) {
-            rot.set(ship.rot)
-            ship.rot.rotate(eye, offset)
-        } else {
-            val k = if (dt <= 0f) 1f else expApproach(if (mode == 0) 7.5f else 5f, dt)
-            rot.slerp(rot, ship.rot, k)
-            val o = if (mode == 0) chaseOffset else farOffset
-            val pull = 1f + speedFrac * speedPull
-            rot.rotate(o.x * pull, o.y * pull, o.z * pull, offset)
-            // circle the ship's centre: lag swings the camera, not the hull through the frame
-            ship.rot.rotate(centre, centreWorld)
-            offset.add(centreWorld)
-        }
+        val k = if (dt <= 0f) 1f else expApproach(7.5f, dt)
+        rot.slerp(rot, ship.rot, k)
+        val o = chaseOffset
+        val pull = 1f + speedFrac * speedPull
+        rot.rotate(o.x * pull, o.y * pull, o.z * pull, offset)
+        // circle the ship's centre: lag swings the camera, not the hull through the frame
+        ship.rot.rotate(centre, centreWorld)
+        offset.add(centreWorld)
         shakeTime += dt
         shakeAmount *= kotlin.math.exp(-dt * 3.5f)
         val a = shakeAmount
@@ -240,12 +222,8 @@ class ChaseCamera {
         pos.set(ship.pos).add(offset).add(shake)
     }
 
-    /** Orientation actually used for rendering (adds the downward tilt in chase modes). */
-    fun renderRotation(out: Quat): Quat = when (mode) {
-        0 -> out.mul(rot, chaseTilt)
-        1 -> out.mul(rot, farTilt)
-        else -> out.set(rot)
-    }
+    /** Orientation actually used for rendering (adds the downward tilt). */
+    fun renderRotation(out: Quat): Quat = out.mul(rot, chaseTilt)
 }
 
 /** Slow cinematic orbit used behind the main menu; the player can drag to look around. */

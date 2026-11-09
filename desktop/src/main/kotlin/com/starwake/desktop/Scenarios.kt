@@ -29,6 +29,12 @@ fun gameScenario(
     }
 }
 
+/**
+ * The harness scenarios. A launch starts docked at the home station since the session port
+ * (D13: new pilots start docked); scripts that test free flight start with "launch space", the
+ * pre-port spawn in front of the home station at 30 % throttle. The default view is the cockpit
+ * (DECISIONS 21a); "view external" and "view chase" pick the others.
+ */
 object Scenarios {
     /** Left thumb on the throttle lever: drag up by [amount] of the screen height and let go. */
     fun GameDriver.throttleUp(amount: Float = 0.35f, frames: Int = 30) {
@@ -68,7 +74,7 @@ object Scenarios {
 
         "ships" to Scenario(
             "ships",
-            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: chase, far chase, cockpit, gear in flight, menu backdrop per ship; every hull docks at OUTPOST II and HOME STATION, the MORVEN flies the whole route into OUTPOST II",
+            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: cockpit, external, chase, gear in flight, menu backdrop per ship; every hull docks at OUTPOST II and HOME STATION, the MORVEN flies the whole route into OUTPOST II",
         ) { ShipsScenario.run(it) },
 
         "holograms" to Scenario(
@@ -95,17 +101,17 @@ object Scenarios {
             shot("menu-cutout")
         },
 
-        "settings" to gameScenario("settings", "Settings overlay over the menu") {
+        "settings" to gameScenario("settings", "Settings overlay over the menu (with FIELD OF VIEW, CAMERA SHAKE, CHASE VIEW)") {
             frames(10)
             cmd("settings")
             frames(30)
             shot("settings")
         },
 
-        "flight" to gameScenario("flight", "Launch, throttle up with the left thumb, steer with the right stick") {
-            cmd("launch")
+        "flight" to gameScenario("flight", "Free flight from the cockpit: throttle up with the left thumb, steer with the right stick") {
+            cmd("launch space")
             frames(60)
-            shot("flight-1") // just launched (the game starts flights at 30% throttle)
+            shot("flight-1") // just launched at 30 % throttle
 
             throttleUp(0.35f, 30) // left thumb: lever up by 0.35 h, released
             frames(30)
@@ -123,7 +129,7 @@ object Scenarios {
         },
 
         "system" to gameScenario("system", "Star system milestone: spawn, map, landing, docking") {
-            cmd("launch")
+            cmd("launch space")
             frames(90)
             shot("sys-spawn")
             cmd("map")
@@ -138,7 +144,7 @@ object Scenarios {
             shot("sys-landing")
             cmd("menu")
             frames(5)
-            cmd("launch")
+            cmd("launch space")
             frames(5)
             cmd("dock")
             frames(240)
@@ -150,8 +156,7 @@ object Scenarios {
 
         "gameplay" to gameScenario("gameplay", "Checks: land, touch down, take off; Back twice while docked; boost during auto-dock; off-screen lock arrow") {
             fun info() = game.debugInfo.also { log(it) }
-            fun field(name: String) = Regex("$name=([^ ]+)").find(game.debugInfo)!!.groupValues[1]
-            cmd("launch")
+            cmd("launch space")
             frames(30)
             // off-screen lock: OUTPOST II is far away and not in view at spawn -> edge arrow
             cmd("lock-outpost")
@@ -165,10 +170,12 @@ object Scenarios {
             frames(140) // gear legs + doors
             check(field("landing") == "true") { "landing mode not engaged: ${info()}" }
             val down = touchLayout.downBtn
+            warnOnButtons = false
             val p = pointer(3).down(down.cx, down.y + down.h * 0.5f)
             var n = 0
             while (field("landed") != "true" && n < 60 * 20) { frame(); n++ }
             p.up()
+            warnOnButtons = true
             info()
             check(field("landed") == "true") { "never touched down: ${info()}" }
             frames(30)
@@ -178,10 +185,10 @@ object Scenarios {
             frames(90)
             info()
             check(field("landed") == "false") { "re-landed right after take-off: ${info()}" }
-            check(field("alt").toFloat() > 20f) { "take-off did not climb: ${info()}" }
+            check(num("alt") > 20.0) { "take-off did not climb: ${info()}" }
             shot("gp-liftoff")
             // --- docked: Back twice (pause, then resume) must return to the docked screen
-            cmd("menu"); frames(5); cmd("launch"); frames(5)
+            cmd("menu"); frames(5); cmd("launch space"); frames(5)
             cmd("docked")
             frames(30)
             cmd("boost") // pressed during the slide-in: must not latch
@@ -200,8 +207,7 @@ object Scenarios {
 
         "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind HOME STATION routes round the hull; ramming the hull stops at it") {
             fun info() = game.debugInfo.also { log(it) }
-            fun field(name: String) = Regex("$name=([^ ]+)").find(game.debugInfo)!!.groupValues[1]
-            cmd("launch")
+            cmd("launch space")
             frames(30)
             // --- auto-dock from 1.5 km behind the station: the straight line goes through the hub
             cmd("behind-station")
@@ -212,7 +218,7 @@ object Scenarios {
             var n = 0
             while (game.stateName != "docked" && n < 60 * 120) {
                 frame(); n++
-                minHull = minOf(minHull, field("hull").toFloat())
+                minHull = minOf(minHull, num("hull").toFloat())
                 if (n == 300) shot("st-detour")
             }
             info()
@@ -220,7 +226,7 @@ object Scenarios {
             check(game.stateName == "docked") { "auto-dock from behind never docked: ${info()}" }
             check(minHull > 0f) { "auto-dock touched the hull (gap $minHull m)" }
             frames(30)
-            check(field("prox").toFloat() > 1e30f) { "slot wall latched into the proximity warning while docked: ${info()}" }
+            check(num("prox") > 1e30) { "slot wall latched into the proximity warning while docked: ${info()}" }
             shot("st-docked")
             // --- launch, pause at once for 3 s, resume: the launch grace must not run out under pause
             game.launchFromStation()
@@ -229,7 +235,7 @@ object Scenarios {
             frames(180)
             cmd("resume")
             var minProx = Float.MAX_VALUE
-            for (i in 0 until 60) { frame(); minProx = minOf(minProx, field("prox").toFloat()) }
+            for (i in 0 until 60) { frame(); minProx = minOf(minProx, num("prox").toFloat()) }
             info()
             check(minProx >= 60f) { "PROXIMITY flashed after a launch + pause (prox $minProx m)" }
             // --- ram the back of the hub at 120 m/s with the throttle held: must stop at the hull
@@ -238,7 +244,7 @@ object Scenarios {
             minHull = Float.MAX_VALUE
             for (i in 0 until 360) {
                 frame()
-                minHull = minOf(minHull, field("hull").toFloat())
+                minHull = minOf(minHull, num("hull").toFloat())
                 if (i == 200) shot("st-ram")
             }
             info()
@@ -248,7 +254,7 @@ object Scenarios {
         },
 
         "boost" to gameScenario("boost", "Flight with throttle up, then boost") {
-            cmd("launch")
+            cmd("launch space")
             frames(60)
             throttleUp(0.30f, 20)
             frames(30)
@@ -258,7 +264,7 @@ object Scenarios {
         },
 
         "pause" to gameScenario("pause", "Pause overlay over flight (dimmed HUD)") {
-            cmd("launch")
+            cmd("launch space")
             frames(30)
             throttleUp(0.25f, 15)
             frames(30)
@@ -267,24 +273,55 @@ object Scenarios {
             shot("pause")
         },
 
-        "cameras" to gameScenario("cameras", "The three flight cameras (chase, far chase, cockpit) while turning") {
-            cmd("launch")
+        "cameras" to gameScenario("cameras", "The flight views while turning: cockpit (default), external, and the optional chase") {
+            cmd("launch space")
             frames(30)
             throttleUp(0.30f, 20)
             val right = pointer(1).down(0.75f * w, 0.65f * h)
             right.dragTo(0.75f * w - 30f, 0.65f * h - 20f, 15)
             frames(30)
-            shot("camera-chase")
-            cmd("camera")
-            frames(30)
-            shot("camera-far")
-            cmd("camera")
-            frames(30)
+            check(field("view") == "COCKPIT") { "the cockpit is the default view: ${game.debugInfo}" }
             shot("camera-cockpit")
+            cmd("camera") // VIEW: cockpit -> external
+            frames(30)
+            check(field("view") == "EXTERNAL") { "VIEW goes to the external view: ${game.debugInfo}" }
+            shot("camera-external")
+            cmd("camera") // without the setting the chase view is skipped
+            frames(2)
+            check(field("view") == "COCKPIT") { "no chase view unless enabled: ${game.debugInfo}" }
+            cmd("view chase")
+            frames(30)
+            check(field("view") == "CHASE") { "the chase view when enabled: ${game.debugInfo}" }
+            shot("camera-chase")
             right.up()
-            cmd("camera")
+            cmd("view cockpit")
             frames(2)
         },
+
+        "frame-order" to Scenario(
+            "frame-order",
+            "The Roblox frame order: one traced frame in flight, under the map and docked equals the documented step list; the deck and destruction branches and the early return",
+        ) { SessionScenarios.frameOrder(it) },
+
+        "boot-reveal" to Scenario(
+            "boot-reveal",
+            "LAUNCH from the menu: fade, LOADING curtain black until two frames after the build, the 0.6 s sine-out reveal, the services at the reveal; curtain timeline and shots",
+        ) { SessionScenarios.bootReveal(it) },
+
+        "start-docked" to Scenario(
+            "start-docked",
+            "D13: a fresh start (real LAUNCH tap) parks the ship docked in HOME STATION's slot, services after the reveal; LAUNCH on the services flies out",
+        ) { SessionScenarios.startDocked(it) },
+
+        "camera-views" to Scenario(
+            "camera-views",
+            "Cockpit look-around (±140°, +80°, -70°, clamp), FOV 60/100, the Roblox external view of every ship, external look 180°, the chase view",
+        ) { SessionScenarios.cameraViews(it) },
+
+        "map-nonpausing" to Scenario(
+            "map-nonpausing",
+            "DECISIONS 21: the ship flies on under the map (position advances by v·3 s), the stick is released and recentred, PAUSE freezes",
+        ) { SessionScenarios.mapNonPausing(it) },
 
         "perf" to Scenario(
             "perf",

@@ -5,6 +5,7 @@ import com.starwake.core.TestAsserts.assertSameRotation
 import com.starwake.core.TestAsserts.assertUnit
 import com.starwake.core.TestAsserts.assertVec
 import com.starwake.core.content.Content
+import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.DVec3
 import com.starwake.core.math.PI_F
 import com.starwake.core.math.Quat
@@ -197,33 +198,28 @@ class ChaseCameraTest {
     }
 
     @Test
-    fun farChaseIsFurtherAndCockpitIsInside() {
+    fun theShipIsInViewSlightlyBelowCentre() {
         val ship = shipAt(tilted)
-        val far = ChaseCamera().also { it.mode = 1 }
-        far.snapTo(ship)
-        val o = offsetInShipSpace(far, ship)
-        assertTrue(o.z > 20f && o.y > 5f, "far chase offset $o")
-        val cockpit = ChaseCamera().also { it.mode = 2 }
-        cockpit.snapTo(ship)
-        val c = offsetInShipSpace(cockpit, ship)
-        assertVec(0f, 1.05f, -2.6f, c, 1e-3f)
-        assertSameRotation(ship.rot, cockpit.renderRotation(Quat()), 1e-6f)
+        val cam = ChaseCamera()
+        cam.snapTo(ship)
+        val view = cam.renderRotation(Quat())
+        val toShip = Vec3((ship.pos.x - cam.pos.x).toFloat(), (ship.pos.y - cam.pos.y).toFloat(), (ship.pos.z - cam.pos.z).toFloat())
+        val local = view.rotateInverse(toShip, Vec3()) // camera space, looking down -Z
+        assertTrue(local.z < 0f, "ship must be in front of the camera: $local")
+        val elevation = atan2(local.y, -local.z)
+        assertTrue(elevation < 0f && elevation > -0.4f, "ship should sit a little below centre, elevation $elevation rad")
+        assertNear(0f, local.x, 1e-3f)
     }
 
     @Test
-    fun theShipIsInViewSlightlyBelowCentre() {
-        for (mode in 0..1) {
-            val ship = shipAt(tilted)
-            val cam = ChaseCamera().also { it.mode = mode }
-            cam.snapTo(ship)
-            val view = cam.renderRotation(Quat())
-            val toShip = Vec3((ship.pos.x - cam.pos.x).toFloat(), (ship.pos.y - cam.pos.y).toFloat(), (ship.pos.z - cam.pos.z).toFloat())
-            val local = view.rotateInverse(toShip, Vec3()) // camera space, looking down -Z
-            assertTrue(local.z < 0f, "ship must be in front of the camera: $local")
-            val elevation = atan2(local.y, -local.z)
-            assertTrue(elevation < 0f && elevation > -0.4f, "ship should sit a little below centre, elevation $elevation rad")
-            assertNear(0f, local.x, 1e-3f)
-        }
+    fun configureCirclesTheHullCentre() {
+        val ship = shipAt(Quat())
+        val cam = ChaseCamera()
+        cam.configure(Vec3(0f, -2f, 10f), Vec3(0f, 16f, 85f), -8f * DEG2RAD)
+        cam.snapTo(ship)
+        // the offset is from the centre, which is itself offset from the origin
+        assertVec(0f, 14f, 95f, offsetInShipSpace(cam, ship), 1e-3f)
+        assertNear(kotlin.math.sqrt(16f * 16f + 85f * 85f), cam.viewDistance, 1e-3f)
     }
 
     @Test

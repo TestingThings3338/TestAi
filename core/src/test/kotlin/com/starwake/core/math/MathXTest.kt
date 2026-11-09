@@ -170,6 +170,53 @@ class MathXTest {
     }
 
     @Test
+    fun smoothIsShipMathSmooth() {
+        assertEquals(7f, smooth(1f, 7f, 0f, 0.016f), "tau <= 0 jumps to the target")
+        assertEquals(7f, smooth(1f, 7f, -1f, 0.016f))
+        // one tau covers 63 % of the gap
+        assertNear(1f + 6f * (1f - kotlin.math.exp(-1f)), smooth(1f, 7f, 0.5f, 0.5f), 1e-6f)
+        // two half steps equal one full step: frame-rate independent
+        val full = smooth(0f, 10f, 0.12f, 0.1f)
+        val half = smooth(smooth(0f, 10f, 0.12f, 0.05f), 10f, 0.12f, 0.05f)
+        assertNear(full, half, 1e-5f)
+        // the same as expApproach with rate = 1 / tau
+        assertNear(0f + 10f * expApproach(1f / 0.12f, 0.1f), full, 1e-5f)
+    }
+
+    @Test
+    fun applyDeadzoneIsRadialWithACurve() {
+        val out = Vec3()
+        // inside the dead zone (and its edge) -> 0
+        assertVec(0f, 0f, 0f, applyDeadzone(0.1f, 0.1f, 0.2f, 1.7f, out))
+        assertVec(0f, 0f, 0f, applyDeadzone(0.2f, 0f, 0.2f, 1.7f, out))
+        assertVec(0f, 0f, 0f, applyDeadzone(0f, 0f, 0f, 1f, out), message = "zero input stays zero")
+        // 02-flight.md 10.4: 0.5 -> 0.18874, 0.6 -> 0.30779 (= 0.5^1.7), 1.0 -> 1
+        assertNear(0.18874f, applyDeadzone(0.5f, 0f, 0.2f, 1.7f, out).x, 1e-5f)
+        assertNear(0.30779f, applyDeadzone(0.6f, 0f, 0.2f, 1.7f, out).x, 1e-5f)
+        assertNear(0.30779f, applyDeadzone(0f, -0.6f, 0.2f, 1.7f, out).y * -1f, 1e-5f)
+        assertNear(1f, applyDeadzone(1f, 0f, 0.2f, 1.7f, out).x, 1e-6f)
+        assertNear(1f, applyDeadzone(3f, 0f, 0.2f, 1.7f, out).x, 1e-6f, "clamped to 1")
+        // radial: the diagonal (0.5, 0.5) has the magnitude of (0.7071, 0): 0.46070
+        applyDeadzone(0.5f, 0.5f, 0.2f, 1.7f, out)
+        val diag = kotlin.math.sqrt(out.x * out.x + out.y * out.y)
+        assertNear(0.46070f, diag, 1e-4f)
+        assertNear(applyDeadzone(0.70710677f, 0f, 0.2f, 1.7f, Vec3()).x, diag, 1e-5f)
+        assertNear(out.x, out.y, 1e-6f, "direction kept")
+        // curve 1 is linear after the rescale
+        assertNear(0.5f, applyDeadzone(0.6f, 0f, 0.2f, 1f, out).x, 1e-6f)
+    }
+
+    @Test
+    fun roundHalfAwayIsLuauMathRound() {
+        assertEquals(3.0, roundHalfAway(2.5))
+        assertEquals(-3.0, roundHalfAway(-2.5))
+        assertEquals(2.0, roundHalfAway(2.49))
+        assertEquals(-2.0, roundHalfAway(-2.49))
+        assertEquals(0.0, roundHalfAway(0.0))
+        assertEquals(1.0, roundHalfAway(0.5))
+    }
+
+    @Test
     fun dvec3KeepsPrecisionFarFromTheOrigin() {
         val far = DVec3(1.0e7 + 0.25, -2.0e7, 3.0e7 + 0.5)
         val origin = DVec3(1.0e7, -2.0e7 - 0.75, 3.0e7)

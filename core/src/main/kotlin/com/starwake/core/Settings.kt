@@ -1,19 +1,20 @@
 package com.starwake.core
 
 import com.starwake.core.content.ShipCatalog
+import kotlin.math.floor
 
 /** Player settings, persisted as a compact "key=value;" string through [Platform]. */
 class Settings {
     /** 0 low, 1 medium, 2 high. */
     var quality = 2
 
-    /** 0 = display maximum (e.g. 120 Hz), 1 = 60 FPS, 2 = 30 FPS. */
-    var fpsMode = 0
+    /** 0 = display maximum (e.g. 120 Hz), 1 = 60 FPS, 2 = 30 FPS. 60 by default (DECISIONS 21a). */
+    var fpsMode = 1
 
-    /** Right stick horizontal axis: true = roll (flight-sim style), false = yaw. */
+    /** Right stick horizontal axis: true = roll (flight-sim style), false = yaw (Roblox MOUSE X AXIS). */
     var stickXRoll = true
 
-    /** true: pushing the stick up raises the nose. false: flight-sim style (up = dive). */
+    /** true: pushing the stick up raises the nose. false: flight-sim style (up = dive; Roblox INVERT PITCH). */
     var pitchUpClimb = true
     var sensitivity = 1f
     var leftHanded = false
@@ -22,6 +23,21 @@ class Settings {
 
     /** Ship to fly: index into ShipCatalog (0 = VARROW). */
     var ship = 0
+
+    /** FIELD OF VIEW, vertical degrees, cockpit and external views (Roblox 60–100, default 80, step 1). */
+    var fovDeg = FOV_DEFAULT
+        set(v) {
+            field = snap(v, FOV_MIN, FOV_MAX, 1f, FOV_DEFAULT)
+        }
+
+    /** CAMERA SHAKE, 0–1 (Roblox default 1, step 0.05): scales the camera shake of impacts and the cockpit motion. */
+    var cameraShake = 1f
+        set(v) {
+            field = snap(v, 0f, 1f, 0.05f, 1f)
+        }
+
+    /** VIEW also cycles to the lagging chase view of the pre-port game (DECISIONS 21a: off by default). */
+    var chaseView = false
 
     val renderScale: Float
         get() = when (quality) {
@@ -39,7 +55,8 @@ class Settings {
 
     fun serialize(): String =
         "q=$quality;fps=$fpsMode;roll=${b(stickXRoll)};climb=${b(pitchUpClimb)};sens=$sensitivity;" +
-            "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};ship=$ship"
+            "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};ship=$ship;" +
+            "fov=${fmt(fovDeg)};shake=${fmt(cameraShake)};chase=${b(chaseView)}"
 
     fun deserialize(data: String?) {
         if (data.isNullOrEmpty()) return
@@ -59,6 +76,9 @@ class Settings {
                     "hap" -> haptics = v == "1"
                     "showfps" -> showFps = v == "1"
                     "ship" -> ship = v.toInt().coerceIn(0, ShipCatalog.all.size - 1)
+                    "fov" -> v.toFloat().let { if (!it.isNaN()) fovDeg = it }
+                    "shake" -> v.toFloat().let { if (!it.isNaN()) cameraShake = it }
+                    "chase" -> chaseView = v == "1"
                 }
             } catch (_: NumberFormatException) {
                 // ignore corrupt values, keep defaults
@@ -67,4 +87,26 @@ class Settings {
     }
 
     private fun b(v: Boolean) = if (v) "1" else "0"
+
+    /** Whole numbers without ".0", others as Kotlin prints them ("80", "0.35"). */
+    private fun fmt(v: Float): String = if (v == floor(v)) v.toInt().toString() else v.toString()
+
+    companion object {
+        const val FOV_MIN = 60f
+        const val FOV_MAX = 100f
+        const val FOV_DEFAULT = 80f
+
+        /**
+         * A slider value as the Roblox menu stores it (ShipMenu.lua:164-174): clamped, snapped to
+         * [step] from [min], clamped again and rounded to 4 decimals (no 0.30000000000000004);
+         * NaN gives [fallback].
+         */
+        fun snap(v: Float, min: Float, max: Float, step: Float, fallback: Float): Float {
+            if (v.isNaN()) return fallback
+            var x = v.coerceIn(min, max).toDouble()
+            x = min + com.starwake.core.math.roundHalfAway((x - min) / step) * step
+            x = x.coerceIn(min.toDouble(), max.toDouble())
+            return (com.starwake.core.math.roundHalfAway(x * 10_000.0) / 10_000.0).toFloat()
+        }
+    }
 }
