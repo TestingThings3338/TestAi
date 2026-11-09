@@ -85,6 +85,10 @@ class DesktopPlatform(private val assetsDir: File, initialSettings: String? = nu
         return saves.writeSave(name, data)
     }
 
+    override val finishedWrites: Int get() = saves.finishedWrites
+
+    override fun writeState(name: String): Int = saves.writeState(name)
+
     private inline fun log(msg: () -> String) {
         if (!quiet) println(msg())
     }

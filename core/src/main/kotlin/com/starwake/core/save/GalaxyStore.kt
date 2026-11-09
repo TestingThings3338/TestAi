@@ -46,9 +46,10 @@ class DiscoverResult {
  *
  * Sol starts surveyed and visited by "SOL REGISTRY" (time 0). Every first survey or visit
  * elsewhere is the local pilot's (8.3); the ×1.5 first-survey bonus applies (DECISIONS 25). The
- * Roblox 15 s server tick becomes [refresh] (8.3: at load, every 2 s while in the system, and
- * before each construction action). Finished player stations are registered in the station
- * catalogue ([syncStations]), so they can be found and docked at like any other.
+ * Roblox 15 s server tick becomes [refresh], run every 2 s by the station world, which syncs its
+ * stations and build sites when it returns true; the construction actions advance their own site
+ * first (8.3). Finished player stations are registered in the station catalogue
+ * ([syncStations]), so they can be found and docked at like any other.
  */
 class GalaxyStore(
     val catalog: StationCatalog,
@@ -203,9 +204,20 @@ class GalaxyStore(
         return true
     }
 
+    /** [revision] at the end of the last [refresh] (-1 before the first: that one always asks for a sync). */
+    private var refreshedRevision = -1
+
     /**
-     * The server tick: advances every due build in the loaded records (one stage per due station)
-     * and re-registers finished stations. True when a station list changed.
+     * The server tick, run by the station world every 2 s (ShipClient GALAXY_REFRESH): advances
+     * every due build in the loaded records (one stage per due station; a stage whose BuildEnds
+     * passed therefore becomes a record change here) and re-registers finished stations.
+     *
+     * True when the station world needs a sync: a registered station list changed, or any record
+     * changed since the previous refresh (a site founded, supplied, abandoned, advanced or finished,
+     * by this tick or by the commerce engine). ShipClient syncs every 2 s regardless and on every
+     * galaxy change (:3176, :676); syncing only when this returns true shows the same, and syncing
+     * every time is also correct (the sync is a diff). Call it from that one place only, since each
+     * call takes in the changes since the one before.
      */
     fun refresh(): Boolean {
         val now = clock.now()
@@ -219,7 +231,9 @@ class GalaxyStore(
             if (advanced) changed(record, urgent = true)
             if (catalog.isValidSystem(record.system) && syncStations(record.system)) listChanged = true
         }
-        return listChanged
+        val recordsChanged = revision != refreshedRevision
+        refreshedRevision = revision
+        return listChanged || recordsChanged
     }
 
     /** Marks [index]'s record changed (the commerce engine after it edits a station record). */
@@ -310,6 +324,7 @@ class GalaxyStore(
     fun read(tree: Map<String, Any?>) {
         records = arrayOfNulls(16)
         registered.clear()
+        refreshedRevision = -1
         for ((key, v) in tree) {
             val index = key.toIntOrNull() ?: continue
             if (index < 1 || index > Profile.MAX_SYSTEM) continue

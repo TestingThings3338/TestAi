@@ -418,6 +418,11 @@ class Commerce(
     /**
      * `Refuel(id, fuel)`: 4 CR per unit of the 100-unit tank, as many as the credits pay for; the
      * tank counts as full when less than half a unit would be missing.
+     *
+     * Port fix (DECISIONS 35): Roblox refused any purchase under one unit, so a tank missing 0.5 to
+     * 1 unit (99.0 to 99.5 %) could never be topped up and always answered "NOT ENOUGH CREDITS".
+     * Here the smallest purchase is the rest of the tank when that is less than a unit: it fails
+     * only when the credits do not pay for min(1, missing) units ([Economy.refuelQuote] agrees).
      */
     fun refuel(stationId: String, fuel: Double): Reply {
         reply.reset()
@@ -428,7 +433,7 @@ class Commerce(
         val missing = max(0.0, (1 - fuel) * capacity)
         if (missing < 0.5) return fail("TANK ALREADY FULL")
         val units = min(missing, floor(profile.credits.toDouble() / price))
-        if (units < 1) return fail("NOT ENOUGH CREDITS")
+        if (units < 1 && units < missing) return fail("NOT ENOUGH CREDITS")
         val cost = ceil(units * price).toLong()
         profile.credits -= cost
         profile.stats.spent += cost
@@ -863,17 +868,17 @@ class Commerce(
     /** Sets the credits (the Roblox owner top-up to 999,999 CR, as a debug command). */
     fun debugSetCredits(credits: Long): Reply {
         reply.reset()
-        profile.credits = max(0L, credits)
+        profile.credits = credits.coerceIn(0L, Profile.MAX_CREDITS)
         profile.changed(urgent = true)
         reply.credits = profile.credits
         return ok()
     }
 
-    /** `cargo <id> <t>`: adds (or removes) tons of a commodity, at least 0 stays. */
+    /** `cargo <id> <t>`: adds (or removes) tons of a commodity, within 0..[Profile.MAX_CARGO_TONS]. */
     fun debugCargo(commodityId: String, tons: Int): Reply {
         reply.reset()
         if (Economy.commodity(commodityId) == null) return fail("UNKNOWN COMMODITY")
-        profile.setCargo(commodityId, max(0, profile.cargo(commodityId) + tons))
+        profile.addCargo(commodityId, tons)
         profile.changed()
         reply.hold = profile.cargo(commodityId)
         return ok()

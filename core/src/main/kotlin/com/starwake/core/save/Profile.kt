@@ -228,16 +228,23 @@ class Profile {
     /** Cargo by commodity index (market order). */
     fun cargoAt(index: Int): Int = cargoTons[index]
 
-    /** `Cargo[id] = tons` (0 or less removes it); false for an unknown commodity. */
+    /**
+     * `Cargo[id] = tons` (0 or less removes it), at most [MAX_CARGO_TONS] (the largest hold is 224 t,
+     * so only a damaged save or a debug command gets there, and [cargoUsed] can never wrap); false
+     * for an unknown commodity.
+     */
     fun setCargo(commodityId: String?, tons: Int): Boolean {
         val i = Economy.commodityIndex(commodityId)
         if (i < 0) return false
-        cargoUsed += maxOf(0, tons) - cargoTons[i]
-        cargoTons[i] = maxOf(0, tons)
+        val t = tons.coerceIn(0, MAX_CARGO_TONS)
+        cargoUsed += t - cargoTons[i]
+        cargoTons[i] = t
         return true
     }
 
-    fun addCargo(commodityId: String?, tons: Int): Boolean = setCargo(commodityId, cargo(commodityId) + tons)
+    /** `Cargo[id] += tons` without overflowing (see [setCargo]). */
+    fun addCargo(commodityId: String?, tons: Int): Boolean =
+        setCargo(commodityId, (cargo(commodityId).toLong() + tons).coerceIn(0L, MAX_CARGO_TONS.toLong()).toInt())
 
     /** `Cargo = {}`. */
     fun clearCargo() {
@@ -305,6 +312,16 @@ class Profile {
         /** Highest system index a charted key may name (sanity bound for corrupt saves). */
         const val MAX_SYSTEM = 100_000
 
+        /**
+         * Sanity bounds for the numbers of a save that parses but was edited or damaged (Roblox kept
+         * them in doubles; here a sum must never wrap): credits, tons per commodity ([setCargo]), the
+         * value of one unsold survey, and the lifetime counters. Far above anything play reaches.
+         */
+        const val MAX_CREDITS = 1_000_000_000_000_000L
+        const val MAX_CARGO_TONS = 100_000
+        const val MAX_SURVEY_VALUE = 1_000_000_000L
+        const val MAX_COUNTER = 1_000_000_000_000_000L
+
         /** Longest callsign. */
         const val CALLSIGN_LENGTH = 16
 
@@ -359,7 +376,10 @@ class Profile {
          * from the template, Training from experience when missing, at least one ship, an owned
          * active ship, credits ≥ 0 and whole, a valid location (unknown system or a docked station
          * that does not exist → the template location; player stations "P<n>" are checked at the
-         * session start), and an OwnStation pointer only when well formed. Never throws.
+         * session start), and an OwnStation pointer only when well formed. Port addition: credits,
+         * cargo, survey values and the counters are clamped to [MAX_CREDITS], [MAX_CARGO_TONS],
+         * [MAX_SURVEY_VALUE] and [MAX_COUNTER], so no parseable but damaged file wraps [cargoUsed] or
+         * [surveyTotal]. Never throws.
          */
         fun fromTree(data: Map<String, Any?>, catalog: StationCatalog, now: Long): Profile {
             val p = template(now)
@@ -381,12 +401,13 @@ class Profile {
                 Economy.SHIPS.firstOrNull { p.owns(it.id) }?.id ?: Economy.DEFAULT_SHIP
             }
 
-            p.credits = maxOf(0L, Json.long(data["Credits"]) ?: 0L)
-            if (!data.containsKey("Credits")) p.credits = Economy.START_CREDITS
+            // a missing (or null, Lua's nil) Credits is the template's; anything else is floored to 0..MAX_CREDITS
+            val credits = data["Credits"]
+            p.credits = if (credits == null) Economy.START_CREDITS else (Json.long(credits) ?: 0L).coerceIn(0L, MAX_CREDITS)
 
             Json.obj(data["Cargo"])?.forEach { (id, v) ->
                 val tons = Json.int(v) ?: 0
-                if (tons > 0) p.setCargo(id, tons)
+                if (tons > 0) p.setCargo(id, tons) // at most MAX_CARGO_TONS each
             }
 
             Json.arr(data["Survey"])?.forEach { v ->
@@ -397,7 +418,7 @@ class Profile {
                 p.addSurvey(
                     SurveyEntry(
                         system, Json.str(e["SystemName"]) ?: catalog.systemName(system), body,
-                        Json.str(e["Class"]) ?: "", maxOf(0L, value), Json.bool(e["First"]) == true,
+                        Json.str(e["Class"]) ?: "", value.coerceIn(0L, MAX_SURVEY_VALUE), Json.bool(e["First"]) == true,
                     ),
                 )
             }
@@ -415,14 +436,14 @@ class Profile {
             val stats = Json.obj(data["Stats"])
             if (stats != null) {
                 val s = p.stats
-                s.earned = Json.long(stats["Earned"]) ?: 0L
-                s.spent = Json.long(stats["Spent"]) ?: 0L
-                s.trades = Json.long(stats["Trades"]) ?: 0L
-                s.surveys = Json.long(stats["Surveys"]) ?: 0L
-                s.jumps = Json.long(stats["Jumps"]) ?: 0L
-                s.dockings = Json.long(stats["Dockings"]) ?: 0L
-                s.losses = Json.long(stats["Losses"]) ?: 0L
-                s.mined = Json.long(stats["Mined"]) ?: 0L
+                s.earned = counter(stats["Earned"])
+                s.spent = counter(stats["Spent"])
+                s.trades = counter(stats["Trades"])
+                s.surveys = counter(stats["Surveys"])
+                s.jumps = counter(stats["Jumps"])
+                s.dockings = counter(stats["Dockings"])
+                s.losses = counter(stats["Losses"])
+                s.mined = counter(stats["Mined"])
                 s.created = Json.long(stats["Created"]) ?: now
             }
 
@@ -451,6 +472,9 @@ class Profile {
             for ((k, v) in data) if (k !in KNOWN_KEYS) p.extra[k] = v
             return p
         }
+
+        /** A lifetime counter from a save: 0 when missing, within 0..[MAX_COUNTER]. */
+        private fun counter(v: Any?): Long = (Json.long(v) ?: 0L).coerceIn(0L, MAX_COUNTER)
 
         private fun readLocation(o: Map<String, Any?>?, loc: Location, catalog: StationCatalog) {
             loc.setHome()

@@ -449,7 +449,12 @@ object Economy {
     fun perkPercent(shipId: String?, perk: Int): Int = Lua.round((perk(shipId, perk) - 1) * 100).toInt()
 
     // ---------------------------------------------------------------- refuel preview
-    /** What the hub tile and the overview button show (ShipStationUi :546, :702); [Commerce.refuel] decides. */
+    /**
+     * What the hub tile and the overview button show (ShipStationUi :546, :702); [Commerce.refuel]
+     * decides. Port fix (DECISIONS 35) as in [Commerce.refuel]: a tank missing less than one unit
+     * (but at least half of one) can be topped up; Roblox showed "NO CREDITS" there whatever the
+     * credits.
+     */
     class RefuelQuote {
         /** Units missing from a full tank. */
         var missing = 0.0
@@ -460,11 +465,11 @@ object Economy {
         /** Units the credits pay for, up to [missing]. */
         var units = 0.0
 
-        /** `ceil(units · 4)` CR. */
+        /** `ceil(units · 4)` CR when [affordable], else 0. */
         var cost = 0L
 
-        /** units ≥ 1: the button is enabled (else "NO CREDITS"). */
-        val affordable: Boolean get() = !full && units >= 1.0
+        /** The credits pay for min(1, [missing]) units: the button is enabled (else "NO CREDITS"). */
+        val affordable: Boolean get() = !full && (units >= 1.0 || units >= missing)
     }
 
     fun refuelQuote(fuel: Double, credits: Long, out: RefuelQuote): RefuelQuote {
@@ -476,7 +481,7 @@ object Economy {
             return out
         }
         out.units = min(out.missing, floor(credits.toDouble() / FUEL_PRICE_PER_UNIT))
-        out.cost = if (out.units >= 1.0) ceil(out.units * FUEL_PRICE_PER_UNIT).toLong() else 0L
+        out.cost = if (out.affordable) ceil(out.units * FUEL_PRICE_PER_UNIT).toLong() else 0L
         return out
     }
 

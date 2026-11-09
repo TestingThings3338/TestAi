@@ -229,6 +229,50 @@ class ProfileTest {
         assertTrue(decode("""{"Charted": {"1/Mars": true}}""").isCharted(1, "Mars"))
     }
 
+    /** The rules engine over [p], docked at MERIDIAN. */
+    private fun commerceFor(p: Profile): com.starwake.core.econ.Commerce {
+        val rig = Rig()
+        val c = com.starwake.core.econ.Commerce(p, rig.galaxy, rig.catalog, rig.clock, com.starwake.core.math.Pcg32Random(7))
+        assertEquals("SOL-MERIDIAN", c.startSession().docked)
+        return c
+    }
+
+    @Test
+    fun damagedNumbersAreClampedSoNoSumWraps() {
+        // the review's vectors: files that parse, with numbers that wrapped cargoUsed and surveyTotal
+        val cargo = decode("""{"Credits": 1000000, "Cargo": {"Copper": 3000000000, "Water": 2}}""")
+        assertEquals(100_000, cargo.cargo("Copper"), "at most 100,000 t of one commodity")
+        assertEquals(100_002, cargo.cargoUsed)
+        val trade = commerceFor(cargo).trade("SOL-MERIDIAN", "Grain", 16, true)
+        assertFalse(trade.ok)
+        assertEquals("CARGO HOLD FULL", trade.reason)
+        val survey = decode("""{"Survey": [{"System": 1, "Body": "Mars", "Value": 9e18}, {"System": 1, "Body": "Venus", "Value": 9e18}]}""")
+        assertEquals(1_000_000_000L, survey.survey[0].value, "at most 1e9 CR for one survey")
+        assertEquals(2_000_000_000L, survey.surveyTotal)
+        val sale = commerceFor(survey).sellData("SOL-MERIDIAN")
+        assertTrue(sale.ok)
+        assertEquals(2_000_000_000L, sale.earned)
+        assertEquals(1500L + 2_000_000_000L, survey.credits)
+        // credits and the lifetime counters: within 0..1e15; a null Credits is Lua's nil (the template's)
+        assertEquals(1_000_000_000_000_000L, decode("""{"Credits": 1e300}""").credits)
+        assertEquals(1500L, decode("""{"Credits": null}""").credits)
+        val stats = decode("""{"Stats": {"Earned": 9e18, "Spent": -4, "Trades": 3}}""").stats
+        assertEquals(1_000_000_000_000_000L, stats.earned)
+        assertEquals(0L, stats.spent)
+        assertEquals(3L, stats.trades)
+        // the setters saturate too (the debug command adds any amount)
+        val p = Profile.template(NOW)
+        val c = commerceFor(p)
+        c.debugCargo("Water", Int.MAX_VALUE)
+        c.debugCargo("Water", Int.MAX_VALUE)
+        assertEquals(100_000, p.cargo("Water"))
+        assertEquals(100_000, p.cargoUsed)
+        c.debugCargo("Water", Int.MIN_VALUE)
+        assertEquals(0, p.cargoUsed)
+        c.debugSetCredits(Long.MAX_VALUE)
+        assertEquals(1_000_000_000_000_000L, p.credits)
+    }
+
     @Test
     fun migrationsRunInOrderAndStopOnAFailure() {
         val migrations = listOf(

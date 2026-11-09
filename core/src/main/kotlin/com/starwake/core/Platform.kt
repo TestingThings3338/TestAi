@@ -44,7 +44,8 @@ interface Platform : SaveStorage {
 
     /**
      * Stores save file [name] atomically (temp file + rename), keeping the version it replaces as
-     * "<name>.bak"; may finish on a background thread (never block the GL thread on disk). False when
+     * "<name>.bak"; may finish on a background thread (never block the GL thread on disk), and then
+     * reports the outcome through [finishedWrites] and [writeState] (see [SaveStorage]). False when
      * saves cannot be stored. Default: no save storage (the game runs, nothing persists).
      */
     override fun writeSave(name: String, data: ByteArray): Boolean = false

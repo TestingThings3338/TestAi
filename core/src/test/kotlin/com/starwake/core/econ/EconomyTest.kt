@@ -251,4 +251,21 @@ class EconomyTest {
         assertFalse(q.full)
         assertFalse(q.affordable)
     }
+
+    @Test
+    fun refuelPreviewTopsUpTheLastUnitDecisions35() {
+        // the review's case: 0.502 units missing, plenty of credits; Roblox showed "NO CREDITS"
+        val q = Economy.RefuelQuote()
+        Economy.refuelQuote(0.99498, 81_767, q)
+        assertFalse(q.full)
+        assertEquals(0.502, q.missing, 1e-9)
+        assertTrue(q.affordable)
+        assertEquals(3L, q.cost)
+        Economy.refuelQuote(0.992, 4, q)
+        assertTrue(q.affordable)
+        assertEquals(4L, q.cost)
+        Economy.refuelQuote(0.992, 3, q)
+        assertFalse(q.affordable, "3 CR do not buy a unit")
+        assertEquals(0L, q.cost)
+    }
 }

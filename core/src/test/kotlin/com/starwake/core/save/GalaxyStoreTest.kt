@@ -142,7 +142,8 @@ class GalaxyStoreTest {
         val sites = ArrayList<StationRecord>()
         assertEquals(listOf(st), g.sites(1, NOW, sites))
         assertTrue(g.stationDefs(1, NOW).isEmpty())
-        assertFalse(g.refresh(), "nothing due")
+        assertTrue(g.refresh(), "the first tick syncs the station world")
+        assertFalse(g.refresh(), "nothing due, nothing changed")
         assertNull(catalog.find(1, "P1"))
         // the build finishes: the tick advances it and registers the station
         wall.t = NOW + 3600
@@ -159,6 +160,47 @@ class GalaxyStoreTest {
         assertTrue(g.removeStation(1, "P1"))
         assertNull(catalog.find(1, "P1"))
         assertFalse(g.removeStation(1, "P1"))
+    }
+
+    @Test
+    fun refreshAsksForASyncWheneverASiteChanges() {
+        // ShipClient syncs stations and build sites every 2 s and on every galaxy change (:3176, :676):
+        // refresh() must say so for a site that appears, starts building, finishes a stage or goes
+        val rig = EconFixtures.Rig()
+        val c = rig.commerce
+        val g = rig.galaxy
+        val sites = ArrayList<StationRecord>()
+        c.startSession()
+        c.undock()
+        c.debugSetCredits(300_000)
+        g.refresh() // the first tick: the station world syncs anyway
+        assertFalse(g.refresh(), "nothing changed")
+        check(c.foundStation(1, "Mars", 1).ok)
+        assertTrue(g.refresh(), "a new build site appears")
+        assertFalse(g.refresh())
+        assertEquals(1, g.sites(1, rig.clock.now(), sites).size)
+        val st = g.station(1, "P1")!!
+        // the stage is supplied: it builds (the next stage's hologram turns stronger)
+        check(c.debugSite("fill").ok)
+        assertTrue(g.refresh(), "building")
+        assertFalse(g.refresh())
+        assertEquals(0, Resources.builtStages(st, rig.clock.now()))
+        // the build time passes: this tick finishes stage 1 and the scaffold shows it
+        rig.pass(1800.0)
+        assertEquals(1, Resources.builtStages(st, rig.clock.now()), "finished at this time, before the record knows")
+        assertTrue(g.refresh(), "stage 1 finished")
+        assertEquals(2, st.stage)
+        assertEquals(1, Resources.builtStages(st, rig.clock.now()))
+        assertFalse(g.refresh())
+        // a delivery that does not finish the stage still changes what the panel shows
+        rig.profile.setCargo("MineralOre", 1)
+        check(c.deliver().ok)
+        assertTrue(g.refresh(), "delivered")
+        // abandoned: the site goes
+        check(c.abandon().ok)
+        assertTrue(g.refresh(), "the site is gone")
+        assertTrue(g.sites(1, rig.clock.now(), sites).isEmpty())
+        assertFalse(g.refresh())
     }
 
     @Test

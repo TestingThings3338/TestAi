@@ -199,6 +199,48 @@ class CommerceTest {
     }
 
     @Test
+    fun refuelTopsUpTheLastUnitDecisions35() {
+        // Roblox answered NOT ENOUGH CREDITS for a tank missing 0.5..1 unit, whatever the credits
+        val rig = Rig()
+        val c = rig.commerce
+        c.startSession()
+        rig.profile.credits = 81_767
+        val top = c.refuel("SOL-MERIDIAN", 0.99498).assertOk()
+        assertEquals(3L, top.cost, "ceil(0.502 units x 4 CR)")
+        assertEquals(1.0, top.fuel)
+        assertEquals(81_764L, rig.profile.credits)
+        assertEquals(1.0, rig.profile.fuel())
+        // 0.8 units missing: 4 CR pay for it, 3 CR do not (whole units, as everywhere else)
+        rig.profile.credits = 4
+        assertEquals(4L, c.refuel("SOL-MERIDIAN", 0.992).assertOk().cost)
+        assertEquals(0L, rig.profile.credits)
+        rig.profile.credits = 3
+        c.refuel("SOL-MERIDIAN", 0.992).assertFails("NOT ENOUGH CREDITS")
+        // with 4 CR or more a tank that is not full is never refused, and the hub tile agrees
+        val random = java.util.Random(35)
+        val quote = Economy.RefuelQuote()
+        var refusedBefore = 0
+        repeat(5000) {
+            val fuel = if (it % 2 == 0) 0.99 + random.nextDouble() * 0.01 else random.nextDouble()
+            val credits = 4L + random.nextInt(100_000)
+            rig.profile.credits = credits
+            Economy.refuelQuote(fuel, credits, quote)
+            val r = c.refuel("SOL-MERIDIAN", fuel)
+            if (quote.full) {
+                r.assertFails("TANK ALREADY FULL")
+                return@repeat
+            }
+            if (quote.units < 1.0) refusedBefore++
+            r.assertOk()
+            assertTrue(quote.affordable, "fuel $fuel, $credits CR")
+            assertEquals(quote.cost, r.cost)
+            assertTrue(r.cost in 1L..credits)
+            assertEquals(credits - r.cost, rig.profile.credits)
+        }
+        assertTrue(refusedBefore > 1000, "$refusedBefore of these tanks were refused in Roblox")
+    }
+
+    @Test
     fun surveyThenSellDataKeepsBodiesCharted() {
         val rig = Rig()
         val c = rig.commerce
