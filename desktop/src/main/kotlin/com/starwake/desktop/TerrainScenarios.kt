@@ -503,6 +503,9 @@ object TerrainScenarios {
         val platform = DesktopPlatform(env.opts.assetsDir, null)
         val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"), sc.system)
         val sr = SceneRenderer(gl, content, 2)
+        // the scene only draws a ship with a model and a gear pose (the VARROW, gear down on the ground)
+        val shipModel = com.starwake.core.content.ShipModel.load("varrow") { platform.readAsset(it) }
+        sr.setShipModel(shipModel)
         sc.bakeImage?.let { sr.setBodySurfaceTexture(1, it, sc.bakeW, sc.bakeH) }
         // one GPU side per planet: the tiles of the scenario's own renderer are dropped (as after a
         // context loss) and stream again into the scene's
@@ -530,6 +533,8 @@ object TerrainScenarios {
         val fz = (n[2] - gu.z * d).toFloat()
         ship.rot.lookRotation(fx, fy, fz, gu.x, gu.y, gu.z)
         f.ship = ship
+        f.gear = com.starwake.core.game.GearRig().also { it.setModel(shipModel, down = true) }
+        f.shipReach = 250f
         val c = f.camera
         c.pos.set(ship.pos.x - fx * 28.0 + u[0] * 9.0, ship.pos.y - fy * 28.0 + u[1] * 9.0, ship.pos.z - fz * 28.0 + u[2] * 9.0)
         c.rot.lookRotation(
