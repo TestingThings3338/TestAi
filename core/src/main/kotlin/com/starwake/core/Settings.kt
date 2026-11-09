@@ -6,7 +6,14 @@ import kotlin.math.floor
 /** Player settings, persisted as a compact "key=value;" string through [Platform]. */
 class Settings {
     /** 0 low, 1 medium, 2 high. */
+    /** Graphics quality: 0 LOW, 1 MEDIUM, 2 HIGH, 3 ULTRA (more terrain detail, finer air, a sharper planet). */
     var quality = 2
+
+    /**
+     * Which graphics defaults this install has been offered (0: from before ULTRA existed): a
+     * strong GPU on HIGH is moved to ULTRA once, after which the pilot's choice stands.
+     */
+    var graphicsRev = 0
 
     /** 0 = display maximum (e.g. 120 Hz), 1 = 60 FPS, 2 = 30 FPS. 60 by default (DECISIONS 21a). */
     var fpsMode = 1
@@ -56,7 +63,7 @@ class Settings {
     fun serialize(): String =
         "q=$quality;fps=$fpsMode;roll=${b(stickXRoll)};climb=${b(pitchUpClimb)};sens=$sensitivity;" +
             "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};ship=$ship;" +
-            "fov=${fmt(fovDeg)};shake=${fmt(cameraShake)};chase=${b(chaseView)}"
+            "fov=${fmt(fovDeg)};shake=${fmt(cameraShake)};chase=${b(chaseView)};rev=$graphicsRev"
 
     fun deserialize(data: String?) {
         if (data.isNullOrEmpty()) return
@@ -67,7 +74,8 @@ class Settings {
             val v = part.substring(eq + 1)
             try {
                 when (k) {
-                    "q" -> quality = v.toInt().coerceIn(0, 2)
+                    "q" -> quality = v.toInt().coerceIn(0, MAX_QUALITY)
+                    "rev" -> graphicsRev = v.toInt().coerceAtLeast(0)
                     "fps" -> fpsMode = v.toInt().coerceIn(0, 2)
                     "roll" -> stickXRoll = v == "1"
                     "climb" -> pitchUpClimb = v == "1"
@@ -92,6 +100,11 @@ class Settings {
     private fun fmt(v: Float): String = if (v == floor(v)) v.toInt().toString() else v.toString()
 
     companion object {
+        /** The highest [quality] level (ULTRA). */
+        const val MAX_QUALITY = 3
+
+        /** The current [graphicsRev]. */
+        const val GRAPHICS_REV = 1
         const val FOV_MIN = 60f
         const val FOV_MAX = 100f
         const val FOV_DEFAULT = 80f

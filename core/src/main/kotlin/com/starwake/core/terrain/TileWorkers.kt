@@ -338,9 +338,9 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
         const val HEAP_CAPACITY = 8192
 
         /** Worker threads per quality (§9.6): HIGH 3, MEDIUM 2, LOW 2. */
-        fun threadsFor(quality: Int) = if (quality >= 2) 3 else 2
+        fun threadsFor(quality: Int) = if (quality >= 3) 4 else if (quality == 2) 3 else 2
 
         /** Staging buffers per quality: HIGH 32, LOW 16. */
-        fun stagingFor(quality: Int) = if (quality >= 2) 32 else 16
+        fun stagingFor(quality: Int) = if (quality >= 3) 48 else if (quality == 2) 32 else 16
     }
 }

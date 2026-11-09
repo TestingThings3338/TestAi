@@ -6,11 +6,12 @@ A native Android version of **Untitled Space Exploration**, a game by AFloidDEV 
 
 - **Real sizes.** The Earth is 6,360 km in radius, the Moon 1,740 km at 384,000 km, Mars 3,390 km. MERIDIAN hangs 19,800 km from the Earth's centre, where the planet fills 37° of the sky. The Sun, 8 planets, 9 moons and 6 stations are there. (As in the Roblox game, the giants are 0.4× real and the planets' orbits 1/60 of real, so a trip between planets takes about a minute.)
 - **Procedural planets, seamless from orbit to the ground.** Every solid body (the Earth, the Moon, Mars, Venus, Mercury, the big moons) is generated on the phone from its seed: continents, seas, mountain ranges, then relief and ground cover down to 2.5 m. The same functions draw the planet from 20,000 km and the hill you land on.
+- **Sea.** Swells move over the water, the sun glitters on them, and the sky is mirrored at grazing angles.
 - **Atmosphere and weather.** The air scatters sunlight (blue days, red dusks, a thin bright limb from space). A cloud deck covers the worlds with air: weather systems with cyclones seen from orbit, broken cloud you fly down through (it fogs the cockpit inside), and cloud shadows on the ground.
 - **Physics of the place.**
   - Gravity is the real 9.81 m/s² on the Earth (1.62 on the Moon) and falls with the square of the distance. With Flight Assist on, the thrusters hold the ship against it. With Flight Assist off the ship falls, and at 7.7 km/s it stays in orbit.
   - Air drags on the ship (density falls by e every 8.5 km on the Earth). The ship cannot hold orbital speed in thick air.
-  - A fast entry heats the hull: the air glows around the cockpit, the HEAT bar fills, and a hull kept beyond its limit burns. The star burns a hull that comes too close.
+  - A fast entry heats the hull: a shock of glowing air forms around the ship (outside the canopy from the cockpit, a sheath of fire around the hull from the external view), it lights the cabin, the HEAT bar fills, and a hull kept beyond its limit burns. The star burns a hull that comes too close.
   - Hard ground contacts cost hull. A lost ship is recovered at the nearest station.
 - **Landing.** Tap LAND below 60 km: the gear comes down. Set down slowly on level ground (or on water) and the ship stands on its gear on the real terrain.
 
@@ -73,7 +74,9 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
 
 **Settings:**
 
-- Graphics quality. On first launch it is picked automatically from the phone's GPU.
+- Graphics quality: LOW, MEDIUM, HIGH and ULTRA. On first launch it is picked automatically from the phone's GPU; flagship GPUs (Adreno 740 and newer, Immortalis) start on ULTRA.
+  - ULTRA keeps full terrain detail half as far again, marches the air in more steps, uses a sharper far image of the planet (4096 × 2048) and a finer ground texture.
+  - HIGH and ULTRA shade the ground's grain as relief.
 - Frame-rate limit: max / 60 / 30 (60 by default).
 - Field of view (60–100°, 80 by default) and camera shake.
 - Chase view: adds the old lagging chase camera as a third VIEW step.

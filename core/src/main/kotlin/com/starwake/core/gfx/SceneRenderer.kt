@@ -95,6 +95,13 @@ class SceneFrame {
     var entryGlow = 0f
     val entryColor = floatArrayOf(1f, 0.26f, 0.04f)
     val entryDir = Vec3(0f, 0f, -1f)
+
+    /**
+     * Ambient light on the ship, the stations and the rocks this frame (linear): the engine's
+     * faint starlight, plus the sky's light inside an atmosphere and the glow of an entry (the
+     * scene fills it at the start of each frame).
+     */
+    val ambient = floatArrayOf(Environment.ambient[0], Environment.ambient[1], Environment.ambient[2])
 }
 
 /**
@@ -114,6 +121,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val glow = ShaderProgram(gl, "glow", Shaders.glowVs, Shaders.glowFs)
     private val entry = ShaderProgram(gl, "entry", Shaders.bakeVs, Shaders.entryFs)
     private val entryPt = Vec3()
+    private val shock = ShaderProgram(gl, "shock", Shaders.shockVs, Shaders.shockFs)
+    private val shockMesh = buildShockMesh()
 
     /** The cloud decks' textures, shared by the impostors and the terrain. */
     private val clouds = CloudTextures(gl, content.clouds)
@@ -387,6 +396,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
         bodies.fogBody = f.fogBody
         bodies.fogAmount = f.fogAmount
+        lightTheScene(f)
         val tg = f.terrain
         val tr = terrainRenderer
         // the hand-over: the impostor shades the surface until the terrain covers the sphere, then
@@ -450,7 +460,11 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         drawAsteroids(f)
         drawStations(f)
         val ship = f.ship
+        // the glowing air of an entry is outside the hull: the sky's glow before the ship is drawn
+        // (the cabin hides it), the shock shell after it, tested against the hull's depth
+        if (f.entryGlow > 0.004f) drawEntryGlow(f)
         if (ship != null) drawShip(f, ship, ShipModel.PASS_OPAQUE)
+        if (ship != null && f.entryGlow > 0.004f) drawShock(f, ship)
         drawDust(f)
         // canopy glass after everything opaque, blended, without depth writes
         if (ship != null) drawShip(f, ship, ShipModel.PASS_GLASS)
@@ -460,11 +474,110 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.depthRange(0f, 1f)
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
-        if (f.entryGlow > 0.004f) drawEntryGlow(f)
         gl.disable(GL.BLEND)
     }
 
-    /** The glowing air of an entry, added over the finished scene (see [Shaders.entryFs]). */
+    /**
+     * The frame's light on the ship, the stations and the rocks: under a daylight sky the air's own
+     * light joins the ambient (a hull in the shade is blue-grey, not black); at entry the glowing
+     * air ahead lights the hull and the cabin from the direction of flight.
+     */
+    private fun lightTheScene(f: SceneFrame) {
+        val a = f.ambient
+        a[0] = Environment.ambient[0]; a[1] = Environment.ambient[1]; a[2] = Environment.ambient[2]
+        if (f.terrain != null) {
+            // the sky's opacity overhead is from the last frame's bodies pass
+            val k = bodies.skyFade() * SKY_AMBIENT
+            val air = f.terrainLight.airRadiance
+            a[0] += air[0] * k; a[1] += air[1] * k; a[2] += air[2] * k
+        }
+        val g = f.entryGlow.coerceIn(0f, 1f)
+        if (g > 0.004f) {
+            val e = f.entryColor
+            a[0] += e[0] * g * 0.10f; a[1] += e[1] * g * 0.10f; a[2] += e[2] * g * 0.10f
+            val w = g * 0.85f
+            f.fillDir.set(f.fillDir.x * (1f - w) + f.entryDir.x * w, f.fillDir.y * (1f - w) + f.entryDir.y * w, f.fillDir.z * (1f - w) + f.entryDir.z * w)
+            if (f.fillDir.lengthSq() > 1e-6f) f.fillDir.normalize() else f.fillDir.set(f.entryDir)
+            f.fillColor[0] += e[0] * g * 1.1f; f.fillColor[1] += e[1] * g * 1.1f; f.fillColor[2] += e[2] * g * 1.1f
+        }
+    }
+
+    /** The unit grid of the shock shell: s along the flow (denser towards the apex) × the angle round it. */
+    private fun buildShockMesh(): GpuMesh {
+        val rings = 20
+        val segs = 40
+        val v = FloatArray((rings + 1) * (segs + 1) * 2)
+        var o = 0
+        for (r in 0..rings) for (a in 0..segs) {
+            v[o++] = r.toFloat() / rings
+            v[o++] = a.toFloat() / segs
+        }
+        val idx = ShortArray(rings * segs * 6)
+        o = 0
+        for (r in 0 until rings) for (a in 0 until segs) {
+            val i0 = r * (segs + 1) + a
+            val i1 = i0 + segs + 1
+            idx[o++] = i0.toShort(); idx[o++] = i1.toShort(); idx[o++] = (i0 + 1).toShort()
+            idx[o++] = (i0 + 1).toShort(); idx[o++] = i1.toShort(); idx[o++] = (i1 + 1).toShort()
+        }
+        return GpuMesh(gl, v, intArrayOf(2), idx)
+    }
+
+    /**
+     * The shock shell of an entry around [ship] ([Shaders.shockVs]): its apex ahead of the hull's
+     * foremost point along the flight direction, wide enough for the hull's cross-section at its
+     * middle, a tail behind. Additive, depth-tested against the hull, no depth writes.
+     */
+    private fun drawShock(f: SceneFrame, ship: ShipState) {
+        val m = ships.model ?: return
+        val c = f.camera
+        val d = f.entryDir
+        // the hull's box seen along the flight direction: its reach ahead (h) and its half width across (rp)
+        ship.rot.rotateInverse(d, tmp)
+        val hx = m.rbxBounds[0] * 0.5f
+        val hy = m.rbxBounds[1] * 0.5f
+        val hz = m.rbxBounds[2] * 0.5f
+        val h = abs(tmp.x) * hx + abs(tmp.y) * hy + abs(tmp.z) * hz
+        val rp = sqrt((1f - tmp.x * tmp.x) * hx * hx + (1f - tmp.y * tmp.y) * hy * hy + (1f - tmp.z * tmp.z) * hz * hz)
+        val ahead = h * 1.15f + 2f
+        // it closes behind the hull's tail: a camera following the ship looks into its open end
+        // and sees the hull in a ring of fire
+        val length = ahead + h * 1.5f + rp * 1.5f
+        val radius = 1.05f * rp * sqrt(length / ahead)
+        ship.rot.rotate(m.centreX, m.centreY, m.centreZ, tmp)
+        ship.pos.relativeTo(c.pos, rel)
+        val ax = rel.x + tmp.x + d.x * ahead
+        val ay = rel.y + tmp.y + d.y * ahead
+        val az = rel.z + tmp.z + d.z * ahead
+        // any two directions across the flow
+        if (abs(d.y) < 0.9f) side.set(0f, 1f, 0f) else side.set(1f, 0f, 0f)
+        tmp2.cross(d, side).normalize()
+        side.cross(tmp2, d).normalize()
+        gl.enable(GL.BLEND)
+        gl.blendFunc(GL.ONE, GL.ONE)
+        gl.depthMask(false)
+        gl.enable(GL.DEPTH_TEST)
+        gl.disable(GL.CULL_FACE)
+        shock.use()
+        gl.uniformMatrix4fv(shock.u("u_viewProj"), nearVP.m, 0)
+        gl.uniform3f(shock.u("u_apex"), ax, ay, az)
+        gl.uniform3f(shock.u("u_axis"), -d.x, -d.y, -d.z)
+        gl.uniform3f(shock.u("u_side"), tmp2.x, tmp2.y, tmp2.z)
+        gl.uniform3f(shock.u("u_up"), side.x, side.y, side.z)
+        gl.uniform4f(shock.u("u_shape"), length, radius, f.time % 64f, f.entryGlow.coerceIn(0f, 1f))
+        val e = f.entryColor
+        gl.uniform3f(shock.u("u_color"), e[0], e[1], e[2])
+        shockMesh.draw()
+        gl.depthMask(true)
+        gl.disable(GL.BLEND)
+        gl.enable(GL.CULL_FACE)
+    }
+
+    /**
+     * The glow the hot air throws into the view, behind the ship: drawn before the hull, so the
+     * cabin and the canopy frame hide it (see [Shaders.entryFs]). Leaves depth testing as the near
+     * pass has it.
+     */
     private fun drawEntryGlow(f: SceneFrame) {
         val c = f.camera
         // where the velocity vector meets the screen; behind the camera, the point it leaves it by
@@ -476,11 +589,19 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         entryPt.set((x * k).coerceIn(-3f, 3f), (y * k).coerceIn(-3f, 3f), 0f)
         gl.enable(GL.BLEND)
         gl.blendFunc(GL.ONE, GL.ONE)
+        gl.disable(GL.DEPTH_TEST)
+        gl.depthMask(false)
+        gl.disable(GL.CULL_FACE)
         entry.use()
-        gl.uniform4f(entry.u("u_glow"), entryPt.x + c.shiftX, entryPt.y + c.shiftY, f.entryGlow.coerceIn(0f, 1f), f.time % 64f)
+        // fainter than the shell: the light scattered in the air beyond it
+        gl.uniform4f(entry.u("u_glow"), entryPt.x + c.shiftX, entryPt.y + c.shiftY, f.entryGlow.coerceIn(0f, 1f) * 0.55f, f.time % 64f)
         val e = f.entryColor
         gl.uniform4f(entry.u("u_color"), e[0], e[1], e[2], c.width.toFloat() / c.height.coerceAtLeast(1))
         fullscreen.draw()
+        gl.disable(GL.BLEND)
+        gl.depthMask(true)
+        gl.enable(GL.DEPTH_TEST)
+        gl.enable(GL.CULL_FACE)
     }
 
     // ------------------------------------------------------------------ background layers
@@ -902,7 +1023,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     fun dispose() {
         litInst.dispose()
-        for (p in arrayOf(sky, star, dust, glow, entry)) p.dispose()
+        for (p in arrayOf(sky, star, dust, glow, entry, shock)) p.dispose()
+        shockMesh.dispose()
         clouds.dispose()
         stationLit.dispose()
         for (m in stationMeshes) m.dispose()
@@ -915,6 +1037,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     companion object {
+        /** Share of the air's daylight radiance that reaches the ship and the stations as ambient light. */
+        private const val SKY_AMBIENT = 0.30f
+
         /** The near pass reaches at least this far when a terrain is drawn (m): 0.48 m depth steps there. */
         private const val TERRAIN_NEAR = 2000f
 
@@ -1015,7 +1140,7 @@ private class LitProgram(private val gl: Gl, instanced: Boolean) {
         gl.uniform3f(uFillDir, p.x, p.y, p.z)
         val fc = f.fillColor
         gl.uniform3f(uFillColor, fc[0], fc[1], fc[2])
-        val a = Environment.ambient
+        val a = f.ambient
         gl.uniform3f(uAmbient, a[0], a[1], a[2])
         gl.uniform1f(uEngine, engine)
         gl.uniform1f(uExposure, f.exposure)

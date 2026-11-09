@@ -681,7 +681,7 @@ class BodyRenderer(
         private const val STAR_HIDDEN_FADE = 0.9f
 
         fun bakeWidth(quality: Int) = if (quality == 0) 512 else 1024
-        fun atmoSteps(quality: Int) = if (quality == 0) 5 else 8
+        fun atmoSteps(quality: Int) = if (quality == 0) 5 else if (quality >= 3) 12 else 8
         fun detailOctaves(quality: Int) = when (quality) {
             0 -> 0
             1 -> 3

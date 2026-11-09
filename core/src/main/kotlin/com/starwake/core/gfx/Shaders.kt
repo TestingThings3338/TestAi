@@ -551,6 +551,84 @@ void main() {
 }
 """
 
+    /**
+     * The shock of an entry as a thing in the world: a paraboloid shell around the hull, its apex
+     * ahead of the ship in the direction of flight, its tail streaming behind. The hull is inside
+     * it, so from the cockpit the fire is outside the canopy and the cabin hides it like anything
+     * else out there; from outside the ship flies in a sheath of glowing air.
+     *
+     * The mesh is a unit grid (s along the flow 0..1, the angle round it 0..1); the shell is
+     * x = L·s² along the flow and r = R·s away from its axis.
+     */
+    val shockVs = HEADER + """
+layout(location = 0) in vec2 a_sa;
+uniform mat4 u_viewProj;
+uniform vec3 u_apex;      // camera-relative
+uniform vec3 u_axis;      // unit, the way the air flows (against the flight)
+uniform vec3 u_side;      // unit, perpendicular to the axis
+uniform vec3 u_up;        // unit, perpendicular to both
+uniform vec4 u_shape;     // x = length L (m), y = radius R at the tail (m), z = time (s, wrapped), w = intensity 0..1
+out vec2 v_sa;
+out vec3 v_nrm;
+out vec3 v_pos;
+void main() {
+    float s = a_sa.x;
+    float ang = a_sa.y * 6.2831853;
+    vec3 radial = cos(ang) * u_side + sin(ang) * u_up;
+    vec3 p = u_apex + u_axis * (s * s * u_shape.x) + radial * (s * u_shape.y);
+    v_sa = a_sa;
+    v_nrm = normalize(radial * (2.0 * s * u_shape.x) - u_axis * u_shape.y);
+    v_pos = p;
+    gl_Position = u_viewProj * vec4(p, 1.0);
+}
+"""
+
+    val shockFs = HEADER + """
+precision highp float;
+in vec2 v_sa;
+in vec3 v_nrm;
+in vec3 v_pos;
+uniform vec4 u_shape;
+uniform vec3 u_color;
+out vec4 o_color;
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+/** Value noise that repeats after [period] cells in x (the angle round the shell). */
+float pnoise(vec2 p, float period) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float x0 = mod(i.x, period);
+    float x1 = mod(i.x + 1.0, period);
+    return mix(mix(hash(vec2(x0, i.y)), hash(vec2(x1, i.y)), u.x), mix(hash(vec2(x0, i.y + 1.0)), hash(vec2(x1, i.y + 1.0)), u.x), u.y);
+}
+void main() {
+    float s = v_sa.x;
+    float k = u_shape.w;
+    float t = u_shape.z;
+    // a thin shell of glowing gas: the longer the sight line runs inside it, the brighter
+    float ndv = abs(dot(normalize(v_nrm), normalize(v_pos)));
+    float rim = 1.0 / (0.40 + 2.2 * ndv);
+    // streaks torn along the flow
+    float s1 = pnoise(vec2(v_sa.y * 20.0, s * 7.0 - t * 5.0), 20.0);
+    float s2 = pnoise(vec2(v_sa.y * 56.0, s * 19.0 - t * 11.0), 56.0);
+    float streak = s1 * 0.6 + s2 * 0.4;
+    streak = streak * streak * 1.9;
+    // the cap ahead of the nose is a veil one sees through; the walls streaming past are the fire
+    float cap = exp(-s * s * 14.0) * (0.22 + 0.5 * streak) * (0.6 + 0.4 * rim);
+    float wall = pow(1.0 - s, 1.2) * smoothstep(0.0, 0.12, s) * (0.3 + 1.7 * streak) * (0.55 + 0.45 * rim) * 1.1;
+    float flicker = 0.9 + 0.1 * pnoise(vec2(t * 21.0, 3.3), 4096.0);
+    float glow = k * flicker * (cap + wall);
+    // orange where it is thin, whitening only in the hottest streaks
+    vec3 col = mix(u_color, vec3(1.0, 0.86, 0.62), clamp(glow * 0.55 - 0.15, 0.0, 1.0)) * glow;
+    col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);
+    o_color = vec4(pow(col, vec3(0.4545)), 0.0);
+}
+"""
+
     val nebulaFs = HEADER + """
 precision highp float;
 in vec2 v_ndc;

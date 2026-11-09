@@ -135,7 +135,8 @@ void main() {
 """
 
     /** The fragment shader with the impostor's step count for the air of the far look ([BodyRenderer.atmoSteps]). */
-    fun fs(atmoSteps: Int) = HEADER + "#define ATMO_STEPS $atmoSteps\n" + FS_HEAD + CloudShaders.UNIFORMS + CloudShaders.FUNCTIONS + FS_BODY
+    fun fs(atmoSteps: Int, relief: Boolean = false) = HEADER + "#define ATMO_STEPS $atmoSteps\n" + (if (relief) "#define RELIEF 1\n" else "") +
+        FS_HEAD + CloudShaders.UNIFORMS + CloudShaders.FUNCTIONS + FS_BODY
 
     private const val FS_HEAD = """
 precision highp float;
@@ -175,6 +176,7 @@ uniform vec2 u_farAtmoK;       // vertical optical depth at the ground, brightne
 uniform vec4 u_farCam;         // camera - body centre (world axes, radii), w = 1 / radius (1/m)
 uniform vec3 u_camCentre;      // camera - body centre (world, m)
 uniform vec3 u_airL;           // in-scattered radiance of a thick air column in daylight (linear)
+uniform mat4 u_bodyRot4;       // body -> world (rotation only)
 uniform vec3 u_cloudCam;       // the camera in the cloud deck's frame (m, wrapped to the billow period)
 uniform vec3 u_cloudCamB;      // the same in the bank octave's tile coordinates (wrapped to 1)
 uniform vec4 u_cloudGeo;       // x = camera radius - deck radius (m), y = fog around the camera 0..1, z = radians per pixel
@@ -299,11 +301,25 @@ vec4 biplanar(vec3 p, vec3 pdx, vec3 pdy, vec3 nrm, float period) {
     return (a * w.x + b * w.y) / (w.x + w.y);
 }
 
+/**
+ * Slope of one swell of the sea at body-space position p (m): direction n (whole cycles in the
+ * 512 m the detail origin wraps by, so tiles agree), steepness a, angular rate w (whole cycles in
+ * the 600 s the time wraps by). It fades out before its wavelength is three pixels (fp = m per pixel).
+ */
+vec3 swell(vec3 p, vec3 n, float a, float w, float fp) {
+    float len = length(n);
+    float fade = clamp(512.0 / (len * fp * 3.0) - 0.7, 0.0, 1.0);
+    return n * (a / len * fade * cos(dot(p, n) * 0.012271846 + w * u_detailParams.w));
+}
+
 void main() {
     vec3 alb = v_col * v_col;
     vec3 N = normalize(v_nrm);
     vec3 pdx = dFdx(v_detailPos);
     vec3 pdy = dFdy(v_detailPos);
+    vec3 vdx = dFdx(v_view);
+    vec3 vdy = dFdy(v_view);
+    float relief = 0.0;
     // the far image's footprint (radians per pixel), in uniform control flow
     vec3 dirB = normalize(v_dirB);
     float farFp = max(length(dFdx(dirB)), length(dFdy(dirB)));
@@ -323,7 +339,22 @@ void main() {
             lum = mix(mid, mid * 0.55 + far * 0.45, smoothstep(900.0, 3000.0, v_dist));
         }
         alb *= mix(1.0, lum, detailW);
+        relief = (lum - 1.0) * detailW;
     }
+#ifdef RELIEF
+    // the ground's grain as relief: the detail pattern read as height (half a metre per unit),
+    // its slope from screen derivatives, tilting the normal the sun shades (close range only)
+    float reliefX = dFdx(relief);
+    float reliefY = dFdy(relief);
+    float reliefW = 1.0 - smoothstep(80.0, 480.0, v_dist);
+    if (reliefW > 0.01) {
+        vec3 r1 = cross(vdy, N);
+        vec3 r2 = cross(N, vdx);
+        float det = dot(vdx, r1);
+        vec3 grad = (reliefX * r1 + reliefY * r2) * (det < 0.0 ? -1.0 : 1.0);
+        N = normalize(abs(det) * N - grad * (0.5 * reliefW));
+    }
+#endif
     // the cloud deck: where the sight line crosses it (cl) and its shadow on this ground (cshadow)
     vec4 cl = vec4(0.0);
     float cshadow = 1.0;
@@ -375,12 +406,30 @@ void main() {
     vec3 col = alb * (sun + amb);
     if (v_water > 0.01) {
         vec3 V = -v_view / max(v_dist, 1e-3);
+        // the sea's surface: six swells tilt the normal (a long one, three of 13-14 m, two short)
+        float fpw = max(v_dist * u_cloudGeo.z, 1e-3);
+        vec3 slope = swell(v_detailPos, vec3(5.0, -3.0, 8.0), 0.055, 1.0891, fpw)
+            + swell(v_detailPos, vec3(37.0, 5.0, -12.0), 0.085, 2.1677, fpw)
+            + swell(v_detailPos, vec3(-9.0, 28.0, 21.0), 0.075, 2.0839, fpw)
+            + swell(v_detailPos, vec3(14.0, -33.0, 7.0), 0.070, 2.0944, fpw)
+            + swell(v_detailPos, vec3(61.0, 20.0, -44.0), 0.060, 3.0578, fpw)
+            + swell(v_detailPos, vec3(-90.0, 51.0, 30.0), 0.050, 3.6024, fpw);
+        vec3 sw = mat3(u_bodyRot4) * slope;
+        vec3 Nw = normalize(N - (sw - N * dot(sw, N)));
         vec3 Hh = normalize(u_sunDir + V);
-        float ndh = max(dot(N, Hh), 0.0);
-        float schlick = pow(1.0 - max(dot(N, V), 0.0), 5.0);
+        float ndh = max(dot(Nw, Hh), 0.0);
+        float schlick = pow(1.0 - max(dot(Nw, V), 0.0), 5.0);
         float fres = u_water.a * 0.35 + (1.0 - u_water.a * 0.35) * schlick;
-        vec3 glint = u_sunColor * v_sunT * ((pow(ndh, 160.0) * 3.0 + pow(ndh, 18.0) * 0.06) * step(0.0, ndl) * cshadow);
-        col = mix(col, u_water.rgb * (0.25 + 0.75 * v_day), fres * v_water) + glint * v_water;
+        // where the swells are smaller than the pixel their glitter is one wider, dimmer highlight
+        float calm = smoothstep(1.5, 24.0, fpw);
+        float glit = pow(ndh, mix(260.0, 70.0, calm)) * mix(4.5, 1.6, calm) + pow(ndh, 18.0) * 0.06;
+        vec3 glint = u_sunColor * v_sunT * (glit * step(0.0, ndl) * cshadow);
+        // the sky in the water: the bright haze of the horizon at grazing angles, the deeper zenith from above
+        float up = clamp(dot(reflect(-V, Nw), N), 0.0, 1.0);
+        vec3 sky = u_water.rgb * mix(vec3(1.30), vec3(0.50, 0.66, 0.92), sqrt(up)) * mix(0.55, 1.0, cshadow);
+        // the swells' own light and dark: a face turned to the sun is a little brighter
+        col *= 1.0 + clamp(dot(Nw - N, u_sunDir) * 2.2, -0.22, 0.30) * v_day;
+        col = mix(col, sky * (0.25 + 0.75 * v_day), fres * v_water) + glint * v_water;
     }
     col = mix(col, cl.rgb, cl.a);
     col = col * v_trans + v_inscatter;

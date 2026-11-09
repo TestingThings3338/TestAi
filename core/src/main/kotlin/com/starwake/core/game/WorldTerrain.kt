@@ -287,7 +287,7 @@ class BodyLooks(private val system: StarSystem) {
                     val style = StyleCatalog.chooseStyle(profile) ?: return@run null
                     SurfaceField.create(b.radius, style, profile.seed, profile.bodyClass)
                 } ?: continue
-                val w = if (!job.detailed) SMALL_WIDTH else if (quality >= 2) 2048 else 1024
+                val w = if (!job.detailed) SMALL_WIDTH else if (quality >= 3) 4096 else if (quality == 2) 2048 else 1024
                 val pixels = bake(field, w, w / 2, if (job.detailed) BAKE_THREADS else 1)
                 finished.add(Image(job.body, pixels, w, w / 2, job.detailed))
             } catch (t: Throwable) {

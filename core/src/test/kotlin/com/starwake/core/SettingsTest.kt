@@ -70,7 +70,7 @@ class SettingsTest {
     @Test
     fun serializedFormIsCompactKeyValuePairs() {
         val text = Settings().serialize()
-        assertEquals("q=2;fps=1;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;ship=0;fov=80;shake=1;chase=0", text)
+        assertEquals("q=2;fps=1;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;ship=0;fov=80;shake=1;chase=0;rev=0", text)
         assertTrue(!text.contains(' ') && !text.contains('\n'))
     }
 
@@ -117,7 +117,7 @@ class SettingsTest {
     fun outOfRangeValuesAreClamped() {
         val s = Settings()
         s.deserialize("q=7;fps=-3;sens=9.5;ship=-2")
-        assertEquals(2, s.quality)
+        assertEquals(Settings.MAX_QUALITY, s.quality)
         assertEquals(0, s.fpsMode)
         assertEquals(1.5f, s.sensitivity)
         assertEquals(0, s.ship)

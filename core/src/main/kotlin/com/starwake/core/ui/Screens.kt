@@ -129,7 +129,7 @@ class SettingsScreen(private val game: GameActions) {
     private var infoY = 0f
 
     init {
-        graphics += group.add(Selector("QUALITY", arrayOf("LOW", "MEDIUM", "HIGH"), { s.quality }, {
+        graphics += group.add(Selector("QUALITY", arrayOf("LOW", "MEDIUM", "HIGH", "ULTRA"), { s.quality }, {
             s.quality = it; game.settingsChanged(display = true, renderer = true)
         }))
         graphics += group.add(Selector("FRAME RATE", arrayOf("MAX", "60 FPS", "30 FPS"), { s.fpsMode }, {

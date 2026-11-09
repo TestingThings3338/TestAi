@@ -4,6 +4,16 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class DefaultQualityTest {
+    @kotlin.test.Test
+    fun theFlagshipTiersStartOnUltra() {
+        for (r in listOf("Adreno (TM) 740", "Adreno (TM) 750", "Adreno (TM) 830", "Immortalis-G715 MC11", "Immortalis-G925 MC12", "Mali-G720 MC8")) {
+            kotlin.test.assertTrue(Game.ultraCapable(r), r)
+        }
+        for (r in listOf("Adreno (TM) 660", "Adreno (TM) 710", "Adreno (TM) 725", "Adreno (TM) 810", "Mali-G710 MC10", "Mali-G78 MP24", "Mesa llvmpipe", "")) {
+            kotlin.test.assertFalse(Game.ultraCapable(r), r)
+        }
+    }
+
     private fun q(r: String) = Game.defaultQuality(r)
 
     @Test

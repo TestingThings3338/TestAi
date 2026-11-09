@@ -109,6 +109,7 @@ class ShipRenderer(private val gl: Gl) {
         val sc = Environment.sunColor
         val v = f.sunVisibility
         sunR = sc[0] * v; sunG = sc[1] * v; sunB = sc[2] * v
+        ambient = f.ambient
         sunScale = -1f
         val p = f.fillDir
         gl.uniform3f(uFillDir, p.x, p.y, p.z)
@@ -155,11 +156,14 @@ class ShipRenderer(private val gl: Gl) {
         }
     }
 
+    /** The frame's ambient light ([SceneFrame.ambient]), set by [begin]. */
+    private var ambient: FloatArray = Environment.ambient
+
     private fun lighting(k: Float) {
         if (k == sunScale) return
         sunScale = k
         gl.uniform3f(uSunColor, sunR * k, sunG * k, sunB * k)
-        val a = Environment.ambient
+        val a = ambient
         if (k < 1f) {
             gl.uniform3f(uAmbient, a[0] * SHIP_AMBIENT + CABIN_R, a[1] * SHIP_AMBIENT + CABIN_G, a[2] * SHIP_AMBIENT + CABIN_B)
         } else {

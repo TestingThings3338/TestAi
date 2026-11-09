@@ -281,7 +281,14 @@ class Game(
             platform.readAsset("font/ui.sdf"),
             system,
         ).also { content = it }
-        if (savedSettings == null && appliedQuality < 0) pickDefaultQuality(gl.getString(GL.RENDERER) ?: "")
+        val renderer = gl.getString(GL.RENDERER) ?: ""
+        if (savedSettings == null && appliedQuality < 0) pickDefaultQuality(renderer)
+        if (settings.graphicsRev < Settings.GRAPHICS_REV) {
+            // once per install: a GPU with frame time to spare moves from HIGH to ULTRA
+            if (settings.quality == 2 && ultraCapable(renderer)) settings.quality = 3
+            settings.graphicsRev = Settings.GRAPHICS_REV
+            settingsDirty = true
+        }
         c.field.setQuality(settings.quality)
         scene = SceneRenderer(gl, c, settings.quality)
         appliedQuality = settings.quality
@@ -912,7 +919,7 @@ class Game(
                 settingsDirty = true
             }
             "quality" -> num(1)?.let {
-                settings.quality = it.toInt().coerceIn(0, 2)
+                settings.quality = it.toInt().coerceIn(0, Settings.MAX_QUALITY)
                 settingsChanged(display = true, renderer = true)
             }
             "branch" -> if (s != null) when (arg) {
@@ -1217,6 +1224,21 @@ class Game(
                 else -> false
             }
             return if (weak) 0 else if (mid) 1 else 2
+        }
+
+        /**
+         * True for the GPUs that run HIGH with frame time to spare (the flagship tiers from 2023 on:
+         * Adreno 740 and up, Immortalis and Mali-G715 and up): they start on ULTRA.
+         */
+        internal fun ultraCapable(renderer: String): Boolean {
+            val r = renderer.lowercase()
+            val adreno = Regex("adreno[^0-9]*([0-9]{3})(?![0-9])").find(r)?.groupValues?.get(1)?.toIntOrNull()
+            val mali = Regex("(?:mali|immortalis)-g([0-9]{3})(?![0-9])").find(r)?.groupValues?.get(1)?.toIntOrNull()
+            return when {
+                adreno != null -> adreno >= 740 && adreno % 100 >= 30
+                mali != null -> mali >= 715
+                else -> false
+            }
         }
 
         /**

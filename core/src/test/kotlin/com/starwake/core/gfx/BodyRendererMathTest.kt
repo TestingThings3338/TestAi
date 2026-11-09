@@ -164,7 +164,8 @@ class BodyRendererMathTest {
     fun anythingCompiledOrBakedChangesTheConfig() {
         assertTrue(BodyRenderer.configKey(0) != BodyRenderer.configKey(1), "texture size / steps / octaves")
         assertTrue(BodyRenderer.configKey(1) != BodyRenderer.configKey(2), "detail octaves 3 vs 4")
-        assertEquals(BodyRenderer.configKey(2), BodyRenderer.configKey(3))
+        assertTrue(BodyRenderer.configKey(2) != BodyRenderer.configKey(3), "ULTRA marches the air in 12 steps")
+        assertEquals(BodyRenderer.configKey(3), BodyRenderer.configKey(4))
     }
 
     @Test

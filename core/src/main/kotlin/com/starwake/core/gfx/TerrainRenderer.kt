@@ -212,7 +212,7 @@ class TerrainRenderer(
 ) {
     private val ownClouds = if (sharedClouds == null) CloudTextures(gl, CloudField()) else null
     private val clouds: CloudTextures = sharedClouds ?: ownClouds!!
-    private val prog = ShaderProgram(gl, "terrain", TerrainShaders.VS, TerrainShaders.fs(BodyRenderer.atmoSteps(quality)))
+    private val prog = ShaderProgram(gl, "terrain", TerrainShaders.VS, TerrainShaders.fs(BodyRenderer.atmoSteps(quality), quality >= 2))
     private val uViewProj = prog.u("u_viewProj")
     private val uFarDist = prog.u("u_farDist")
     private val uFade = prog.u("u_fade")
@@ -299,7 +299,7 @@ class TerrainRenderer(
         gl.bindBuffer(GL.ELEMENT_ARRAY_BUFFER, ibo)
         gl.bufferData(GL.ELEMENT_ARRAY_BUFFER, TileFormat.INDICES * 2, Buffers.of(TileFormat.indices()), GL.STATIC_DRAW)
         detailTex = gl.genTexture()
-        val size = if (quality == 0) 128 else 256
+        val size = if (quality == 0) 128 else if (quality >= 3) 512 else 256
         gl.bindTexture(GL.TEXTURE_2D, detailTex)
         gl.pixelStorei(GL.UNPACK_ALIGNMENT, 1)
         gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, size, size, GL.RGBA, GL.UNSIGNED_BYTE, Buffers.of(DetailTextures.build(size)))
@@ -506,9 +506,11 @@ class TerrainRenderer(
         gl.activeTexture(GL.TEXTURE0)
         gl.uniform1i(uCloudMap, 2)
         gl.uniform1i(uCloudNoise, 3)
+        // radians per pixel: the sea's swells fade by it too, deck or not
+        val pxAngle = 2f * camera.tanHalfY / max(camera.height, 1)
         if (!deck.on) {
             gl.uniform4f(uCloud, 2f, 0f, 1f, 1f)
-            gl.uniform4f(uCloudGeo, 0f, 0f, 0f, 0f)
+            gl.uniform4f(uCloudGeo, 0f, 0f, pxAngle, 0f)
             return
         }
         val r = planet.surface.rotation()
@@ -536,7 +538,7 @@ class TerrainRenderer(
             wrap((k[6] * qx + k[7] * cb[1] + k[8] * qz) / bp, 1.0),
         )
         val rc = sqrt(cb[0] * cb[0] + cb[1] * cb[1] + cb[2] * cb[2])
-        gl.uniform4f(uCloudGeo, (rc - deck.radius).toFloat(), deck.fog, 2f * camera.tanHalfY / max(camera.height, 1), 0f)
+        gl.uniform4f(uCloudGeo, (rc - deck.radius).toFloat(), deck.fog, pxAngle, 0f)
     }
 
     private fun wrap(v: Double, period: Double): Float = (v - period * kotlin.math.floor(v / period)).toFloat()

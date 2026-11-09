@@ -204,6 +204,45 @@ object SolScenarios {
     }
 
     /**
+     * `sol-sea`: low over the open sea on the Earth's day side, towards the sun and away from it,
+     * from the cockpit and from outside: swells, glitter, the sky in the water.
+     */
+    val sea = gameScenario("sol-sea", "Low over the Earth's sea: swells, sun glitter and the reflected sky, cockpit and external", layout = StarSystem.Layout.SOL) {
+        cmd("launch space")
+        frames(5)
+        cmd("throttle 0")
+        val (lat0, lon0) = earthTarget()
+        var found = false
+        var lat = lat0
+        var lon = lon0
+        search@ for (dl in 0..12) for (sign in listOf(1, -1)) for (dlat in listOf(0.0, 4.0, -4.0)) {
+            lat = lat0 + dlat
+            lon = lon0 + sign * dl * 1.5
+            cmd("over EARTH $lat $lon 120")
+            frame()
+            frame()
+            if (state("ground") == "water") {
+                found = true
+                break@search
+            }
+        }
+        report.note("sea at lat %.2f lon %.2f: %s".format(lat, lon, if (found) "water" else "none found, showing land"))
+        for (alt in listOf(40, 400, 3000)) {
+            cmd("over EARTH $lat $lon $alt")
+            cmd("stick 0 1")
+            frames(if (alt > 1000) 14 else 6)
+            cmd("stick off")
+            frames(40)
+            settle()
+            shot("sol-sea-%04dm".format(alt))
+        }
+        cmd("over EARTH $lat $lon 60")
+        cmd("view external")
+        settle()
+        shot("sol-sea-external")
+    }
+
+    /**
      * `sol-perf`: the engine's own cost of a descent over the Earth on a no-op GL (no driver): CPU
      * time and bytes allocated per frame on the game thread while the terrain streams under a
      * moving ship. The per-frame path must not allocate (run with -Pnoea, see the perf scenario).
@@ -260,12 +299,26 @@ object SolScenarios {
         cmd("stick off")
         cmd("throttle 1")
         var shots = 0
-        for (i in 0 until 60 * 40) {
+        val seconds = System.getenv("SOL_ENTRY_SECONDS")?.toIntOrNull() ?: 40
+        for (i in 0 until 60 * seconds) {
             frame()
             Thread.sleep(8)
             if (i % 60 == 0) {
                 report.note("t %2d s: alt %s speed %s heat %s glow %s hull %s zone %s".format(i / 60, state("alt"), state("speed"), state("heat"), state("glow"), state("integrity"), state("zone")))
                 if (shots < 14) shot("sol-entry-%02d".format(shots++))
+                // the shock from outside, every third second
+                if (i % 180 == 120 && shots < 14) {
+                    cmd("view external")
+                    frame()
+                    frame()
+                    shot("sol-entry-%02d-external".format(shots))
+                    // and from the side
+                    cmd("look 75 10")
+                    frames(3)
+                    shot("sol-entry-%02d-side".format(shots))
+                    cmd("look off")
+                    cmd("view cockpit")
+                }
             }
             val alt = state("alt").toDoubleOrNull() ?: 1e9
             if (alt < 1500.0) cmd("throttle 0.2")

@@ -309,6 +309,7 @@ object Scenarios {
         "sol" to SolScenarios.sol,
         "sol-entry" to SolScenarios.entry,
         "sol-bodies" to SolScenarios.bodies,
+        "sol-sea" to SolScenarios.sea,
         "sol-perf" to SolScenarios.perf,
         "terrain" to Scenario(
             "terrain",

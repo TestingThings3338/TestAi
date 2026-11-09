@@ -169,6 +169,18 @@ differs from a decision above, this section wins until the matching port replace
     (decision 17a), 512 × 256 for all of them in the background after the start and 2048 × 1024
     (HIGH) for the terrain body.
 
+45. **Entry visuals**: the shock is a paraboloid shell around the hull (apex ahead of the hull
+    along the flight direction, closed just behind the tail), additive and depth-tested against
+    the hull, so the fire is outside the cabin. A fainter screen glow is drawn behind the ship.
+    The glow lights the hull and the cabin from the direction of flight.
+46. **ULTRA** is a fourth quality level (terrain ρ 3.2 and 2,400 tile slots, 12 air steps, a
+    4096 × 2048 far image, a 512² ground texture, 4 tile workers). GPUs of the Adreno 740 /
+    Immortalis-G715 class and newer are moved from HIGH to ULTRA once (`graphicsRev`); after that
+    the pilot's choice stands. HIGH and ULTRA shade the ground's detail pattern as relief; the sea
+    has six swells, sun glitter and a mirrored sky on every level.
+47. **Sky light**: inside an atmosphere the air's daylight joins the ambient light on the ship
+    and the stations.
+
 ## Optional exports that would improve fidelity
 
 Not blocking; the port proceeds without them: Studio GUI exports or screenshots of SystemMap,

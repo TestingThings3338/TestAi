@@ -1714,6 +1714,7 @@ class Session(
             "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
             "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name.replace(' ', '-') else "-"} terrain=${surface != null} " +
             "sea=${"%.1f".format(if (here.nearestBody >= 0) here.bodyDistance - system.bodies[here.nearestBody].radius else 0.0)} " +
+            "ground=${surface?.let { if (it.floorHit(ship.pos, 1e7, floor)) (if (floor.water) "water" else "land") else null } ?: "-"} " +
             "g=${"%.2f".format(gravity)} air=${"%.4f".format(airDensity)} heat=${"%.2f".format(heat)} glow=${"%.2f".format(entryGlow)} integrity=${"%.2f".format(hull)}"
 
     companion object {

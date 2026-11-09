@@ -25,7 +25,9 @@ class TerrainQuality(
 ) {
     companion object {
         fun forLevel(quality: Int): TerrainQuality = when {
-            quality >= 2 -> TerrainQuality(2.5, 2.5, 1600, 8)
+            // ULTRA: full detail half as far again, for GPUs with frame time to spare
+            quality >= 3 -> TerrainQuality(2.5, 3.2, 2400, 10)
+            quality == 2 -> TerrainQuality(2.5, 2.5, 1600, 8)
             quality == 1 -> TerrainQuality(2.5, 2.25, 1200, 6)
             else -> TerrainQuality(5.0, 2.0, 900, 4)
         }
