@@ -1416,6 +1416,7 @@ class Session(
             "cam=${"%.2f".format(cameraPos.x - ship.pos.x)},${"%.2f".format(cameraPos.y - ship.pos.y)},${"%.2f".format(cameraPos.z - ship.pos.z)} " +
             "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
             "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name else "-"} limit=${"%.1f".format(here.speedLimit)} " +
+            "limiter=${if (here.limitingBody >= 0) system.bodies[here.limitingBody].name else "-"} " +
             "ref=${system.frameName(refFrame).replace(' ', '_')} fpos=${"%.1f".format(fp.x)},${"%.1f".format(fp.y)},${"%.1f".format(fp.z)} " +
             "clock=${"%.3f".format(system.clock)} rocks=${debris.visible} rhits=$debrisHits rheat=${"%.3f".format(debrisHeat)}"
     }

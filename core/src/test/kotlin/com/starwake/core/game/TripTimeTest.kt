@@ -156,4 +156,102 @@ class TripTimeTest {
         // station lets go of the ship once it leaves its zone)
         for (t in fromHome) if (t.label.contains("Mars") || t.label.contains("Luna")) assertTrue(t.shadow < 90.0, "too long from home: $t")
     }
+
+    /** An approach to a moon: when the ship first came within 1 km of the surface, and how fast it was then. */
+    private class Arrival(val label: String) {
+        var seconds = Double.NaN
+        var speedAt1km = Float.NaN
+        var peak = 0f
+        var limitingBody = ""
+
+        override fun toString() =
+            "%-36s 1 km after %6.1f s at %8.1f m/s  peak %7.2f Mm/s  limit from %s".format(label, seconds, speedAt1km, peak / 1e6, limitingBody)
+    }
+
+    /** Full throttle at body [to], the nose re-aimed every half second, until 1 km above it (or [maxSeconds]). */
+    private fun arrive(s: Session, to: Int, label: String, maxSeconds: Double = 240.0): Arrival {
+        val target = s.system.bodies[to]
+        val a = Arrival(label)
+        s.debugFace(to)
+        s.setThrottle(1f)
+        var n = 0
+        while (n < maxSeconds * 60) {
+            if (n % 30 == 0) s.debugFace(to)
+            val before = s.ship.speed
+            input.begin()
+            s.frame(1f / 60f, input)
+            n++
+            a.peak = maxOf(a.peak, s.ship.speed)
+            if (dist(s, to) - target.radius < 1000.0) {
+                a.seconds = n / 60.0
+                // the speed the ship came in with (this frame's collision may already have stopped it)
+                a.speedAt1km = maxOf(before, s.ship.speed)
+                a.limitingBody = s.system.bodies[s.here.limitingBody].name
+                break
+            }
+        }
+        return a
+    }
+
+    /** Launched from station [station] at clock 0 (the slot, LAUNCH, two seconds out). */
+    private fun launched(station: Int): Session {
+        val s = Session(WorldBuilder.sol(), settings, host, GearRig())
+        s.startDocked(station)
+        repeat(5) {
+            input.begin()
+            s.frame(1f / 60f, input)
+        }
+        s.launchFromStation()
+        repeat(120) {
+            input.begin()
+            s.frame(1f / 60f, input)
+        }
+        return s
+    }
+
+    /** [alt] metres above body [from] on the line to body [to], nose on it, at rest, at clock 0. */
+    private fun above(from: String, alt: Double, to: String): Session {
+        val world = WorldBuilder.sol()
+        val s = Session(world, settings, host, GearRig())
+        s.startInSpace()
+        val a = world.bodies[world.bodyIndex(from)]
+        val b = world.bodies[world.bodyIndex(to)]
+        val dx = b.pos.x - a.pos.x
+        val dy = b.pos.y - a.pos.y
+        val dz = b.pos.z - a.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        val r = a.radius + alt
+        s.teleport(a.pos.x + dx / d * r, a.pos.y + dy / d * r, a.pos.z + dz / d * r, dx.toFloat(), dy.toFloat(), dz.toFloat(), true)
+        return s
+    }
+
+    /**
+     * A moon beside a big planet slows the ship down by itself (Roblox `ShipGravity:getState`: the
+     * limit is the minimum over all bodies, "a small moon close by must not hide a braking giant"
+     * and the other way round, 03-world.md B.3). With the nearest body's limit alone, the planet's
+     * altitude carried the ship to the moon's surface at Mm/s.
+     */
+    @Test
+    fun moonsBesideBigPlanetsAreReachedAtLandingSpeed() {
+        val sol = WorldBuilder.sol()
+        fun station(id: String) = sol.stationIndex(id)
+        fun body(name: String) = sol.bodyIndex(name)
+        val runs = ArrayList<Arrival>()
+        // at clock 0 the line from GALILEAN REFINERY to Europa passes 22 Mm from Jupiter's centre,
+        // inside its cloud tops: Europa is flown from Jupiter
+        for (moon in listOf("Io", "Ganymede", "Callisto")) {
+            runs += arrive(launched(station("SOL-GALILEAN")), body(moon), "GALILEAN REFINERY -> $moon")
+        }
+        for (moon in listOf("Europa", "Callisto")) runs += arrive(above("Jupiter", 50_000.0, moon), body(moon), "50 km above Jupiter -> $moon")
+        for (moon in listOf("Phobos", "Deimos")) runs += arrive(launched(station("SOL-ARES")), body(moon), "ARES DEEP -> $moon")
+        runs += arrive(launched(station("SOL-MERIDIAN")), body("Luna"), "MERIDIAN -> Luna")
+        runs += arrive(above("Saturn", 50_000.0, "Titan"), body("Titan"), "50 km above Saturn -> Titan")
+        runs += arrive(above("Neptune", 50_000.0, "Triton"), body("Triton"), "50 km above Neptune -> Triton")
+        println(runs.joinToString("\n"))
+        for (a in runs) {
+            assertTrue(!a.seconds.isNaN(), "never arrived: $a")
+            // the approach law at 1 km (0.32/s x 1 km) plus a little lag behind the falling limit
+            assertTrue(a.speedAt1km <= 400f, "too fast 1 km above the moon: $a")
+        }
+    }
 }

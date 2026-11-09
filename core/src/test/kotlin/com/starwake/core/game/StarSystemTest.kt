@@ -44,6 +44,33 @@ class StarSystemTest {
     }
 
     @Test
+    fun theLimitIsTheMinimumOverAllBodies() {
+        val jupiter = system.bodyIndex("Jupiter")
+        val io = system.bodyIndex("Io")
+        val j = system.bodies[jupiter].pos
+        val m = system.bodies[io]
+        // 13 Mm above Io on Jupiter's side, flying at Io: by size Jupiter is the nearest body (122 Mm
+        // up, 4.4 radii against Io's 7.1), but Io limits (ShipGravity: the minimum over all bodies)
+        var ux = j.x - m.pos.x
+        var uy = j.y - m.pos.y
+        var uz = j.z - m.pos.z
+        val n = sqrt(ux * ux + uy * uy + uz * uz)
+        ux /= n; uy /= n; uz /= n
+        val r = m.radius + 13e6
+        val p = at(m.pos.x + ux * r, m.pos.y + uy * r, m.pos.z + uz * r)
+        val v = Vec3((-ux * 1e6).toFloat(), (-uy * 1e6).toFloat(), (-uz * 1e6).toFloat())
+        val l = system.locate(p, v, local, StarSystem.Locality())
+        assertEquals(jupiter, l.nearestBody)
+        assertEquals(io, l.limitingBody)
+        assertEquals(13e6, l.limitAltitude, 1.0)
+        assertEquals(-1f, l.limitRadialFraction, 1e-4f)
+        // Io's approach law: 13 Mm x 0.32/s, not Jupiter's departure law (122 Mm x 0.6/s = 73 Mm/s)
+        assertEquals(13e6f * StarSystem.APPROACH_RATE.toFloat(), l.speedLimit, 13e6f * 0.32f * 1e-3f)
+        // and the zone says so: an approach (to Io), not a departure (from Jupiter)
+        assertEquals(StarSystem.Zone.APPROACH, l.zone)
+    }
+
+    @Test
     fun departingIsFasterThanApproaching() {
         val p = at(earth.pos.x, earth.pos.y + earth.radius + 2e6, earth.pos.z)
         val away = system.locate(p, Vec3(0f, 1000f, 0f), local, StarSystem.Locality()).speedLimit

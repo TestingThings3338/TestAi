@@ -17,6 +17,7 @@ import kotlin.math.sqrt
  *  - "sol-views": Earth, Luna, Mars, Jupiter and Saturn from the cockpit, with their markers and a
  *    lock; Jupiter's cloud-top barrier and its LANDING BLOCKED prompt;
  *  - "sol-trip": MERIDIAN to Mars at full throttle, timed to Mars's mass-shadow edge and to 60 km;
+ *  - "sol-moon": GALILEAN REFINERY to Io at full throttle: Io, not Jupiter, limits the speed;
  *  - "sol-docking": the real auto-dock at all six Sol stations (no-op GL), then each station on
  *    approach (GL);
  *  - "ring-debris" and "orbits" (03-world.md 9.5): Saturn's ring from inside, the B ring against the
@@ -371,6 +372,119 @@ object SolScenarios {
             }
             shot("sol-trip-mars-arrival")
             log("replay: ${game.debugInfo.substringAfter(" alt=").substringBefore(" throttle=")} body=${field("body")}")
+        }
+    }
+
+    // ------------------------------------------------------------------ sol-moon
+
+    /** Times of the moon approach's shots, s after the throttle went up. */
+    private val MOON_MARKS = doubleArrayOf(5.0, 30.0, 50.0)
+
+    /** Docked at GALILEAN REFINERY (from the docked start), LAUNCH, nose and lock on Io; returns the frame the approach starts on. */
+    private fun GameDriver.moonStart(ioIndex: Int, galilean: Int): Long {
+        cmd("launch")
+        frames(10)
+        cmd("docked galilean")
+        frames(2)
+        if (field("docking") != "true") fail("the slide into GALILEAN REFINERY did not start")
+        var n = 0
+        while (game.stateName != "docked") {
+            frame()
+            if (++n > 60 * 60) fail("never docked at GALILEAN REFINERY")
+        }
+        if (field("station") != "$galilean") fail("not docked at GALILEAN REFINERY")
+        cmd("undock")
+        frames(90)
+        cmd("face io")
+        cmd("lock-body io")
+        cmd("throttle 1")
+        frame()
+        if (field("lock") != "${Session.LOCK_BODY}:$ioIndex") fail("Io is not locked: ${field("lock")}")
+        return frame
+    }
+
+    /** One frame of the approach: the pilot keeps the nose on Io (twice a second). */
+    private fun GameDriver.moonFrame(start: Long) {
+        if ((frame - start) % 30 == 0L) game.debugCommand("face io")
+        frame()
+    }
+
+    /**
+     * GALILEAN REFINERY to Io at full throttle. Jupiter is the nearest body by size for most of the
+     * way, but Io limits the speed (the minimum over all bodies, `ShipGravity:getState`): the ship
+     * reaches Io's surface at landing speeds instead of tens of Mm/s.
+     */
+    fun moon(env: ScenarioEnv) {
+        val sol = WorldBuilder.sol()
+        val ioIndex = sol.bodyIndex("Io")
+        val galilean = sol.stationIndex("SOL-GALILEAN")
+        val io0 = sol.bodies[ioIndex]
+        var arrival = -1L
+        val marks = ArrayList<Pair<Long, String>>()
+        noop(env) {
+            val start = moonStart(ioIndex, galilean)
+            val d0 = dist(vec("pos"), world().bodies[ioIndex].pos) - io0.radius
+            report.note("GALILEAN REFINERY -> Io: %,.0f km to Io's surface at clock %.1f s".format(d0 / 1000.0, num("clock")))
+            var t12 = -1.0
+            var tLow = -1.0
+            var t1km = -1.0
+            var v1km = 0.0
+            var peak = 0.0
+            var ioUnderJupiter = 0.0
+            var mark = 0
+            while (frame - start < 60 * 150) {
+                val before = num("speed")
+                moonFrame(start)
+                val t = (frame - start) / 60.0
+                val alt = dist(vec("pos"), world().bodies[ioIndex].pos) - io0.radius
+                peak = maxOf(peak, num("speed"))
+                // Jupiter is the nearest body by size, Io sets the limit
+                if (field("body") == "Jupiter" && field("limiter") == "Io") ioUnderJupiter += 1.0 / 60.0
+                if (mark < MOON_MARKS.size && t >= MOON_MARKS[mark]) {
+                    marks += frame to "sol-moon-%02.0fs".format(MOON_MARKS[mark])
+                    log("t %4.1f s: Io %,.0f km below, speed %s m/s, limit %s, nearest %s, limiter %s".format(t, alt / 1000.0, field("speed"), field("limit"), field("body"), field("limiter")))
+                    mark++
+                }
+                if (t12 < 0 && alt + io0.radius < io0.radius * StarSystem.APPROACH_RADII) {
+                    t12 = t
+                    marks += frame to "sol-moon-io-12r"
+                    // the zone names the body that limits the speed: an approach to Io, not a departure from Jupiter
+                    if (field("zone") != "APPROACH") fail("12 radii from Io the zone is ${field("zone")}, not APPROACH")
+                }
+                if (tLow < 0 && alt < StarSystem.LOW_ALTITUDE) {
+                    tLow = t
+                    marks += frame to "sol-moon-io-60km"
+                }
+                if (alt < 1000.0) {
+                    t1km = t
+                    v1km = maxOf(before, num("speed"))
+                    arrival = frame
+                    break
+                }
+            }
+            if (t1km < 0) fail("never came within 1 km of Io in 150 s")
+            report.note(
+                "GALILEAN REFINERY -> Io: 12 radii after %.1f s, 60 km after %.1f s, 1 km after %.1f s at %.0f m/s; peak %.2f Mm/s; Io set the limit for %.1f s while Jupiter was the nearest body"
+                    .format(t12, tLow, t1km, v1km, peak / 1e6, ioUnderJupiter),
+            )
+            if (v1km > 400.0) fail("reached Io's surface too fast: %.0f m/s 1 km up".format(v1km))
+            if (ioUnderJupiter <= 0.0) fail("Io never limited the speed while Jupiter was the nearest body")
+            if (field("body") != "Io") fail("arrived, but the nearest body is ${field("body")}")
+        }
+        // the same approach drawn at half resolution: shots at the marks and on arrival
+        run(half(env)) {
+            val start = moonStart(ioIndex, galilean)
+            marks.sortBy { it.first }
+            var k = 0
+            while (frame < arrival + 30) {
+                moonFrame(start)
+                while (k < marks.size && frame == marks[k].first) {
+                    shot(marks[k].second)
+                    k++
+                }
+            }
+            shot("sol-moon-io-arrival")
+            log("replay: ${game.debugInfo.substringAfter(" alt=").substringBefore(" throttle=")} body=${field("body")} limiter=${field("limiter")}")
         }
     }
 

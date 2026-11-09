@@ -338,6 +338,11 @@ object Scenarios {
             "Sol: MERIDIAN to Mars at full throttle with the nose on Mars, timed to Mars's mass-shadow edge (about a minute) and to 60 km; peak speed at most 0.5 c; shots on the way",
         ) { SolScenarios.trip(it) },
 
+        "sol-moon" to Scenario(
+            "sol-moon",
+            "Sol: GALILEAN REFINERY to Io at full throttle with the nose on Io; Io limits the speed while Jupiter is the nearest body (the limit is the minimum over all bodies), so the ship comes within 1 km of Io at landing speeds (at most 400 m/s) and the zone 12 radii out is an APPROACH (to Io); shots on the way",
+        ) { SolScenarios.moon(it) },
+
         "sol-docking" to Scenario(
             "sol-docking",
             "Sol: the real auto-dock from 1.5 km behind each of the six stations (no-op GL), in its frame, clear of the hull in and out; then each station on approach (GL)",
