@@ -83,7 +83,7 @@ object TerrainScenarios {
     }
 
     /** Everything one planet needs on one GL context. */
-    private class Scene(env: ScenarioEnv, gl: Gl, val tp: TestPlanet, quality: Int, pool: TileWorkerPool, bake: Boolean) {
+    private class Scene(env: ScenarioEnv, gl: Gl, val tp: TestPlanet, quality: Int, pool: TileWorkerPool, bake: Boolean, seam: Boolean = false) {
         val planet = TerrainPlanet.forBody(tp.name, tp.radius, tp.bodyClass, tp.seed, quality, pool, systemName = "Sol", gravityG = tp.gravityG)
         val system = StarSystem()
         val target = DoubleArray(3)
@@ -104,7 +104,7 @@ object TerrainScenarios {
 
         init {
             planet.awaitReady()
-            chooseTarget(planet, tp, target)
+            if (seam) seamTarget(planet, tp, target) else chooseTarget(planet, tp, target)
             frame(target, east, north)
             // sun 35° above the target's eastern horizon, a little from the south
             val el = 35.0 * PI / 180
@@ -183,6 +183,47 @@ object TerrainScenarios {
         }
     }
 
+    /**
+     * A cube-sphere seam worth looking at: the dry point with the most relief among the 8 cube
+     * corners (three faces meet) and the 12 face edges (sampled), corners preferred.
+     */
+    fun seamTarget(planet: TerrainPlanet, tp: TestPlanet, out: DoubleArray) {
+        val field = planet.field
+        val fs = FieldScratch()
+        val s = SurfaceSample()
+        val probe = DoubleArray(3)
+        val v = DoubleArray(3)
+        var best = -1e30
+        for (axis in 0 until 3) for (si in intArrayOf(-1, 1)) for (sj in intArrayOf(-1, 1)) for (k in 0..40) {
+            // edge along [axis]: the other two coordinates at ±1 (equi-angular parameter along it)
+            val t = kotlin.math.tan((k / 20.0 - 1.0) * PI / 4)
+            val i = (axis + 1) % 3
+            val j = (axis + 2) % 3
+            v[axis] = t; v[i] = si.toDouble(); v[j] = sj.toDouble()
+            val l = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+            val x = v[0] / l
+            val y = v[1] / l
+            val z = v[2] / l
+            field.collect(x * tp.radius - 2e3, y * tp.radius - 2e3, z * tp.radius - 2e3, x * tp.radius + 2e3, y * tp.radius + 2e3, z * tp.radius + 2e3, 2_000.0, fs)
+            field.sample(x, y, z, 2_000.0, fs, s)
+            if (s.isWater || s.macro.frost > 0.3) continue
+            var lo = 1e9
+            var hi = -1e9
+            for (q in 0 until 8) {
+                tangentOffset(x, y, z, q * PI / 4, 30_000.0 / tp.radius, probe)
+                field.sample(probe[0], probe[1], probe[2], 2_000.0, fs, s)
+                lo = min(lo, s.macro.height)
+                hi = max(hi, s.macro.height)
+            }
+            val corner = k == 0 || k == 40
+            val score = min(hi - lo, 3000.0) / 1000.0 + (if (corner) 0.75 else 0.0)
+            if (score > best) {
+                best = score
+                out[0] = x; out[1] = y; out[2] = z
+            }
+        }
+    }
+
     /** The direction (x, y, z) moved by [angle] radians of arc towards bearing [bearing] (0 = east). */
     private fun tangentOffset(x: Double, y: Double, z: Double, bearing: Double, angle: Double, out: DoubleArray) {
         val e = DoubleArray(3)
@@ -249,7 +290,7 @@ object TerrainScenarios {
         sky.stars.draw(GL.POINTS)
         gl.disable(GL.BLEND)
         val hidden = sc.planet.surfaceReady()
-        sc.bodies.setSurfaceHidden(1, hidden)
+        sc.bodies.setSurfaceHidden(1, hidden, sc.planet.field.minRadius)
         sc.bodies.render(c, time, 1f)
         gl.viewport(0, 0, w, h)
         sc.renderer.prepare(sc.gpu, c)
@@ -316,6 +357,7 @@ object TerrainScenarios {
         val altIdx = envList("TERRAIN_ALTS")?.map { it.toInt() }
         val views = envList("TERRAIN_VIEWS") ?: listOf("down", "horizon")
         val doDescent = System.getenv("TERRAIN_DESCENT") != "0"
+        val doSeams = System.getenv("TERRAIN_SEAMS") != "0"
         val planets = PLANETS.filter { onlyPlanets == null || it.label in onlyPlanets }
         val r = env.report
         val outDir = opts.outDir
@@ -357,6 +399,7 @@ object TerrainScenarios {
                     montage(shots, File(outDir, "terrain-$qn-${tp.label}-montage.png"), 4)
                     if (quality == 2) sceneShot(env, s, sc, w, h)
                     sc.dispose()
+                    if (quality == 2 && doSeams && tp.label != "mars") seamShots(env, s, gl, sky, tp, pool, w, h)
                 }
                 pool.shutdown()
             }
@@ -370,6 +413,41 @@ object TerrainScenarios {
             pool.shutdown()
             sky.dispose()
         }
+    }
+
+    /**
+     * Cube-sphere seams: the camera above a cube corner (or face edge, [seamTarget]) at 3 km,
+     * 600 m and 120 m, down and to the horizon, plus the normals view at 600 m: tiles of up to
+     * three faces meet under the camera.
+     */
+    private fun seamShots(env: ScenarioEnv, s: GlSession, gl: Gl, sky: Sky, tp: TestPlanet, pool: TileWorkerPool, w: Int, h: Int) {
+        val r = env.report
+        val sc = Scene(env, gl, tp, 2, pool, bake = false, seam = true)
+        val u = sc.target
+        val f = com.starwake.core.terrain.CubeSphere.faceOf(u[0], u[1], u[2])
+        val ab = DoubleArray(2)
+        com.starwake.core.terrain.CubeSphere.coords(f, u[0], u[1], u[2], ab)
+        r.note("  %s seam target (%.4f, %.4f, %.4f): face %d at (%.4f, %.4f)%s".format(tp.label, u[0], u[1], u[2], f, ab[0], ab[1],
+            if (kotlin.math.abs(kotlin.math.abs(ab[0]) - 1) < 1e-9 && kotlin.math.abs(kotlin.math.abs(ab[1]) - 1) < 1e-9) ", a cube corner (three faces)" else ", a face edge"))
+        val shots = ArrayList<File>()
+        for (alt in doubleArrayOf(3_000.0, 600.0, 120.0)) for (view in listOf("down", "horizon")) {
+            placeCamera(sc, alt, view)
+            settle(sc, 20_000)
+            val shot = Shot()
+            render(gl, sc, sky, w, h, 0f, shot)
+            s.drainErrors(0)
+            val name = "terrain-high-${tp.label}-seam-${altLabel(alt)}-$view"
+            shots += s.screenshot(name)
+            r.note("  %-36s resident %d, %d draws %.2f M tris".format(name, sc.planet.tree.residentCount, shot.drawCalls, shot.triangles / 1e6))
+        }
+        placeCamera(sc, 600.0, "down")
+        settle(sc, 20_000)
+        sc.renderer.debugView = 3
+        render(gl, sc, sky, w, h, 0f, Shot())
+        shots += s.screenshot("terrain-high-${tp.label}-seam-00600m-down-normals")
+        sc.renderer.debugView = 0
+        montage(shots, File(env.opts.outDir, "terrain-high-${tp.label}-seam-montage.png"), 4)
+        sc.dispose()
     }
 
     /**
@@ -691,6 +769,7 @@ object TerrainScenarios {
                 sc.planet.tree.clear()
                 val log = descent(env, null, sc, null, opts.width, opts.height, "perf-$qn-${tp.label}", null, gl)
                 summarize(env, "$qn ${tp.label}", sc, log, pool, gl)
+                if (quality == 2) queryCost(env, sc)
                 sc.dispose()
             }
             pool.shutdown()
@@ -729,6 +808,85 @@ object TerrainScenarios {
         }
     }
 
+    /**
+     * The ground queries per physics substep (§9.10): a low pass at 260 m/s sampled at 240 Hz
+     * (consecutive points 1.1 m apart, 2 m above the floor) and scattered points within ±20 km
+     * (every query collects its own features). Time per call and bytes allocated.
+     */
+    private fun queryCost(env: ScenarioEnv, sc: Scene) {
+        val r = env.report
+        val surf = sc.planet.surface
+        val u = sc.target
+        val e = sc.east
+        val R = sc.tp.radius
+        val n = 20_000
+        val pts = DoubleArray(n * 3)
+        val dir = DoubleArray(3)
+        for (k in 0 until n) {
+            // along the parallel, 260/240 m per substep
+            val a = k * (260.0 / 240.0) / R
+            dir[0] = u[0] * cos(a) + e[0] * sin(a)
+            dir[1] = u[1] * cos(a) + e[1] * sin(a)
+            dir[2] = u[2] * cos(a) + e[2] * sin(a)
+            val rr = surf.floorAt(dir[0], dir[1], dir[2]) + 2.0
+            pts[k * 3] = sc.centre.x + dir[0] * rr
+            pts[k * 3 + 1] = sc.centre.y + dir[1] * rr
+            pts[k * 3 + 2] = sc.centre.z + dir[2] * rr
+        }
+        val rnd = java.util.Random(7)
+        val m = 2_000
+        val cold = DoubleArray(m * 3)
+        for (k in 0 until m) {
+            val a = (rnd.nextDouble() * 2 - 1) * 20_000.0 / R
+            val b = (rnd.nextDouble() * 2 - 1) * 20_000.0 / R
+            val nn = sc.north
+            var x = u[0] + e[0] * a + nn[0] * b
+            var y = u[1] + e[1] * a + nn[1] * b
+            var z = u[2] + e[2] * a + nn[2] * b
+            val l = sqrt(x * x + y * y + z * z)
+            x /= l; y /= l; z /= l
+            val rr = surf.floorAt(x, y, z) + 2.0
+            cold[k * 3] = sc.centre.x + x * rr
+            cold[k * 3 + 1] = sc.centre.y + y * rr
+            cold[k * 3 + 2] = sc.centre.z + z * rr
+        }
+        val mx = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        val p = DVec3()
+        val hit = com.starwake.core.terrain.FloorHit()
+        val c = PlanetSurface.Contact()
+        val vel = Vec3()
+        var sink = 0.0
+        val names = arrayOf("altitudeAt", "floorHit (point, normal)", "groundState", "contact", "floorHit, scattered points")
+        val ns = DoubleArray(names.size)
+        val bytes = LongArray(names.size)
+        for (rep in 0 until 2) {     // the first round warms the JIT
+            for (q in names.indices) {
+                val count = if (q == 4) m else n
+                val src = if (q == 4) cold else pts
+                val a0 = mx.currentThreadAllocatedBytes
+                val t0 = System.nanoTime()
+                for (k in 0 until count) {
+                    p.set(src[k * 3], src[k * 3 + 1], src[k * 3 + 2])
+                    when (q) {
+                        0 -> sink += surf.altitudeAt(p)
+                        1, 4 -> if (surf.floorHit(p, PlanetSurface.GROUND_PROBE, hit)) sink += hit.altitude
+                        2 -> sink += surf.groundState(p)
+                        else -> {
+                            vel.set(0f, -3f, 0f)
+                            if (surf.contact(p, vel, 2.5, c)) sink += c.altitude
+                        }
+                    }
+                }
+                ns[q] = (System.nanoTime() - t0).toDouble() / count
+                bytes[q] = mx.currentThreadAllocatedBytes - a0
+            }
+        }
+        for (q in names.indices) {
+            r.note("    query %-28s %7.2f us/call, %d B allocated over %d calls".format(names[q], ns[q] / 1000.0, bytes[q], if (q == 4) m else n))
+        }
+        if (sink == 42.0) r.note("")
+    }
+
     private fun summarize(env: ScenarioEnv, label: String, sc: Scene, log: DescentLog, pool: TileWorkerPool, gl: NoopGl) {
         val r = env.report
         val n = log.count
@@ -744,7 +902,9 @@ object TerrainScenarios {
         val total = LongArray(n) { log.updateNs[it] + log.prepareNs[it] + log.drawNs[it] }
         r.note("    game thread total:                             ${stats(total)}")
         val alloc = log.alloc.copyOfRange(0, n)
-        r.note("    allocated on the game thread: %d B total, %d of %d frames allocated, max %d B".format(alloc.sum(), alloc.count { it > 0 }, n, alloc.maxOrNull() ?: 0))
+        val allocFrames = alloc.indices.filter { alloc[it] > 0 }.take(8).joinToString(", ") { "#$it (${alloc[it]} B)" }
+        r.note("    allocated on the game thread: %d B total, %d of %d frames allocated, max %d B%s".format(
+            alloc.sum(), alloc.count { it > 0 }, n, alloc.maxOrNull() ?: 0, if (allocFrames.isEmpty()) "" else "; frames $allocFrames"))
         val up = log.uploads.copyOfRange(0, n)
         r.note("    uploads: %d total, max %d/frame".format(up.sum(), up.maxOrNull() ?: 0))
         r.note("    tiles resident max %d, drawn max %d, visible max %d, draw calls max %d, triangles max %.2f M, queue max %d".format(

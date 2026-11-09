@@ -272,7 +272,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         drawBackground(f)
         drawStars(f)
         val tg = f.terrain
-        if (tg != null && f.terrainBody >= 0) bodies.setSurfaceHidden(f.terrainBody, tg.planet.surfaceReady())
+        if (tg != null && f.terrainBody >= 0) bodies.setSurfaceHidden(f.terrainBody, tg.planet.surfaceReady(), tg.planet.field.minRadius)
         // star and planets: ray-cast impostors at true scale, drawn back to front without depth
         bodies.render(cam, f.time, f.exposure)
         gl.viewport(0, 0, w, h)

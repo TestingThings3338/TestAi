@@ -57,7 +57,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val texHeights = IntArray(count) { texH }
 
     /** Bodies whose surface the terrain draws: the impostor keeps its sky and limb only. */
-    private val surfaceHidden = BooleanArray(count)
+    private val surfaceCore = FloatArray(count)
     private val seeds = FloatArray(count * 4)
 
     /** Distance and angular radius of the star from the home position: reference for light falloff and glare. */
@@ -176,12 +176,14 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     fun skyFade(): Float = fade
 
     /**
-     * Hides the surface of body [i] (the seamless terrain draws it, §9.8): the disc is drawn black
-     * with the atmosphere in front of it (so a gap in the terrain shows haze, never stars), the sky
-     * and limb as before. Call with the terrain's `surfaceReady()` every frame.
+     * Hides the surface of body [i] (the seamless terrain draws it, §9.8): the disc is drawn as a
+     * black core of radius [coreRadius] (m; the terrain's lowest possible point, `field.minRadius`,
+     * so it never shows above the terrain's horizon, even from a basin below the body's radius) with
+     * the atmosphere in front of it (a gap in the terrain shows haze, never stars); the sky and limb
+     * as before. Call with the terrain's `surfaceReady()` every frame.
      */
-    fun setSurfaceHidden(i: Int, hidden: Boolean) {
-        surfaceHidden[i] = hidden
+    fun setSurfaceHidden(i: Int, hidden: Boolean, coreRadius: Double = bodies[i].radius) {
+        surfaceCore[i] = if (hidden) (coreRadius / bodies[i].radius).coerceIn(0.5, 1.0).toFloat() else 0f
     }
 
     /**
@@ -287,7 +289,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
             gl.bindTexture(GL.TEXTURE_2D, textures[i])
             gl.uniform1i(pTex, 0)
             gl.uniform1f(pTexScale, (texHeights[i] / PI).toFloat())
-            gl.uniform1f(pNoSurface, if (surfaceHidden[i]) 1f else 0f)
+            gl.uniform1f(pNoSurface, surfaceCore[i])
             // the star, for the part of it this planet's sky hides
             gl.uniform4f(pSunCam, starX, starY, starZ, starDisc.toFloat())
             gl.uniform4f(pSunGlare, starGlare.toFloat(), starFade.toFloat(), cos(starFade).toFloat(), STAR_INTENSITY)

@@ -39,8 +39,10 @@ class TerrainQuality(
  *
  * - [setBodyPose] when the body moves (planets never spin, DECISIONS 7);
  * - [update] once per frame (selection, priorities, job submission, cache eviction; no GL);
- * - `TerrainRenderer.draw(...)` inside the render pass (uploads ≤ [TerrainQuality.uploadsPerFrame]
- *   finished tiles, then draws), or [processCompletions] with its own uploader;
+ * - the render pass: `SceneRenderer` with `SceneFrame.terrain` set does it (`TerrainRenderer.prepare`
+ *   uploads ≤ [TerrainQuality.uploadsPerFrame] finished tiles and culls, `drawFar` draws the far
+ *   depth slices before the near pass, `drawNear` the nearest slice inside it); standalone,
+ *   `prepare` + `drawSlices`, or [processCompletions] with an uploader of one's own;
  * - the queries on [surface] (any number per frame, exact, independent of streaming except
  *   [PlanetSurface.groundState]);
  * - [release] when the body stops being the terrain body.

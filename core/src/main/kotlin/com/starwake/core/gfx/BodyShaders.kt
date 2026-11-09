@@ -242,7 +242,8 @@ uniform vec4 u_sunGlare;   // x = glare width, y = fade-out angle, z = cos(fade-
 uniform vec3 u_glareColor;
 uniform vec3 u_coronaColor;
 uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
-uniform float u_noSurface;   // 1 = the terrain draws the surface: the disc is black (haze in front kept)
+uniform float u_noSurface;   // 0, or k > 0: the terrain draws the surface; the disc is a black core of k radii
+                             // (the terrain's lowest point: never above its horizon), haze in front kept
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -400,6 +401,13 @@ void main() {
     vec3 pca;
     rayInfo(d, b, h2, disc, pca);
     float cov = coverage(b, h2, disc);
+    float sqHit = sqrt(max(disc, 0.0));
+    if (u_noSurface > 0.0) {
+        // the black core instead of the surface: a sphere of k radii (the same coverage rule)
+        float discK = disc - (1.0 - u_noSurface * u_noSurface);
+        cov = b <= 0.0 ? 0.0 : clamp(0.5 + discK / (u_noSurface + sqrt(h2)) / max(u_pxR, 1e-12), 0.0, 1.0);
+        sqHit = sqrt(max(discK, 0.0));
+    }
     bool atmo = u_atmo.a > 0.0;
     float discA = u_atmo.a * (2.0 + u_atmo.a) + disc;   // A^2 - h2 without rounding A^2 - 1
     if (cov <= 0.0 && (!atmo || discA <= 0.0)) discard;
@@ -409,10 +417,13 @@ void main() {
     vec3 tk = vec3(0.0);
     float skyA = 0.0;
     if (cov > 0.0) {
-        float sq = sqrt(max(disc, 0.0));
-        vec3 N = normalize(pca - d * sq);
-        float tHit = u_cc / (b + sq);
-        vec3 surf = u_noSurface > 0.5 ? vec3(0.0) : shadeSurface(N, d, tHit);
+        float sq = sqHit;
+        vec3 surf = vec3(0.0);
+        if (u_noSurface <= 0.0) {
+            vec3 N = normalize(pca - d * sq);
+            float tHit = u_cc / (b + sq);
+            surf = shadeSurface(N, d, tHit);
+        }
         if (atmo && -sq > x0) {
             vec3 T;
             vec3 ins = atmosphere(d, pca, h2, x0, -sq, T);
