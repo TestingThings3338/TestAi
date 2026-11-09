@@ -465,26 +465,48 @@ class TerrainQuadtree(
      */
     fun evictForReserve(): Int {
         var evicted = 0
-        while (freeSlotCount + pendingCount < slotReserve) {
-            var best = -1
-            var bestFrame = Int.MAX_VALUE
+        // one pass per 64 slots: the least recently visited cached tiles (older first, finer first
+        // among equals); a pass that finds fewer than it asked for has run out of cached tiles
+        while (true) {
+            val need = slotReserve - (freeSlotCount + pendingCount)
+            if (need <= 0) return evicted
+            val k = minOf(need, evictCand.size)
+            var found = 0
             for (n in 0 until nodeCapacity) {
                 if (!alive[n] || slot[n] < 0) continue
                 val v = visited[n]
                 if (v >= frame) continue
-                // older first, finer first among equals
-                if (v < bestFrame || (v == bestFrame && best >= 0 && level[n] > level[best])) {
-                    bestFrame = v
-                    best = n
+                val key = v.toLong() * 64 - level[n]
+                if (found < k) {
+                    var i = found++
+                    while (i > 0 && evictKey[i - 1] > key) {
+                        evictKey[i] = evictKey[i - 1]; evictCand[i] = evictCand[i - 1]; i--
+                    }
+                    evictKey[i] = key; evictCand[i] = n
+                } else if (key < evictKey[k - 1]) {
+                    var i = k - 1
+                    while (i > 0 && evictKey[i - 1] > key) {
+                        evictKey[i] = evictKey[i - 1]; evictCand[i] = evictCand[i - 1]; i--
+                    }
+                    evictKey[i] = key; evictCand[i] = n
                 }
             }
-            if (best < 0) best = interiorToEvict()
+            for (i in 0 until found) releaseSlot(evictCand[i])
+            evicted += found
+            if (found < k) break
+        }
+        // under memory pressure: ancestors of the cut, one scan per slot (rare)
+        while (freeSlotCount + pendingCount < slotReserve) {
+            val best = interiorToEvict()
             if (best < 0) break
             releaseSlot(best)
             evicted++
         }
         return evicted
     }
+
+    private val evictCand = IntArray(64)
+    private val evictKey = LongArray(64)
 
     /** The resident interior node of the current tree (all four children drawn or deeper) deepest inside its split range. */
     private fun interiorToEvict(): Int {

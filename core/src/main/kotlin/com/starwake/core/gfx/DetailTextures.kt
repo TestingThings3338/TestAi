@@ -11,8 +11,9 @@ import kotlin.math.sqrt
  * The terrain's detail texture (§9.5): one tileable RGBA8 square generated at startup, one
  * luminance pattern per detail class (R soil, G rock, B granular, A ice), each with mean 0.5 so the
  * shader's `2·dot(texel, classWeights)` modulates the material colour around 1 without shifting it.
- * Original procedural patterns (periodic value noise, ridges, ripples); nothing from Roblox's
- * material textures (they cannot ship, Q7).
+ * Original procedural patterns (periodic gradient noise, ridges); nothing from Roblox's material
+ * textures (they cannot ship, Q7). Gradient rather than value noise: value noise shows its square
+ * lattice, which read as a grid on crater floors seen from a few hundred metres.
  */
 object DetailTextures {
     fun build(size: Int): ByteArray {
@@ -59,14 +60,14 @@ object DetailTextures {
         return t * t * (3f - 2f * t)
     }
 
-    /** Periodic fbm on the unit square: [cells] lattice cells per period, [octaves], seed [s]. */
+    /** Periodic fbm on the unit square: [cells] lattice cells per period, [octaves], seed [s]; about 0..1. */
     private fun fbm(u: Float, v: Float, cells: Int, octaves: Int, s: Int): Float {
         var sum = 0f
         var amp = 0.5f
         var norm = 0f
         var c = cells
         for (o in 0 until octaves) {
-            sum += value(u * c, v * c, c, s + o * 101) * amp
+            sum += gradient(u * c, v * c, c, s + o * 101) * amp
             norm += amp
             amp *= 0.5f
             c *= 2
@@ -74,21 +75,32 @@ object DetailTextures {
         return sum / norm
     }
 
-    private fun value(x: Float, y: Float, period: Int, seed: Int): Float {
+    /** Periodic 2-D gradient noise (16 gradient directions, quintic fade), mapped to about 0..1. */
+    private fun gradient(x: Float, y: Float, period: Int, seed: Int): Float {
         val xf = floor(x)
         val yf = floor(y)
         val xi = xf.toInt()
         val yi = yf.toInt()
         val fx = x - xf
         val fy = y - yf
-        val ux = fx * fx * (3f - 2f * fx)
-        val uy = fy * fy * (3f - 2f * fy)
-        val a = hash(xi, yi, period, seed)
-        val b = hash(xi + 1, yi, period, seed)
-        val c = hash(xi, yi + 1, period, seed)
-        val d = hash(xi + 1, yi + 1, period, seed)
-        return (a + (b - a) * ux) + ((c + (d - c) * ux) - (a + (b - a) * ux)) * uy
+        val ux = fx * fx * fx * (fx * (fx * 6f - 15f) + 10f)
+        val uy = fy * fy * fy * (fy * (fy * 6f - 15f) + 10f)
+        val a = dot(xi, yi, period, seed, fx, fy)
+        val b = dot(xi + 1, yi, period, seed, fx - 1f, fy)
+        val c = dot(xi, yi + 1, period, seed, fx, fy - 1f)
+        val d = dot(xi + 1, yi + 1, period, seed, fx - 1f, fy - 1f)
+        val ab = a + (b - a) * ux
+        val cd = c + (d - c) * ux
+        return 0.5f + (ab + (cd - ab) * uy) * 0.75f
     }
+
+    private fun dot(x: Int, y: Int, period: Int, seed: Int, dx: Float, dy: Float): Float {
+        val k = (hash(x, y, period, seed) * 16f).toInt() and 15
+        return GX[k] * dx + GY[k] * dy
+    }
+
+    private val GX = FloatArray(16) { kotlin.math.cos(it * Math.PI / 8 + 0.2).toFloat() }
+    private val GY = FloatArray(16) { kotlin.math.sin(it * Math.PI / 8 + 0.2).toFloat() }
 
     private fun hash(x: Int, y: Int, period: Int, seed: Int): Float {
         val px = Math.floorMod(x, period)

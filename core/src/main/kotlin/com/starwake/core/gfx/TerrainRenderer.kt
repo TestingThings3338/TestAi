@@ -243,8 +243,15 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         gl.generateMipmap(GL.TEXTURE_2D)
     }
 
-    /** GPU state for a planet (call once per planet; [TerrainGpu.dispose] when it is released). */
-    fun attach(planet: TerrainPlanet): TerrainGpu = TerrainGpu(gl, ibo, planet)
+    /**
+     * GPU state for a planet. A planet's tiles live in exactly one [TerrainGpu]: attach a planet
+     * that has no resident tiles yet (a new one, or after `tree.clear()`), and [TerrainGpu.dispose]
+     * it when the planet is released.
+     */
+    fun attach(planet: TerrainPlanet): TerrainGpu {
+        require(planet.tree.residentCount == 0) { "${planet.name} already has tiles in another TerrainGpu" }
+        return TerrainGpu(gl, ibo, planet)
+    }
 
     private fun ensureCapacity(n: Int) {
         if (capacity >= n) return
@@ -429,9 +436,9 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
                 d[11] = 0.75f * dd
                 d[12] = dd
             }
-            d[13] = mod64(ox)
-            d[14] = mod64(oy)
-            d[15] = mod64(oz)
+            d[13] = mod512(ox)
+            d[14] = mod512(oy)
+            d[15] = mod512(oz)
             gl.uniform4fv(uTile, 4, d, 0)
             gl.bindVertexArray(gpu.vao(slot))
             gl.drawElements(GL.TRIANGLES, TileFormat.INDICES, GL.UNSIGNED_SHORT, 0)
@@ -540,8 +547,9 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         return t * t * (3 - 2 * t)
     }
 
-    private fun mod64(v: Double): Float {
-        val r = v - 64.0 * kotlin.math.floor(v / 64.0)
+    /** The detail-texture origin: periods up to 512 m tile exactly (a multiple of every period used). */
+    private fun mod512(v: Double): Float {
+        val r = v - 512.0 * kotlin.math.floor(v / 512.0)
         return r.toFloat()
     }
 

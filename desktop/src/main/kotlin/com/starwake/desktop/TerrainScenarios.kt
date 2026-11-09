@@ -382,6 +382,9 @@ object TerrainScenarios {
         val platform = DesktopPlatform(env.opts.assetsDir, null)
         val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"), sc.system)
         val sr = SceneRenderer(gl, content, 2)
+        // one GPU side per planet: the tiles of the scenario's own renderer are dropped and stream
+        // again into the scene's
+        sc.planet.tree.clear()
         val gpu = sr.attachTerrain(sc.planet)
         val f = SceneFrame()
         f.terrain = gpu
@@ -497,10 +500,15 @@ object TerrainScenarios {
         val bearing = PI + 0.6
         val start = DoubleArray(3)
         tangentOffset(sc.target[0], sc.target[1], sc.target[2], bearing, ground / R, start)
-        // path axis: rotation from start towards target about axis = start × target
-        val ax = start[1] * sc.target[2] - start[2] * sc.target[1]
-        val ay = start[2] * sc.target[0] - start[0] * sc.target[2]
-        val az = start[0] * sc.target[1] - start[1] * sc.target[0]
+        // path axis: the rotation that carries start into the target along the bearing's great
+        // circle, d × target with d the bearing direction at the target (start × target would flip
+        // once the arc passes half the circumference, as the 7,500 km descent does on Luna)
+        val bx = sc.east[0] * cos(bearing) + sc.north[0] * sin(bearing)
+        val by = sc.east[1] * cos(bearing) + sc.north[1] * sin(bearing)
+        val bz = sc.east[2] * cos(bearing) + sc.north[2] * sin(bearing)
+        val ax = by * sc.target[2] - bz * sc.target[1]
+        val ay = bz * sc.target[0] - bx * sc.target[2]
+        val az = bx * sc.target[1] - by * sc.target[0]
         val al = sqrt(ax * ax + ay * ay + az * az)
         val kx = ax / al
         val ky = ay / al
@@ -617,17 +625,33 @@ object TerrainScenarios {
         val built = planet.pool.tilesBuilt
         r.note("  $prefix: ${frame} frames in %.1f s wall (excl. shots), %d tiles built (%.0f/s), worker %.2f ms/tile avg, %.2f max".format(
             wall, built, built / wall, planet.pool.buildNanosTotal / 1e6 / max(1L, built), planet.pool.buildNanosMax / 1e6))
-        // below PathHeight the leaf under the ship should be the finest level
+        // the leaf under the ship against the level the split rule asks for at that height (one level of
+        // lag allowed: the split happens when the children are in), and the spec's flyover check
+        // (below 300 m the finest level, after the first second there)
+        var behind = 0
         var lowFrames = 0
         var coarse = 0
+        var firstLow = -1
         for (k in 0 until rec.count) {
-            if (rec.alt[k] < 1500.0) {
-                lowFrames++
-                if (rec.leafLevel[k] != planet.maxLevel) coarse++
+            val want = expectedLevel(planet, rec.alt[k])
+            if (rec.leafLevel[k] < want - 1) behind++
+            if (rec.alt[k] < 300.0) {
+                if (firstLow < 0) firstLow = k
+                if (k - firstLow >= 60) {
+                    lowFrames++
+                    if (rec.leafLevel[k] != planet.maxLevel) coarse++
+                }
             }
         }
-        r.note("  $prefix: below 1,500 m: %d frames, leaf under the ship coarser than L%d in %d of them".format(lowFrames, planet.maxLevel, coarse))
+        r.note("  $prefix: leaf under the ship more than one level behind the split rule in %d of %d frames; below 300 m (after 1 s): %d frames, not L%d in %d".format(
+            behind, rec.count, lowFrames, planet.maxLevel, coarse))
         return rec
+    }
+
+    /** The level the split rule selects for the tile under a camera [alt] m above it: d < ρ·edge(L − 1). */
+    private fun expectedLevel(planet: TerrainPlanet, alt: Double): Int {
+        val v = kotlin.math.ln(PI * planet.radius * planet.rho / (2.0 * max(alt, 0.1))) / kotlin.math.ln(2.0)
+        return (kotlin.math.floor(v).toInt() + 1).coerceIn(0, planet.maxLevel)
     }
 
     private fun rotate(v: DoubleArray, kx: Double, ky: Double, kz: Double, a: Double, out: DoubleArray) {
