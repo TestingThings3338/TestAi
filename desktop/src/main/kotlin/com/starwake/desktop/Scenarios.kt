@@ -46,6 +46,11 @@ object Scenarios {
             "Real-scale BodyRenderer without Game: gas giant from home, PLANET II from orbit and 20 km, the star, dots, all surface types",
         ) { Bodies.run(it) },
 
+        "stations-real" to Scenario(
+            "stations-real",
+            "The 6 Roblox stations + build site (assets/stations): approach, mouth, side, rear, hangar, pads with a parked VARROW, LOD 1/2 and the 60 km marker; site stages as hologram (no Game)",
+        ) { RealStationsScenario.run(it) },
+
         "stations" to Scenario(
             "stations",
             "Every StationMesh model through the lit shader + light glows, from several angles (no Game)",

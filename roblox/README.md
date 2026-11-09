@@ -21,3 +21,8 @@ python3 tools/roblox/extract_lua.py roblox/lua /tmp/rbx/*.rbxmx
 
 The game's ship assets (`app/src/main/assets/ships/`) are built from `Ships.gltf` and
 `Assets.rar` by `python3 tools/roblox/convert_ships.py` (format in its header).
+
+The station assets (`app/src/main/assets/stations/`: the six station types and the construction
+site, `.stm`) are built from `Assets.rar` by `python3 tools/roblox/convert_stations.py` (format in
+its header; loaded by `content/StationModel.kt`, drawn by `gfx/StationRenderer.kt`; the harness
+scenario `stations-real` shows them). The output is deterministic.
