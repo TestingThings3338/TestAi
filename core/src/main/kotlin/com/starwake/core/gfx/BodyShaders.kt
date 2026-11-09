@@ -242,6 +242,10 @@ uniform vec4 u_sunGlare;   // x = glare width, y = fade-out angle, z = cos(fade-
 uniform vec3 u_glareColor;
 uniform vec3 u_coronaColor;
 uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
+uniform float u_noSurface;   // 0, or k > 0: the terrain draws the surface; the disc is a black core of k radii
+                             // (the terrain's lowest point: never above its horizon), haze in front kept
+uniform float u_procDetail;  // 1: procedural albedo detail at close range; 0: the image is the body's own
+                             // far look (its terrain's colours), shown as it is, as the terrain's far look shows it
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -355,7 +359,7 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
     // and clouds stay below 0.06) gets no ground detail, and skips evaluating it
     float water = u_type == T_TERRAN ? clamp((tx.b - tx.r) * 8.0 - 0.45, 0.0, 1.0) : 0.0;
     // gas bands are noise stretched 5x in y: 5x smaller footprint-relative features
-    float det = water < 1.0 ? detail(ns, u_type == T_GAS ? fpS * 5.0 : fpS) * (1.0 - water) : 0.0;
+    float det = water < 1.0 && u_procDetail > 0.0 ? detail(ns, u_type == T_GAS ? fpS * 5.0 : fpS) * (1.0 - water) : 0.0;
     alb *= clamp(1.0 + det * vec3(1.0, 0.92, 0.8), 0.25, 2.0);
 
     float ndl = dot(N, u_sunDir);
@@ -399,6 +403,13 @@ void main() {
     vec3 pca;
     rayInfo(d, b, h2, disc, pca);
     float cov = coverage(b, h2, disc);
+    float sqHit = sqrt(max(disc, 0.0));
+    if (u_noSurface > 0.0) {
+        // the black core instead of the surface: a sphere of k radii (the same coverage rule)
+        float discK = disc - (1.0 - u_noSurface * u_noSurface);
+        cov = b <= 0.0 ? 0.0 : clamp(0.5 + discK / (u_noSurface + sqrt(h2)) / max(u_pxR, 1e-12), 0.0, 1.0);
+        sqHit = sqrt(max(discK, 0.0));
+    }
     bool atmo = u_atmo.a > 0.0;
     float discA = u_atmo.a * (2.0 + u_atmo.a) + disc;   // A^2 - h2 without rounding A^2 - 1
     if (cov <= 0.0 && (!atmo || discA <= 0.0)) discard;
@@ -408,10 +419,13 @@ void main() {
     vec3 tk = vec3(0.0);
     float skyA = 0.0;
     if (cov > 0.0) {
-        float sq = sqrt(max(disc, 0.0));
-        vec3 N = normalize(pca - d * sq);
-        float tHit = u_cc / (b + sq);
-        vec3 surf = shadeSurface(N, d, tHit);
+        float sq = sqHit;
+        vec3 surf = vec3(0.0);
+        if (u_noSurface <= 0.0) {
+            vec3 N = normalize(pca - d * sq);
+            float tHit = u_cc / (b + sq);
+            surf = shadeSurface(N, d, tHit);
+        }
         if (atmo && -sq > x0) {
             vec3 T;
             vec3 ins = atmosphere(d, pca, h2, x0, -sq, T);

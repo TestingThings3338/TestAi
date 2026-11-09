@@ -291,6 +291,16 @@ object Scenarios {
             frames(2)
         },
 
+        "terrain" to Scenario(
+            "terrain",
+            "Seamless planet terrain: Earth, Luna, Mars from 20,000 km to 20 m (down and horizon, HIGH and LOW); impostor-to-terrain hand-over, ship and outposts on the ground through SceneRenderer; then real-time flight-speed descents",
+        ) { TerrainScenarios.run(it) },
+
+        "terrain-perf" to Scenario(
+            "terrain-perf",
+            "Terrain descents on a no-op GL: game-thread ms, allocations, uploads, worker ms/tile, tiles, triangles, draw calls, memory; llvmpipe frames and depth modes",
+        ) { TerrainScenarios.perf(it) },
+
         "perf" to Scenario(
             "perf",
             "Flight with continuous two-thumb input (--perf-frames, default 600): CPU ms per drawFrame and bytes allocated per frame",
