@@ -895,14 +895,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                     s.teleport(x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look)
                 }
             }
-            "near" -> {
-                // near <body name or index> [altitude m]
-                val last = words.last().toDoubleOrNull()
-                val nameWords = if (last != null && words.size > 2) words.subList(1, words.size - 1) else words.subList(1, words.size)
-                val key = nameWords.joinToString(" ")
-                val i = key.toIntOrNull() ?: system.bodies.indexOfFirst { it.name.equals(key.replace('-', ' '), ignoreCase = true) }
-                if (i in system.bodies.indices) s.near(i, last ?: 20_000.0)
-            }
+            "near" -> nearTarget(words, system)?.let { (i, alt) -> s.near(i, alt) }
             "teleport-low" -> s.debugTeleportLow()
             "teleport-surface" -> {
                 s.debugTeleportLow()
@@ -1034,6 +1027,22 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             }
             return if (weak) 0 else if (mid) 1 else 2
         }
+
+        /**
+         * The debug command "near <body> [alt]" (01 9.6) as (body index, altitude m), or null for an
+         * unknown body. The body is a name (a '-' stands for a space: "PLANET-II") or an index; a
+         * number counts as the altitude only after the body, so "near 3" is body 3 at
+         * [NEAR_ALTITUDE]. Debug path, allocates.
+         */
+        internal fun nearTarget(words: List<String>, system: StarSystem): Pair<Int, Double>? {
+            val alt = if (words.size > 2) words.last().toDoubleOrNull() else null
+            val key = words.subList(minOf(1, words.size), if (alt != null) words.size - 1 else words.size).joinToString(" ")
+            val i = key.toIntOrNull() ?: system.bodies.indexOfFirst { it.name.equals(key.replace('-', ' '), ignoreCase = true) }
+            return if (i in system.bodies.indices) i to (alt ?: NEAR_ALTITUDE) else null
+        }
+
+        /** Altitude of "near <body>" without one, m. */
+        const val NEAR_ALTITUDE = 20_000.0
 
         /** Sine-in ease of a 0..1 progress (Roblox EasingStyle.Sine, In). */
         private fun sineIn(t: Float): Float = 1f - cos(HALF_PI * t.coerceIn(0f, 1f))

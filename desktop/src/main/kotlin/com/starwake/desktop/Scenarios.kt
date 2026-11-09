@@ -315,7 +315,7 @@ object Scenarios {
 
         "camera-views" to Scenario(
             "camera-views",
-            "Cockpit look-around (±140°, +80°, -70°, clamp), FOV 60/100, the Roblox external view of every ship, external look 180°, the chase view",
+            "Cockpit look-around (±140°, +80°, -70°, clamp), FOV 60/100, the Roblox external view of every ship, external look 180°, the chase view; \"near <body> [alt]\" by index and by name",
         ) { SessionScenarios.cameraViews(it) },
 
         "map-nonpausing" to Scenario(

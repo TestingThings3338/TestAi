@@ -265,6 +265,18 @@ object SessionScenarios {
         shot("view-chase")
         cmd("view cockpit")
         frames(2)
+        // the place command "near <body> [alt]" (01 9.6): a body index keeps the 20 km default
+        val planet2 = StarSystem().bodies.indexOfFirst { it.name == "PLANET II" }
+        cmd("throttle 0")
+        cmd("near $planet2")
+        frames(2)
+        val byIndex = num("alt")
+        cmd("near PLANET-II 5000")
+        frames(2)
+        val byName = num("alt")
+        if (abs(byIndex - 20_000.0) > 100.0) fail("near $planet2: altitude $byIndex m, expected 20 km above PLANET II")
+        if (abs(byName - 5_000.0) > 100.0) fail("near PLANET-II 5000: altitude $byName m, expected 5 km")
+        report.note("near $planet2: %.1f m; near PLANET-II 5000: %.1f m (above the gear)".format(byIndex, byName))
     }
 
     // ------------------------------------------------------------------ map-nonpausing
