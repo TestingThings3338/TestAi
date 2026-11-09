@@ -128,6 +128,129 @@ class TerrainPlanetTest {
     }
 
     /**
+     * The scheduler's height (§9.6: path first and the near boost below 1,500 m, the descent focus at
+     * the 900 m level-off) is the height above the ground, and its focus lies on the ground: over
+     * Earth's highest ground and Mars' lowest (kilometres above and below the reference sphere;
+     * Earth's floor never goes below its sea).
+     */
+    @Test
+    fun focusUsesTheHeightAboveTheGround() {
+        val earth = TerrainPlanet.forBody("Earth", 2120.0 * 3000, "Terrestrial World", 3, 2, pool, systemName = "Sol")
+        val mars = TerrainPlanet.forBody("Mars", 1130.0 * 3000, "Rocky Body", 4, 2, pool, systemName = "Sol")
+        for ((p, highest) in listOf(earth to true, mars to false)) {
+            p.setBodyPose(DVec3(), Quat())
+            val n = 3000
+            val golden = Math.PI * (3.0 - sqrt(5.0))
+            var best = if (highest) -1e9 else 1e9
+            val d = DoubleArray(3)
+            for (i in 0 until n) {
+                val y = 1.0 - 2.0 * (i + 0.5) / n
+                val r = sqrt(1 - y * y)
+                val x = r * kotlin.math.cos(golden * i)
+                val z = r * kotlin.math.sin(golden * i)
+                val f = p.surface.floorAt(x, y, z) - p.radius
+                if (if (highest) f > best else f < best) { best = f; d[0] = x; d[1] = y; d[2] = z }
+            }
+            assertTrue(kotlin.math.abs(best) > 1500, "${p.name}: ground kilometres from the reference sphere ($best m)")
+            val floor = p.surface.floorAt(d[0], d[1], d[2])
+            var ex = d[2]
+            var ez = -d[0]
+            val el = sqrt(ex * ex + ez * ez)
+            ex /= el; ez /= el
+            // level flight 100 m up at 260 m/s
+            val ship = DVec3(d[0] * (floor + 100), d[1] * (floor + 100), d[2] * (floor + 100))
+            p.update(ship, 1.0 / 60, ship, Vec3((ex * 260).toFloat(), 0f, (ez * 260).toFloat()), 16f)
+            val f = p.tree.focus
+            assertEquals(100.0, f.height, 0.5, "height above the ground ${floor - p.radius} m above R")
+            assertTrue(f.height < TerrainQuadtree.PATH_HEIGHT && f.hasFocus)
+            val fr = sqrt(f.focusX * f.focusX + f.focusY * f.focusY + f.focusZ * f.focusZ)
+            assertEquals(p.surface.floorAt(f.focusX / fr, f.focusY / fr, f.focusZ / fr), fr, 1e-6, "the focus is on the ground")
+            // 2.5 s ahead: 650 m along the tangent at the ship
+            fun angleTo(s: DVec3): Double {
+                val sr = sqrt(s.x * s.x + s.y * s.y + s.z * s.z)
+                val fl = sqrt(f.focusX * f.focusX + f.focusY * f.focusY + f.focusZ * f.focusZ)
+                return kotlin.math.acos(((f.focusX * s.x + f.focusY * s.y + f.focusZ * s.z) / (fl * sr)).coerceIn(-1.0, 1.0))
+            }
+            assertEquals(kotlin.math.atan(650.0 / (floor + 100)), angleTo(ship), 1e-6, "2.5 s ahead")
+            // a descent 3 km above the ground: the focus is where it reaches the level-off height
+            // (900 m above the ground): 300 / 100 × (3000 − 900) + 300 = 6,600 m ahead
+            val ship2 = DVec3(d[0] * (floor + 3000), d[1] * (floor + 3000), d[2] * (floor + 3000))
+            val v = Vec3((ex * 300 - d[0] * 100).toFloat(), (-d[1] * 100).toFloat(), (ez * 300 - d[2] * 100).toFloat())
+            p.update(ship2, 1.0 / 60, ship2, v, 16f)
+            assertEquals(3000.0, f.height, 0.5)
+            assertEquals(kotlin.math.atan(6600.0 / (floor + 3000)), angleTo(ship2), 2e-5, "descent focus")
+            p.release()
+        }
+    }
+
+    /** The equirect bake started right after the planet waits for the mean colour table (no band of raw colours). */
+    @Test
+    fun bakeWaitsForTheMeanColours() {
+        val p = TerrainPlanet.forBody("Earth", 2120.0 * 3000, "Terrestrial World", 3, 2, pool, systemName = "Sol")
+        val early = p.bakeEquirect(128, 64)
+        p.awaitReady()
+        val late = p.bakeEquirect(128, 64)
+        var differ = 0
+        for (i in 0 until 128 * 64 * 4) if (early.get(i) != late.get(i)) differ++
+        assertEquals(0, differ, "bytes differing between a bake at creation and one after the table")
+        p.release()
+    }
+
+    /**
+     * GL context loss: the planet drops its tiles without GL calls, attaches to a new renderer and
+     * streams into it; until the roots are back the impostor shades the surface.
+     */
+    @Test
+    fun gpuLostThenAttachedAgain() {
+        val p = TerrainPlanet("Luna", 1.74e6, luna, 0, pool)
+        p.awaitReady()
+        p.setBodyPose(DVec3(), Quat())
+        val cam = DVec3(0.0, 0.0, 1.74e6 + 3e6)
+        val r1 = TerrainRenderer(FakeGl(), 0)
+        val gpu1 = r1.attach(p)
+        var f = 0
+        while (!p.surfaceReady() && f++ < 3000) {
+            p.update(cam, 1.0 / 60)
+            p.processCompletions(64, gpu1)
+            Thread.sleep(1)
+        }
+        assertTrue(p.surfaceReady(), "roots resident")
+        assertTrue(runCatching { r1.attach(p) }.isFailure, "a planet with tiles cannot be attached twice")
+        p.onGpuLost()
+        assertEquals(0, p.tree.residentCount)
+        assertTrue(!p.surfaceReady(), "the impostor shades the surface again")
+        val gl2 = FakeGl()
+        val r2 = TerrainRenderer(gl2, 0)
+        val gpu2 = r2.attach(p)
+        f = 0
+        while (!p.surfaceReady() && f++ < 3000) {
+            p.update(cam, 1.0 / 60)
+            p.processCompletions(64, gpu2)
+            Thread.sleep(1)
+        }
+        assertTrue(p.surfaceReady(), "the roots are back")
+        assertTrue(gl2.uploads > 0, "tiles go to the new GPU state")
+        r1.dispose()
+        gpu2.dispose()
+        r2.dispose()
+        p.release()
+    }
+
+    /** The ρ controller works against the selected frame rate (DECISIONS 21a: 60 fps default, 120 Hz selectable). */
+    @Test
+    fun frameBudgetFollowsTheTargetRate() {
+        val p = TerrainPlanet("Luna", 1.74e6, luna, 0, pool)
+        p.setBodyPose(DVec3(), Quat())
+        val cam = DVec3(0.0, 0.0, 2e7)
+        repeat(120) { p.update(cam, 1.0 / 60, frameMs = 12f) }
+        assertEquals(p.quality.rho, p.rho, 1e-9, "12 ms frames are within the 60 fps budget")
+        p.frameBudgetMs = 1000f / 120f
+        repeat(120) { p.update(cam, 1.0 / 120, frameMs = 12f) }
+        assertEquals(p.quality.rho * 0.8, p.rho, 1e-6, "12 ms frames are over the 120 Hz budget: ρ drops to 80 %")
+        p.release()
+    }
+
+    /**
      * The game-thread calls of a frame (update, uploads, culling and drawing on a GL, the ground
      * queries) allocate nothing after warm-up, while the workers stream tiles.
      */

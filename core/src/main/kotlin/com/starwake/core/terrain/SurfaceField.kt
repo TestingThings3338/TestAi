@@ -130,6 +130,11 @@ class SurfaceField(
     @Volatile var meanColours: MeanColourTable? = null
         private set
 
+    /**
+     * Builds the table once (idempotent). Synchronised: a second caller (the equirect bake started
+     * right after the planet) waits for the first instead of building it again.
+     */
+    @Synchronized
     fun buildMeanColours(): MeanColourTable {
         val t = meanColours ?: MeanColourTable.build(this)
         meanColours = t

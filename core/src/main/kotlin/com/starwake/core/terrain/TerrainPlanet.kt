@@ -45,6 +45,8 @@ class TerrainQuality(
  *   `prepare` + `drawSlices`, or [processCompletions] with an uploader of one's own;
  * - the queries on [surface] (any number per frame, exact, independent of streaming except
  *   [PlanetSurface.groundState]);
+ * - [frameBudgetMs] when the target frame rate changes;
+ * - [onGpuLost] when the renderer is rebuilt (GL context loss), then attach again;
  * - [release] when the body stops being the terrain body.
  *
  * The impostor (BodyRenderer) may stop shading this body's surface once [surfaceReady] is true:
@@ -155,10 +157,16 @@ class TerrainPlanet(
     fun setBodyPose(pos: DVec3, rot: Quat) = surface.setPose(pos, rot)
 
     /**
+     * The frame-time budget of the ρ controller (ms): 1000 / the target frame rate, 16.7 at the
+     * default 60 fps, 8.3 when 120 Hz is selected (DECISIONS 21a). Set it when the setting changes.
+     */
+    var frameBudgetMs = DEFAULT_BUDGET_MS
+
+    /**
      * One frame (game thread, no GL, no allocation): the camera at [cameraPos] (world), [dt]
      * seconds; the ship's position and velocity (world, m/s) shape the priorities (path first
-     * below 1,500 m, the focus ahead); [frameMs] (the last frame's time, 0 = unknown) drives the
-     * ρ controller.
+     * below 1,500 m above the ground, the focus ahead); [frameMs] (the last frame's time, 0 =
+     * unknown) drives the ρ controller against [frameBudgetMs].
      */
     fun update(cameraPos: DVec3, dt: Double, shipPos: DVec3? = null, shipVel: Vec3? = null, frameMs: Float = 0f) {
         val t0 = System.nanoTime()
@@ -183,9 +191,10 @@ class TerrainPlanet(
      */
     private fun controlRho(dt: Double, frameMs: Float) {
         val base = quality.rho
-        if (frameMs > BUDGET_MS * 1.05f) {
+        val budget = frameBudgetMs
+        if (frameMs > budget * 1.05f) {
             rhoFrame = max(base * 0.8, rhoFrame - base * 0.5 * dt)
-        } else if (frameMs > 0f && frameMs < BUDGET_MS * 0.9f) {
+        } else if (frameMs > 0f && frameMs < budget * 0.9f) {
             rhoFrame = min(base, rhoFrame + base * 0.05 * dt)
         }
         val demand = tree.slotDemand
@@ -201,7 +210,14 @@ class TerrainPlanet(
     private var rhoFrame = this.quality.rho
     private var rhoMemory = this.quality.rho
 
-    /** The scheduler's focus (§9.6, `focusFor`) and the path of the next 2.5 s, in body space. */
+    /**
+     * The scheduler's focus (§9.6, `focusFor`) and the path of the next 2.5 s, in body space. The
+     * height that gates the path-first and near-radius boosts and plans the descent focus is hAgl
+     * (above the ground or water below the ship, one exact query on the physics scratch, which
+     * the ship's own queries reuse): the planet-scale layer moves the ground by kilometres, so the
+     * height above the reference sphere would switch them off over mountains and leave them on
+     * over deep basins. The focus point itself lies on the ground there (its own scratch).
+     */
     private fun setFocus(shipPos: DVec3?, shipVel: Vec3?) {
         val f = tree.focus
         if (shipPos == null) {
@@ -212,10 +228,15 @@ class TerrainPlanet(
         surface.toBody(shipPos.x, shipPos.y, shipPos.z, q)
         f.shipX = q[0]; f.shipY = q[1]; f.shipZ = q[2]
         val r = sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])
+        if (r < 1.0) {
+            f.active = false
+            return
+        }
         val ux = q[0] / r
         val uy = q[1] / r
         val uz = q[2] / r
-        val h = r - radius - SurfaceField.LIFT
+        val floor = surface.floorAt(ux, uy, uz)
+        val h = r - floor
         f.height = h
         if (shipVel == null) {
             f.velX = 0.0; f.velY = 0.0; f.velZ = 0.0
@@ -237,7 +258,8 @@ class TerrainPlanet(
         val fz = bz - uz * vUp
         val flat = sqrt(fx * fx + fy * fy + fz * fz)
         if (flat < 5.0) {
-            f.focusX = q[0]; f.focusY = q[1]; f.focusZ = q[2]
+            // hovering: the ground below the ship
+            f.focusX = ux * floor; f.focusY = uy * floor; f.focusZ = uz * floor
             f.hasFocus = h < 20_000.0
             return
         }
@@ -247,8 +269,23 @@ class TerrainPlanet(
         val py = q[1] + fy / flat * d
         val pz = q[2] + fz / flat * d
         val pr = sqrt(px * px + py * py + pz * pz)
-        f.focusX = px / pr * radius; f.focusY = py / pr * radius; f.focusZ = pz / pr * radius
+        val nx = px / pr
+        val ny = py / pr
+        val nz = pz / pr
+        val fr = if (h < 20_000.0) focusFloor(nx, ny, nz) else floor
+        f.focusX = nx * fr; f.focusY = ny * fr; f.focusZ = nz * fr
         f.hasFocus = h < 20_000.0
+    }
+
+    // the scheduler's own scratch: the focus moves a few metres per frame, so its box is reused,
+    // and the physics scratch keeps the ship's
+    private val focusScratch = FieldScratch()
+    private val focusSample = SurfaceSample()
+
+    /** The floor radius at a direction (exact, the scheduler's scratch). */
+    private fun focusFloor(nx: Double, ny: Double, nz: Double): Double {
+        field.sampleAt(nx, ny, nz, focusScratch, focusSample)
+        return focusSample.floorR
     }
 
     /**
@@ -311,13 +348,27 @@ class TerrainPlanet(
     }
 
     /**
+     * The GPU side of the tiles is gone: after a GL context loss (drop the old `TerrainGpu`
+     * without disposing it, its names died with the context) or after `TerrainGpu.dispose()` when
+     * the scene renderer is rebuilt on the same context. Drops every tile (no GL calls; tiles in
+     * flight for the old tree are dropped when they arrive, root tiles stay valid); the impostor
+     * shades the surface again until the roots are back ([surfaceReady]). Then attach the planet to
+     * the new renderer (`SceneRenderer.attachTerrain`) and give the impostor and the terrain their
+     * far texture again.
+     */
+    fun onGpuLost() = tree.clear()
+
+    /**
      * The far look of the body as an equirect image for the impostor (BodyRenderer's bake format:
      * RGBA8, sqrt-encoded albedo = the terrain's sRGB colour, A = 0; row 0 = south pole, u = 0 at
      * longitude −π about +Y): the terrain colour at a band limit of one texel, from the same
      * functions as the tiles, so impostor and terrain agree at the hand-over (DECISIONS 17a).
-     * CPU only, allocates its own scratch; run it on a worker (~0.5 s for 1024 × 512).
+     * Waits for the mean colour table (the same one the tiles use: [ready] may still be false
+     * when this starts). CPU only, allocates its own scratch; run it off the GL thread (1–2 s for
+     * 1024 × 512 on desktop).
      */
     fun bakeEquirect(width: Int, height: Int): java.nio.ByteBuffer {
+        field.buildMeanColours()
         val out = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(java.nio.ByteOrder.nativeOrder())
         val fs = FieldScratch()
         val sample = SurfaceSample()
@@ -357,7 +408,8 @@ class TerrainPlanet(
                 uploadsTotal, droppedTotal, lastUpdateNanos / 1e6)
 
     companion object {
-        const val BUDGET_MS = 16.7f
+        /** The default [frameBudgetMs]: 60 fps. */
+        const val DEFAULT_BUDGET_MS = 1000f / 60f
         const val LEVEL_ALTITUDE = 900.0
         const val LOOKAHEAD = 2.5
         const val MAX_LOOKAHEAD = 9000.0

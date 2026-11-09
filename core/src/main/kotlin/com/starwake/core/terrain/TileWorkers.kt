@@ -9,6 +9,9 @@ class TileStaging(val index: Int, bytes: Int) {
     val buffer: ByteBuffer = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
 
     var owner = -1
+
+    /** The owner's registration ([TileWorkerPool.register]) the tile was built for. */
+    var epoch = 0
     var node = -1
     var gen = 0
 
@@ -60,6 +63,14 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
 
     private val owners = arrayOfNulls<TileJobOwner>(MAX_OWNERS)
 
+    /**
+     * Registration of each owner id (a fresh number per [register]): a tile finished for an earlier
+     * registration of the same id (a released planet whose id went to the next one) is never
+     * handed to the new owner, and its staging buffer goes back to the pool.
+     */
+    private val ownerEpoch = IntArray(MAX_OWNERS)
+    private var epochs = 0
+
     // job heap (parallel arrays)
     private val heapPrio = FloatArray(HEAP_CAPACITY)
     private val heapNode = IntArray(HEAP_CAPACITY)
@@ -102,16 +113,21 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
         for (i in owners.indices) {
             if (owners[i] == null) {
                 owners[i] = owner
+                ownerEpoch[i] = ++epochs
                 return i
             }
         }
         throw IllegalStateException("too many terrain owners")
     }
 
-    /** Drops the owner's queued jobs; tiles it has in flight are released when they come back. */
+    /**
+     * Drops the owner's queued jobs and its finished tiles; tiles it has in flight go back to the
+     * staging pool when they come back (never to the next owner of the id).
+     */
     fun unregister(id: Int) = synchronized(lock) {
         removeOwnerJobs(id)
         owners[id] = null
+        ownerEpoch[id] = 0
         // finished tiles nobody will collect
         var w = 0
         for (k in 0 until doneCount) {
@@ -121,6 +137,9 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
         doneCount = w
         lock.notifyAll()
     }
+
+    /** True when staging [s] was built for the current registration of its owner id. Under the lock. */
+    private fun current(s: TileStaging): Boolean = owners[s.owner] != null && ownerEpoch[s.owner] == s.epoch
 
     /**
      * Replaces the owner's queue with [count] wanted nodes ([nodes], [prios]): queued jobs not in the
@@ -173,12 +192,17 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
      */
     fun pollCompleted(id: Int, max: Int, sink: TileSink): Int {
         var n = 0
+        var freed = false
         synchronized(lock) {
             var w = 0
             for (k in 0 until doneCount) {
                 val s = done[k]
                 val st = staging[s]
-                if (st.owner == id && n < max) {
+                if (!current(st)) {
+                    // built for a registration that has ended: back to the pool
+                    freeStaging[freeCount++] = s
+                    freed = true
+                } else if (st.owner == id && n < max) {
                     val owner = owners[id]
                     if (owner != null && owner.jobStates[st.node] == 2 && owner.generations[st.node] == st.gen) {
                         owner.jobStates[st.node] = 0
@@ -193,7 +217,7 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
         for (k in 0 until n) sink.accept(staging[drained[k]])
         synchronized(lock) {
             for (k in 0 until n) freeStaging[freeCount++] = drained[k]
-            if (n > 0) lock.notifyAll()
+            if (n > 0 || freed) lock.notifyAll()
         }
         return n
     }
@@ -202,6 +226,9 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
     fun queued(): Int = synchronized(lock) { heapSize }
     fun inFlight(): Int = synchronized(lock) { building }
     fun finished(): Int = synchronized(lock) { doneCount }
+
+    /** Staging buffers free for new jobs (diagnostics). */
+    fun freeStagings(): Int = synchronized(lock) { freeCount }
 
     /** True when nothing is queued, building or waiting to be collected. */
     fun idle(): Boolean = synchronized(lock) { heapSize == 0 && building == 0 && doneCount == 0 }
@@ -244,6 +271,7 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
                     o.jobStates[node] = 2
                     val s = staging[freeStaging[--freeCount]]
                     s.owner = id
+                    s.epoch = ownerEpoch[id]
                     s.node = node
                     s.gen = gen
                     st = s
@@ -268,7 +296,13 @@ class TileWorkerPool(val threads: Int, stagingCount: Int, stagingBytes: Int = Ti
                 tilesBuilt++
                 buildNanosTotal += ns
                 if (ns > buildNanosMax) buildNanosMax = ns
-                done[doneCount++] = s.index
+                if (current(s)) {
+                    done[doneCount++] = s.index
+                } else {
+                    // its owner left the pool while it was being built
+                    freeStaging[freeCount++] = s.index
+                    lock.notifyAll()
+                }
             }
         }
     }
