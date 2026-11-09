@@ -71,6 +71,23 @@ class StarSystemTest {
     }
 
     @Test
+    fun locateDoesNotAllocate() {
+        val mx = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        if (!mx.isThreadAllocatedMemoryEnabled) mx.isThreadAllocatedMemoryEnabled = true
+        // every frame runs it (twice): the minimum over all bodies must stay allocation free
+        val io = system.bodies[system.bodyIndex("Io")].pos
+        val p = at(io.x + 5e6, io.y, io.z)
+        val v = Vec3(-1e6f, 0f, 0f)
+        val out = StarSystem.Locality()
+        for (i in 0 until 5000) system.locate(p, v, local, out)
+        val a = mx.currentThreadAllocatedBytes
+        for (i in 0 until 5000) system.locate(p, v, local, out)
+        val b = mx.currentThreadAllocatedBytes
+        val per = (b - a) / 5000.0
+        assertTrue(per < 1.0, "StarSystem.locate allocates %.1f bytes per call".format(per))
+    }
+
+    @Test
     fun departingIsFasterThanApproaching() {
         val p = at(earth.pos.x, earth.pos.y + earth.radius + 2e6, earth.pos.z)
         val away = system.locate(p, Vec3(0f, 1000f, 0f), local, StarSystem.Locality()).speedLimit
