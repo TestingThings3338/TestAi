@@ -67,6 +67,7 @@ class SessionAudio(
     private var lastMessage: String? = null
 
     // ---- pause and menu music
+    private var uiGain = -1f
     private var paused = false
     private var menuLevel = 0f
     private var menuPlaying = false
@@ -128,7 +129,12 @@ class SessionAudio(
         val effects = if (mutedByDebug) 0f else settings.effectsVolume
         ship.setVolumes(master, effects, settings.musicVolume)
         voice.setVolumes(master, effects)
-        out.setBusGain(Bus.UI, master * effects)
+        val ui = master * effects
+        if (ui != uiGain) {
+            uiGain = ui
+            out.setBusGain(Bus.UI, ui)
+            out.setBusGain(Bus.DECK, ui)
+        }
         ship.setMusicEnabled(settings.musicOn)
 
         // the pause menu holds the ship and the announcer where they are

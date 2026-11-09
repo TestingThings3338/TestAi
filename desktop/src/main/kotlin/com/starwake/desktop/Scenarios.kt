@@ -338,6 +338,11 @@ object Scenarios {
             "DECISIONS 21: the ship flies on under the map (position advances by v·3 s), the stick is released and recentred, PAUSE freezes",
         ) { SessionScenarios.mapNonPausing(it) },
 
+        "audio-flight" to Scenario(
+            "audio-flight",
+            "09 audio: docked start, launch, throttle, boost, FA off/on, cruise on/off, auto-dock with every sound decoded and mixed; cue order and voice lines from the log, no voice overlap, WAV mix + spectrogram, mixer and allocation numbers (no-op GL)",
+        ) { AudioScenario.run(it) },
+
         "perf" to Scenario(
             "perf",
             "Flight with continuous two-thumb input (--perf-frames, default 600): CPU ms per drawFrame and bytes allocated per frame",

@@ -93,6 +93,24 @@ object SoundBank {
         "audio/music/meridian_lights.ogg",
     )
 
+    /**
+     * The loops are stored with [LOOP_PAD_SECONDS] of their own wrap-around on both ends, so the
+     * codec's start and end artefacts fall into that padding; every loader cuts it ([unpad]) and the
+     * decoded loop is exactly one period (no click at the seam).
+     */
+    const val LOOP_PAD_SECONDS = 0.128f
+
+    fun loopPadded(sound: Int): Boolean =
+        sound in ENGINE..CRUISE || sound == WARP_TRAVEL || sound == WARNING_PHASE2 || sound == OVERHEAT_LOOP
+
+    /** [pcm] without the loop padding (decoded at any rate). */
+    fun unpad(pcm: Pcm): Pcm {
+        val p = kotlin.math.round(LOOP_PAD_SECONDS * pcm.rate).toInt()
+        if (pcm.frames <= 2 * p) return pcm
+        val c = pcm.channels
+        return Pcm(pcm.data.copyOfRange(p * c, (pcm.frames - p) * c), c, pcm.rate)
+    }
+
     /** The dry recording of [line] (optional: the user's own file, `09` Q1). */
     fun voicePath(line: VoiceLine): String = "audio/voice/" + line.name + ".ogg"
 

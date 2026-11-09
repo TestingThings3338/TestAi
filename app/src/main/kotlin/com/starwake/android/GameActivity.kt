@@ -89,6 +89,7 @@ class GameActivity : Activity() {
 
     override fun onDestroy() {
         inputManager?.unregisterInputDeviceListener(gamepad)
+        platform.onDestroy()
         val hint = view.perfHint
         view.queueEvent { hint.close() } // GL thread owns the session; finalizer covers the rest
         super.onDestroy()
