@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 12+: back up / transfer only the player settings. -->
+<!-- Android 12+: back up / transfer the player settings and the saves (profile.json, galaxy.json). -->
 <data-extraction-rules>
     <cloud-backup>
         <include domain="sharedpref" path="space_exploration.xml" />
+        <include domain="file" path="saves/" />
     </cloud-backup>
     <device-transfer>
         <include domain="sharedpref" path="space_exploration.xml" />
+        <include domain="file" path="saves/" />
     </device-transfer>
 </data-extraction-rules>
