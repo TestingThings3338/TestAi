@@ -71,19 +71,41 @@ def level(name, x):
 
 # ============================================================================= A.1 flight layers (loops)
 
+def _housing(f):
+    """The engine housing's response: k^-0.8 partials lifted around 0.7 and 1.6 kHz, rolled off above 1.7 kHz."""
+    lift = 1.0 + 0.8 * al.peak_shape(700.0, 0.45)(f) + 0.5 * al.peak_shape(1600.0, 0.3)(f)
+    return lift * al.band(0, 1700.0, 4)(f)
+
+
 def engine():
-    """Engine base hum: a 55 Hz hum with harmonics, slow beating, a faint turbine whine, a soft noise bed."""
+    """Engine base hum: a 55 Hz hum whose harmonics reach 2 kHz through the housing, slow beating, a turbine
+    whine, intake air (300-1000 Hz) and a soft noise bed.
+
+    A phone's own speaker gives little below 300-400 Hz: the partials, the whine and the air above 400 Hz are
+    what it plays, so the hum and its spool-up with the lever are heard there too (the pitch of 55 Hz is heard
+    from its harmonics); about 14 % of the energy lies above 400 Hz (check_audio.SPEAKER)."""
     n = int(8.0 * R)
     x = np.zeros(n)
-    for k, a in [(1, 1.0), (2, 0.62), (3, 0.34), (4, 0.22), (5, 0.08), (6, 0.10), (8, 0.04)]:
+    # the low series, each partial slowly beating with a copy 0.25 k Hz above
+    for k, a in enumerate([0.75, 0.55, 0.40, 0.30, 0.22, 0.18, 0.15], start=1):
         x += a * al.loop_sine(55.0 * k, n, R, phase=0.7 * k)
-        x += 0.35 * a * al.loop_sine(55.0 * k + 0.25 * k, n, R, phase=1.9 * k)  # slow beating
-    # turbine whine, a little vibrato (whole cycles)
+        x += 0.35 * a * al.loop_sine(55.0 * k + 0.25 * k, n, R, phase=1.9 * k)
+    # the housing: partials 8-44 (440 Hz - 2.4 kHz), each breathing slowly (whole cycles in the loop)
+    rng = np.random.default_rng(102)
+    for k in range(8, 45):
+        f = 55.0 * k
+        a = 0.6 * k ** -0.8 * _housing(f) * rng.uniform(0.75, 1.0)
+        breath = al.loop_lfo(0.125 * int(rng.integers(2, 7)), n, R, 0.3, rng.uniform(0, 6.28))
+        x += a * breath * al.loop_sine(f, n, R, rng.uniform(0, 2 * np.pi))
+    # turbine whine 20 dB under the fundamental, with its octave and a little vibrato (whole cycles)
     t = np.arange(n) / R
     vib = 0.004 * al.loop_sine(0.5, n, R)
     f_wh = al.loop_freq(1210.0, n, R)
-    whine = np.sin(2 * np.pi * f_wh * t + 2 * np.pi * f_wh * np.cumsum(vib) / R)
-    x += 0.035 * whine * al.loop_lfo(0.25, n, R, 0.3)
+    ph = 2 * np.pi * f_wh * t + 2 * np.pi * f_wh * np.cumsum(vib) / R
+    x += 0.1 * (np.sin(ph) + 0.25 * np.sin(2 * ph + 0.6)) * al.loop_lfo(0.25, n, R, 0.3)
+    # intake air
+    air = al.periodic_noise(n, R, al.band(300, 1000, 2), seed=103)
+    x += 0.12 * air * al.loop_lfo(0.375, n, R, 0.25, 2.0)
     bed = al.periodic_noise(n, R, lambda f: al.band(30, 420, 2)(f) * al.pink(-3)(f), seed=101)
     x += 0.25 * bed * al.loop_lfo(0.375, n, R, 0.2, 1.0)
     x = al.soft_clip(0.6 * x / np.max(np.abs(x)), 1.4)
@@ -347,16 +369,20 @@ def cruise_on():
 
 
 def cruise_off():
-    """Deep boom with a rumbling, reverberant tail (4.4 s): pitch drop 70 -> 35 Hz, slow surging rumble."""
+    """Deep boom with a rumbling, reverberant tail (4.4 s): pitch drop 70 -> 35 Hz, slow surging rumble. The hit
+    that starts it is also a crack (0.5-3 kHz) and a short clang of the drive's housing: what a phone's speaker
+    plays of it (the boom and the tail stay sub-bass)."""
     t = al.t_axis(4.4, R)
     st = 0.015
     v = np.clip(t - st, 0, None)
     f = 35.0 + 35.0 * np.exp(-v / 0.25)
     boom = np.sin(2 * np.pi * np.cumsum(f) / R) * al.env_ad(t, 0.006, 0.55, st)
-    crack = al.butter(al.noise(t.size, 1201), R, "band", [200, 2500], 2) * al.env_ad(t, 0.002, 0.04, st)
+    crack = al.butter(al.noise(t.size, 1201), R, "band", [500, 3000], 3) * al.env_ad(t, 0.002, 0.07, st)
+    clang = _modes(t, 580.0, [1.0, 1.41, 1.98, 2.62, 3.37], [0.22, 0.17, 0.13, 0.1, 0.07], [1.0, 0.8, 0.6, 0.45, 0.3],
+                   1204, st + 0.002)
     tail = al.butter(al.noise(t.size, 1202), R, "low", 180, 3) * al.env_ad(t, 0.15, 1.3, st)
     tail *= 1.0 + 0.3 * np.sin(2 * np.pi * 1.7 * t) + 0.2 * np.sin(2 * np.pi * 3.1 * t + 1)
-    x = 1.3 * boom + 0.4 * crack + 0.9 * tail
+    x = 1.3 * boom + 0.9 * crack + 0.3 * clang + 0.9 * tail
     x = x + 0.4 * al.convolve(x, al.reverb_ir(3.0, R, 1.0, 1203, 1500))
     x = al.soft_clip(x / np.max(np.abs(x)) * 1.4, 1.8)
     return level("cruise_off", al.fade(x, R, 0.0, 0.5))
@@ -395,17 +421,22 @@ def release():
 
 
 def touchdown():
-    """Deep dull thump with a rattle (1.9 s): a soft lead, the thump at 0.28 s (60 Hz), a dull knock, a rattle."""
+    """Deep dull thump with a rattle (1.9 s): a soft lead, the thump at 0.28 s (60 Hz), a dull knock with the skids'
+    bright metal and a clank of the struts, the gear's rattle. The metal and the rattle (0.5-3 kHz) are what a
+    phone's speaker plays of it; the thump stays the body of the sound."""
     t = al.t_axis(1.9, R)
     st = 0.28
     lead = al.butter(al.noise(t.size, 1501), R, "band", [200, 1200], 2) * np.sin(np.pi * np.clip(t / st, 0, 1)) * 0.04
     v = np.clip(t - st, 0, None)
     thump = np.sin(2 * np.pi * (68.0 * v - 30.0 * v * v)) * al.env_ad(t, 0.003, 0.16, st)
     knock = al.butter(al.noise(t.size, 1502), R, "low", 600, 3) * al.env_ad(t, 0.001, 0.05, st)
-    rattle = al.butter(al.noise(t.size, 1503), R, "band", [300, 1100], 2)
+    skid = al.butter(al.noise(t.size, 1506), R, "band", [500, 3000], 4) * al.env_ad(t, 0.0008, 0.025, st)
+    clank = _modes(t, 640.0, [1.0, 1.52, 2.31, 2.94, 3.71], [0.18, 0.14, 0.1, 0.08, 0.06], [1.0, 0.7, 0.5, 0.4, 0.3],
+                   1507, st + 0.004)
+    rattle = al.butter(al.noise(t.size, 1503), R, "band", [500, 2800], 4)
     rattle *= np.clip(np.sin(2 * np.pi * 31.0 * t), 0, None) * al.env_ad(t, 0.01, 0.22, st + 0.04)
     ring = _modes(t, 410.0, [1.0, 1.8, 2.6], [0.25, 0.15, 0.1], [0.3, 0.2, 0.1], 1504, st + 0.01)
-    x = lead + 1.2 * thump + 0.6 * knock + 0.35 * rattle + 0.2 * ring
+    x = lead + 1.2 * thump + 0.6 * knock + 0.7 * skid + 0.3 * clank + 0.8 * rattle + 0.25 * ring
     x = x + 0.2 * al.convolve(x, al.reverb_ir(0.9, R, 0.25, 1505, 3000))
     x = al.soft_clip(x / np.max(np.abs(x)) * 1.3, 1.6)
     return level("touchdown", al.fade(x, R, 0.0, 0.3))

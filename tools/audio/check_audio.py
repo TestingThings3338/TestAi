@@ -4,8 +4,9 @@
 For each file: present and decodable, format (sfx mono 32 kHz, music stereo 44.1 kHz), length within its
 range, loudness (LUFS, BS.1770) or sample peak at its target, never clipping, and for loops a seamless wrap
 (no level step, no click: the sample step and the high-band energy at the seam must look like anywhere
-else in the file). Music tracks that do not loop must start and end in silence. Also the total size of
-app/src/main/assets/audio (budget 12 MB).
+else in the file). Music tracks that do not loop must start and end in silence. The sounds a phone's own
+speaker must play (SPEAKER) keep enough level above 400 Hz. Also the total size of app/src/main/assets/audio
+(budget 12 MB).
 
     python3 tools/audio/check_audio.py                       # check, exit 1 on any failure
     python3 tools/audio/check_audio.py --spectrograms DIR    # also one ffmpeg showspectrumpic PNG per file
@@ -54,6 +55,28 @@ INVENTORY = [
 ]
 
 BUDGET_BYTES = 12 * 1024 * 1024
+
+# Phone speakers (the game's target) give little below 300-400 Hz. A sound that must be heard there keeps
+# enough of its level above 400 Hz: through a 4th-order 400 Hz high-pass (a small speaker) it may lose at most
+# this many dB against the full band (loops: the whole loop; cues: their loudest 100 ms). The Cruise layer and
+# the rumble stay sub-bass on purpose; every other sfx gets the figure printed, unchecked.
+SPEAKER = {"engine": 10.0, "thrust": 10.0, "rcs": 10.0, "touchdown": 10.0, "cruise_off": 12.0}
+
+
+def speaker_loss(x, rate, kind):
+    """dB a small speaker (4th-order high-pass at 400 Hz) takes off: whole loop, or the loudest 100 ms of a cue."""
+    from scipy import signal
+    sos = signal.butter(4, 400.0, "high", fs=rate, output="sos")
+    if kind == "loop":
+        y = signal.sosfilt(sos, np.concatenate([x, x]))[x.size:]  # settled, as the loop plays on
+        return 10.0 * np.log10((np.mean(y ** 2) + 1e-20) / (np.mean(x ** 2) + 1e-20))
+    y = signal.sosfilt(sos, x)
+    w = max(1, min(x.size, int(0.1 * rate)))
+
+    def loudest(z):
+        c = np.cumsum(np.concatenate([[0.0], z ** 2]))
+        return np.max((c[w:] - c[:-w]) / w) + 1e-20
+    return 10.0 * np.log10(loudest(y) / loudest(x))
 
 
 def seam_report(x, rate):
@@ -117,9 +140,15 @@ def check(name, group, kind, dur, lvl, verbose):
     if pk > -0.3:
         problems.append("peak %.2f dBFS: clips" % pk)
     extra = ""
+    if group == "sfx":
+        loss = speaker_loss(mono, rate, "loop" if kind == "loop" else "cue")
+        extra = "speaker %+5.1f dB  " % loss
+        if name in SPEAKER and loss < -SPEAKER[name]:
+            problems.append("small speaker: a 400 Hz high-pass takes %.1f dB off (at most %.0f): inaudible on a phone"
+                            % (-loss, SPEAKER[name]))
     if kind in ("loop", "music-loop"):
         z_step, z_hf, step_db, allowed = seam_report(mono, rate)
-        extra = "seam step %.2fx p99.9, seam HF %.2fx limit, level step %+.2f dB (content %.1f)" % (z_step, z_hf, step_db, allowed)
+        extra += "seam step %.2fx p99.9, seam HF %.2fx limit, level step %+.2f dB (content %.1f)" % (z_step, z_hf, step_db, allowed)
         if z_step > 1.0:
             problems.append("seam: sample step %.2f x the file's 99.9th percentile (click)" % z_step)
         if z_hf > 1.0:

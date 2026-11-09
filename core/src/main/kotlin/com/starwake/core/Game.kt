@@ -313,6 +313,20 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     /**
+     * The app leaves the screen: GL thread, queued by the activity before the GL thread pauses. The
+     * pause request is handled now instead of at the next frame, and the ship's sound and the
+     * announcer are held now, so they fade out before the activity stops and nothing of them plays on
+     * the return before the pause menu holds them (DECISIONS 40). Persists pending settings.
+     */
+    fun onBackground() {
+        pauseRequested = false
+        touch.releaseAll()
+        if (inWorld && !overlay.pauses) openPause()
+        saveSettingsIfDirty()
+        audio.tick(0f, phase == PHASE_MENU, inWorld && !overlay.pauses && phase != PHASE_QUITTING)
+    }
+
+    /**
      * Scripting hook for tests and the preview harness (Roblox ShipDebug equivalents, 01 9.6). Words
      * separated by spaces; "x=y" forms of the older commands still work. Any thread (applied next
      * frame, parsed off the frame path).

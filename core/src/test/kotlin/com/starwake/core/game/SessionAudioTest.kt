@@ -107,6 +107,47 @@ class SessionAudioTest {
         assertTrue(VoiceLine.HullImpact in lines())
     }
 
+    /**
+     * Review: near a station the pre-port speed limit is TopSpeed, so being above it there is only
+     * a boost dying away; it read as a cruise (the CruiseEngage swell, "Cruise dropped", then a
+     * stale "Cruise engaged"). Roblox's station speed brake never lets that become a cruise.
+     */
+    @Test
+    fun aBoostNearTheStationIsNoCruise() {
+        val s = session(docked = false) // in front of the home station
+        run(s, 7f) // past the callouts' read-in
+        out.clearLog()
+        s.requestBoost()
+        var fastest = 0f
+        repeat(100) {
+            run(s, 0.1f)
+            fastest = maxOf(fastest, s.ship.speed)
+        }
+        assertTrue(SoundBank.BOOST in out.played, out.playedNames().toString())
+        assertTrue(fastest > s.spec.maxSpeed * 1.3f, "the boost went well above TopSpeed: $fastest")
+        assertEquals(s.spec.maxSpeed, s.here.speedLimit, "the limit here is TopSpeed")
+        assertFalse(SoundBank.CRUISE_ON in out.played || SoundBank.CRUISE_OFF in out.played, out.playedNames().toString())
+        val said = lines()
+        assertTrue(said.none { it == VoiceLine.CruiseOn || it == VoiceLine.CruiseOff || it == VoiceLine.CruiseDropped }, "$said")
+    }
+
+    /** ...while a cruise where the speed law allows more than TopSpeed still swells in and is announced. */
+    @Test
+    fun aCruiseInOpenSpaceEngagesAndIsAnnounced() {
+        val s = session(docked = false)
+        val h = system.home
+        s.teleport(h.x + 200_000.0, h.y, h.z, 0f, 0f, -1f, true) // 200 km from the station, at rest
+        s.setThrottle(0f)
+        run(s, 7f)
+        assertTrue(s.ship.speed < 1f)
+        out.clearLog()
+        s.setThrottle(1f)
+        run(s, 6f)
+        assertTrue(s.here.speedLimit > s.spec.maxSpeed * 1.02f && s.ship.speed > s.spec.maxSpeed * 1.02f, "cruising at ${s.ship.speed}")
+        assertTrue(SoundBank.CRUISE_ON in out.played, out.playedNames().toString())
+        assertTrue(VoiceLine.CruiseOn in lines(), "${lines()}")
+    }
+
     @Test
     fun theDeckMutesTheShipAndTheCinematicHushesTheMusic() {
         val s = session(docked = false)

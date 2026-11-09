@@ -184,6 +184,66 @@ class MixerTest {
         assertTrue(out.position(1) > pos)
     }
 
+    /**
+     * The pause menu holds the SFX and VOICE buses (and the app's background): the held voices fade
+     * out over one burst and back in over one burst, so neither edge steps more than the sound
+     * itself does from sample to sample (review: an 80 Hz loop at -12 dBFS went 0.07 -> 0 and
+     * 0 -> 0.07 in one sample). Checked at several phases of the wave, for the bus and the slot.
+     */
+    @Test
+    fun holdsAndReleasesFadeWithoutAStep() {
+        val out = TestOut()
+        out.publish(14, sine(80.0, 0.5, 32000, 0.25)) // 40 whole cycles: a seamless loop
+        out.play(0, 14, 1f, 1f, true, 0f, Bus.SFX)
+        out.mixer.snapBuses()
+        val warm = capture(out, 9600)
+        var normal = 0f
+        for (i in 300 until warm.size) normal = maxOf(normal, abs(warm[i] - warm[i - 1]))
+        // 2 pi 80 / 48000 x 0.25 x 0.707 = 0.0019 per sample
+        assertEquals(0.00185f, normal, 0.0002f)
+        var last = warm[warm.size - 1]
+        fun worstStep(x: FloatArray): Float {
+            var w = abs(x[0] - last)
+            for (i in 1 until x.size) w = maxOf(w, abs(x[i] - x[i - 1]))
+            last = x[x.size - 1]
+            return w
+        }
+        val limit = normal * 1.25f
+        for (k in 0 until 6) {
+            worstStep(capture(out, 1000 + 337 * k)) // a different phase each time
+            val hold = k % 2 == 0 // the bus (the pause menu), else the slot's own pause
+            if (hold) out.setBusPaused(Bus.SFX, true) else out.pause(0)
+            val held = out.position(0)
+            val off = capture(out, 512)
+            val down = worstStep(off)
+            assertTrue(down <= limit, "hold $k: a step of $down > $limit")
+            assertEquals(0f, off[511], "held: silent after one burst")
+            val quiet = capture(out, 2400)
+            assertTrue(quiet.all { it == 0f })
+            last = 0f
+            assertEquals(held, out.position(0), 1e-6f, "the held voice keeps the place where the hold began")
+            if (hold) out.setBusPaused(Bus.SFX, false) else out.resume(0)
+            val on = capture(out, 512)
+            val up = worstStep(on)
+            assertTrue(up <= limit, "release $k: a step of $up > $limit")
+            assertTrue(abs(on[300]) > 0f || abs(on[301]) > 0f, "playing again")
+        }
+        // a hold released before the next burst: no dip at all
+        val before = capture(out, 256)
+        last = before[255]
+        out.setBusPaused(Bus.SFX, true)
+        out.setBusPaused(Bus.SFX, false)
+        val same = worstStep(capture(out, 256))
+        assertTrue(same <= normal * 1.05f, "no dip: $same")
+        // a voice stopped while fully held is freed at once and never heard again
+        out.setBusPaused(Bus.SFX, true)
+        capture(out, 512)
+        out.stop(0)
+        assertFalse(out.isActive(0))
+        out.setBusPaused(Bus.SFX, false)
+        assertTrue(capture(out, 1024).all { it == 0f })
+    }
+
     @Test
     fun theLimiterNeverPassesTheCeiling() {
         val out = TestOut()

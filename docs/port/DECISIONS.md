@@ -146,9 +146,15 @@ revisited.
     stored with 0.128 s of their own wrap-around on both ends, which every loader cuts
     (`SoundBank.loopPadded`), so they wrap without a click. Mono 32 kHz OGG Vorbis q5 in
     `assets/audio/sfx/`. Each file is mastered so that its Roblox gain gives the intended balance, so
-    the mixer runs at headroom 1.0 with a soft-knee limiter (ceiling -0.18 dBFS).
+    the mixer runs at headroom 1.0 with a soft-knee limiter (ceiling -0.18 dBFS). The target is a
+    phone, whose own speaker gives little below 300-400 Hz: the engine hum's harmonics reach 2 kHz
+    (with its turbine whine and intake air), the touchdown has the skids' metal and a gear rattle and
+    the cruise disengage hit a crack and a clang at 0.5-3 kHz, so the hum follows the lever and both
+    cues are heard there too; the Cruise layer and the hull rumble stay sub-bass as described.
     `tools/audio/check_audio.py` verifies every file of the inventory (present, format, length,
-    loudness, peak, seamless loops). Deck sounds (A.4) are out of scope for now.
+    loudness, peak, seamless loops, and for the engine, thrust, RCS, touchdown and cruise disengage at
+    most 10-12 dB lost through a 400 Hz small-speaker high-pass). Deck sounds (A.4) are out of scope
+    for now.
 37. **Music** (09 Q2): **original procedural ambient pieces** by `tools/audio/compose_music.py`,
     slowly evolving pads, drones and sparse melodic material (seeded random walks, no existing tune):
     the menu music (D Lydian, 66 BPM, loops seamlessly) and the playlist Deep Space (B-flat Aeolian,
@@ -170,7 +176,9 @@ revisited.
 39. **Audio stand-ins until the flight, world, docking and notices ports land** (`SessionAudio`
     marks each one): forward acceleration from the change of velocity along the nose; the rotation
     and roll amounts from the pre-port stick commands; `cruising` = Flight Assist on, not boosting, not
-    controlled and above 1.02 x the hull's top speed; the boost cooldown from the pre-port boost timer
+    controlled, above 1.02 x the hull's top speed and where the speed limit allows more than that (near
+    a station the pre-port limit is the top speed itself, so a boost dying away there is no cruise, as
+    Roblox's station speed brake never lets it become one); the boost cooldown from the pre-port boost timer
     and capacitor; the docking state from the auto-dock (AUTO, a 1.6 s CLAMPING, DOCKED, a 2 s
     LAUNCHING); the gravity well within 3 radii of the nearest body; the station lock = the station
     zone; the pre-port message line for the comms (Roblox prefixes, plus "DOCKING GRANTED" and
@@ -181,9 +189,15 @@ revisited.
 40. **Volumes and pause:** MASTER, EFFECTS and MUSIC volumes (0-1, 5 % steps) and MUSIC on/off are
     saved with the settings (`vol`, `fx`, `mus`, `music`); MUSIC and EFFECTS are sliders in
     SETTINGS, MUSIC ON/OFF is in the pause menu (21b). The pause menu holds the ship's sound and the
-    announcer where they are (they continue on resume); the music plays on, as Roblox's Heartbeat
-    music does. Leaving the app holds everything; audio focus ducks the music on a transient loss and
-    pauses it on a loss.
+    announcer where they are (they continue on resume), each hold and release a one-burst fade so
+    neither clicks; the music plays on, as Roblox's Heartbeat music does. Leaving the app opens the
+    pause menu and holds the ship and the announcer at once, before the output stops (the activity
+    runs `Game.onBackground` on the GL thread), then holds everything. Audio focus: the music ducks on
+    a duckable transient loss and pauses on any other loss, and stays paused while the request is
+    refused or delayed (a call in progress) until focus comes; the effects and the announcer duck with
+    the music, fall silent while another app needs the sound to itself (a transient loss, a call),
+    and keep playing under another app's music after a lasting loss. The menu music loops gaplessly
+    (two chained players on Android).
 
 ## Optional exports that would improve fidelity
 

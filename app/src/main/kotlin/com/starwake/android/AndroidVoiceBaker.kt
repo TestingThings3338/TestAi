@@ -29,15 +29,20 @@ import java.util.concurrent.TimeUnit
  * ([VoiceFx]), is loudness-normalised and cached in app storage under a key of text + engine + voice
  * + chain version, so it is made again only when one of them changes. No engine or no English voice:
  * the lines stay silent and the game does not care.
+ *
+ * The engine is bound to the application context, not the activity's: the baker outlives an
+ * activity that is destroyed while it bakes, and an activity's leaked binding, force-unbound at its
+ * destruction, would make the late shutdown throw on the baker thread.
  */
-internal class AndroidVoiceBaker(private val context: Context, private val out: MixerAudioOut) {
+internal class AndroidVoiceBaker(context: Context, private val out: MixerAudioOut) {
     private class Request(val sound: Int, val key: String, val text: String, val radio: Boolean)
 
+    private val app: Context = context.applicationContext
     private val queue = LinkedBlockingQueue<Request>()
     @Volatile private var thread: Thread? = null
     @Volatile private var stopped = false
     private var tts: TextToSpeech? = null
-    private val dir = File(context.filesDir, "voice-tts")
+    private val dir = File(app.filesDir, "voice-tts")
 
     /** Lines baked or loaded from the cache, and why the voice is silent if it is (diagnostics). */
     @Volatile var ready = 0
@@ -84,7 +89,12 @@ internal class AndroidVoiceBaker(private val context: Context, private val out: 
             if (ready == 0 && !speaking) Log.i(TAG, "voice silent: $status")
         } catch (_: InterruptedException) {
         } finally {
-            tts?.shutdown()
+            try {
+                tts?.shutdown()
+            } catch (e: RuntimeException) {
+                // e.g. "Service not registered" when the binding is already gone: nothing left to free
+                Log.w(TAG, "text-to-speech shutdown", e)
+            }
             tts = null
         }
     }
@@ -97,7 +107,7 @@ internal class AndroidVoiceBaker(private val context: Context, private val out: 
     private fun startEngine(): Boolean {
         val latch = CountDownLatch(1)
         var ok = false
-        val t = TextToSpeech(context) { s ->
+        val t = TextToSpeech(app) { s ->
             ok = s == TextToSpeech.SUCCESS
             latch.countDown()
         }
@@ -146,7 +156,7 @@ internal class AndroidVoiceBaker(private val context: Context, private val out: 
 
     private fun bake(r: Request) {
         val t = tts ?: return
-        val wav = File(context.cacheDir, "tts-${r.key}.wav")
+        val wav = File(app.cacheDir, "tts-${r.key}.wav")
         val done = CountDownLatch(1)
         var failed = false
         t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {

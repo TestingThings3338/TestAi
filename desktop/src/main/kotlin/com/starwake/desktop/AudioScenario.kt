@@ -12,10 +12,12 @@ import java.lang.management.ManagementFactory
  * decoded (ffmpeg) and mixed by the core mixer in step with the simulated clock. Docked start (the
  * menu music hands over to the flight rotation, the welcome lines), launch (the clamps open), throttle
  * up, boost, Flight Assist off and on, cruise on and off, back to the station and the auto-dock
- * (pad touchdown, clamps). Asserts the cue order and the voice lines from the recording log, that
- * the announcer's two slots never overlap and the mix never clips; writes the WAV mix and its
- * spectrogram; measures the mixer per 256-frame burst with every slot busy and the game thread's
- * allocation per flight frame with audio on.
+ * (pad touchdown, clamps), the pause menu, leaving the app. Asserts the cue order and the voice
+ * lines from the recording log, that the boost dying away near the station is no cruise, that the
+ * announcer's two slots never overlap and the mix never clips, that leaving the app holds the ship
+ * at once and that every hold and release fades without a click (read back from the WAV); writes
+ * the WAV mix and its spectrogram; measures the mixer per 256-frame burst with every slot busy and
+ * the game thread's allocation per flight frame with audio on.
  */
 object AudioScenario {
     fun run(env: ScenarioEnv) {
@@ -56,6 +58,7 @@ object AudioScenario {
         d.cmd("throttle 1")
         run(4f)
         mark("boost")
+        val boostAt = rec.logCount
         d.cmd("boost")
         run(4f)
         mark("flight assist off")
@@ -65,6 +68,7 @@ object AudioScenario {
         d.cmd("fa on")
         run(3f)
         mark("on to cruise speed")
+        val cruiseAt = rec.logCount
         var waited = 0f
         while (d.num("speed") < 260.0 && waited < 90f) {
             run(1f)
@@ -86,9 +90,28 @@ object AudioScenario {
         }
         check(game.stateName == "docked") { "never docked: ${game.debugInfo}" }
         run(4f) // the clamps close 1.6 s after the pad touchdown
+        // the music (a random track) goes down for the hold measurements, so only the ship's own
+        // sound is around the edges; it keeps playing
+        d.cmd("volume music 0")
+        run(0.5f)
         mark("pause: the ship holds, the music plays on")
         d.cmd("pause")
         run(2f)
+        d.cmd("resume")
+        run(1f)
+        // the app leaves (power button) with the services open: the activity runs Game.onBackground
+        // on the GL thread before it pauses, so the pause menu opens and the ship and the announcer
+        // are held before the audio track stops, not at the first frame after the return
+        mark("the app leaves: Game.onBackground")
+        val leaveAt = rec.logCount
+        game.onPause()
+        game.onBackground()
+        val heldNow = rec.events().subList(leaveAt, rec.logCount)
+            .filter { it.event == RecordingAudioOut.EV_BUS_PAUSE && it.gain > 0f }.map { Bus.name(it.sound) }
+        r.note("Game.onBackground: state ${game.stateName}, held at once: $heldNow")
+        check(game.stateName == "paused") { "the pause menu did not open: ${game.stateName}" }
+        check(heldNow.containsAll(listOf("SFX", "VOICE"))) { "Game.onBackground held $heldNow, not the ship and the announcer" }
+        run(1f) // away (on the phone the track is paused; here the mix goes on): the ship stays held
         d.cmd("resume")
         run(1f)
         d.cmd("audio")
@@ -129,6 +152,15 @@ object AudioScenario {
         )
         for (p in pairs) check(subsequence(p.map { it.ordinal }, lines.map { it.ordinal })) { "voice lines: want $p in order in $lines" }
         check(lines.indexOf(VoiceLine.Docked) == lines.size - 1) { "Docked is the last line: $lines" }
+        // the boost dying away near the station is no cruise: no swell and no cruise line before the
+        // cruise leg, and never "Cruise dropped" (the cruise ends with the throttle at zero)
+        val boostLeg = events.subList(boostAt, cruiseAt).filter { it.event == RecordingAudioOut.EV_PLAY }
+        val boostCues = boostLeg.filter { it.slot in SoundBank.SLOT_CUE0 until SoundBank.SLOT_VOICE_LINE }.map { it.sound }
+        val boostLines = boostLeg.filter { it.slot == SoundBank.SLOT_VOICE_LINE }.map { VoiceLine.of(it.sound - SoundBank.VOICE_BASE) }
+        r.note("boost leg (to the cruise mark): cues ${boostCues.joinToString(" ") { SoundBank.name(it) }}, lines $boostLines")
+        check(SoundBank.CRUISE_ON !in boostCues) { "a cruise swell after the boost near the station" }
+        check(VoiceLine.CruiseOn !in boostLines && VoiceLine.CruiseDropped !in boostLines) { "cruise lines after the boost: $boostLines" }
+        check(VoiceLine.CruiseDropped !in lines) { "Cruise dropped in $lines" }
         check(overlapFrames == 0) { "the voice line and its tone overlapped in $overlapFrames frames" }
         // the six layers loop from the start; the engine follows the lever
         val layerLoops = plays.filter { it.event == RecordingAudioOut.EV_LOOP && it.slot in 0 until 6 }.map { it.sound }.toSet()
@@ -141,9 +173,11 @@ object AudioScenario {
         check(menuPlay != null && menuPlay.frame < 10) { "menu music: $menuPlay" }
         check(flightPlay != null) { "no flight track started" }
         r.note("music: menu at frame ${menuPlay!!.frame}, flight track ${SoundBank.name(flightPlay!!.sound)} at frame ${flightPlay.frame}")
-        // the pause holds the ship's sound (both buses paused, then released)
+        // the pause menu, then leaving the app, hold the ship's sound (both buses paused, then released)
         val pauses = events.filter { it.event == RecordingAudioOut.EV_BUS_PAUSE && it.sound == Bus.SFX }.map { it.gain }
-        check(pauses == listOf(1f, 0f)) { "SFX bus pause/resume: $pauses" }
+        check(pauses == listOf(1f, 0f, 1f, 0f)) { "SFX bus pause/resume: $pauses" }
+        check(events.none { it.event == RecordingAudioOut.EV_BUS_PAUSE && it.sound == Bus.MUSIC }) { "the music was held" }
+        holdEdges(wav, events.filter { it.event == RecordingAudioOut.EV_BUS_PAUSE && it.sound == Bus.SFX }, r)
         // the mix: never above full scale (the limiter's ceiling), a sensible level
         check(rec.mixPeak <= 0.981f) { "mix peak ${rec.mixPeak}" }
         r.note("mix: peak %.2f dBFS, RMS %.1f dBFS, limiter active in %d bursts; WAV %s (%.1f s)".format(
@@ -153,6 +187,41 @@ object AudioScenario {
         // ---------------------------------------------------------------- perf
         mixerBurst(rec, r)
         flightAllocation(env)
+    }
+
+    /**
+     * The pause menu's holds of the SFX and VOICE buses fade the ship out and back in over one burst
+     * (review: they cut it within one sample, a click at the pause and at the resume, about 20 x
+     * the local sample step). At each hold and release, the largest sample step of the mix around
+     * the burst where it takes effect stays within 1.5 x the largest step of the sound on either
+     * side of it (the 200 ms before and the 200 ms after).
+     */
+    private fun holdEdges(wav: File, holds: List<RecordingAudioOut.Event>, r: ScenarioReport) {
+        val raw = wav.readBytes()
+        val n = (raw.size - 44) / 4
+        val bb = java.nio.ByteBuffer.wrap(raw, 44, n * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val left = FloatArray(n)
+        val right = FloatArray(n)
+        for (i in 0 until n) {
+            left[i] = bb.short / 32768f
+            right[i] = bb.short / 32768f
+        }
+        fun maxStep(from: Int, to: Int): Float {
+            var m = 0f
+            for (i in maxOf(1, from) until minOf(n, to)) {
+                m = maxOf(m, kotlin.math.abs(left[i] - left[i - 1]), kotlin.math.abs(right[i] - right[i - 1]))
+            }
+            return m
+        }
+        for (h in holds) {
+            val at = h.at.toInt()
+            val edge = maxStep(at - 1, at + 1600)
+            val around = maxOf(maxStep(at - 9600, at - 1), maxStep(at + 1600, at + 11200))
+            val what = if (h.gain > 0f) "hold" else "release"
+            r.note("SFX %s at %.3f s: largest step %.5f at the edge, %.5f in the 200 ms either side (%.2f x)".format(
+                what, at / 48000.0, edge, around, edge / maxOf(around, 1e-6f)))
+            check(edge <= around * 1.5f + 2e-4f) { "the $what at ${at / 48000.0} s steps $edge (around it: $around): a click" }
+        }
     }
 
     private fun spectrogram(wav: File, png: File, r: ScenarioReport) {

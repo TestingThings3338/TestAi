@@ -32,7 +32,7 @@ import java.util.concurrent.locks.LockSupport
  * AudioTrack (float, 48 kHz stereo, PERFORMANCE_MODE_LOW_LATENCY, USAGE_GAME) by a mixer thread at
  * urgent-audio priority; every effect and voice line decoded once (MediaExtractor + MediaCodec) on
  * a loader thread; the two music slots streamed by MediaPlayers on their own thread, with pause and
- * resume at the same position; audio focus (music ducks on a transient loss, pauses on a loss);
+ * resume at the same position and gapless loops; audio focus (DECISIONS 40: see [Focus]);
  * [onPause]/[onResume] hold and continue everything.
  *
  * The game thread only calls the non-allocating [com.starwake.core.audio.AudioOut] methods; nothing
@@ -60,13 +60,14 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
     private val music = arrayOf(MusicSlot(SoundBank.SLOT_MUSIC_FLIGHT), MusicSlot(SoundBank.SLOT_MUSIC_MENU))
     private val streamPath = arrayOfNulls<String>(SoundBank.CAPACITY)
     @Volatile private var musicBus = 1f
-    @Volatile private var duck = 1f
-    @Volatile private var focusPaused = false
 
     // ---------------------------------------------------------------- focus
+    /** The audio focus state ([Focus]); written by the UI thread and the focus listener. */
+    @Volatile private var focus = Focus.FULL
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private val focusRequest: AudioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
         .setAudioAttributes(ATTRIBUTES)
+        .setAcceptsDelayedFocusGain(true) // refused during a call: granted later, through onFocusChange
         .setWillPauseWhenDucked(false)
         .setOnAudioFocusChangeListener({ change -> onFocusChange(change) }, musicHandler)
         .build()
@@ -80,20 +81,41 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
     /** Starts the output (first resume) or continues it. */
     fun onResume() {
         if (track == null) startOutput()
+        // focus first, so the first burst and the music already know it; refused or delayed (a call
+        // in progress): held until AUDIOFOCUS_GAIN arrives
+        focus = when (audioManager?.requestAudioFocus(focusRequest) ?: AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> Focus.FULL
+            AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> Focus.HELD
+            else -> Focus.LOST
+        }
         held = false
         track?.play()
         mixerThread?.let { LockSupport.unpark(it) }
-        audioManager?.requestAudioFocus(focusRequest)
-        focusPaused = false
         for (m in music) musicHandler.post(m.applyState)
     }
 
     /** The app leaves the screen: everything holds where it is. */
     fun onPause() {
+        settle()
         held = true
         track?.pause()
         for (m in music) musicHandler.post(m.applyState)
         audioManager?.abandonAudioFocusRequest(focusRequest)
+    }
+
+    /**
+     * Before the track stops. The game has just held the ship's sound and the announcer (the activity
+     * runs Game.onBackground on the GL thread before it pauses): let the mixer render that one-burst
+     * fade and play out what the track has queued, so nothing of the ship waits in the track's buffer
+     * for the return. Bounded by [SETTLE_NANOS].
+     */
+    private fun settle() {
+        val t = track ?: return
+        if (held || !running) return
+        // the fade lands in the next burst or the one after; then the track's buffer plays out
+        val bursts = mixer.bursts + t.bufferSizeInFrames / BURST + 3
+        val deadline = System.nanoTime() + SETTLE_NANOS
+        while (mixer.bursts < bursts && System.nanoTime() < deadline) LockSupport.parkNanos(1_000_000L)
     }
 
     fun release() {
@@ -138,19 +160,54 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
     private fun mixLoop(t: AudioTrack) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buf = FloatArray(BURST * 2)
+        var written = buf.size // floats of the current burst already in the track
+        var level = 1f // the output's focus level at the end of the last burst
         while (running) {
             if (held) {
                 LockSupport.park(this)
                 continue
             }
-            renderBurst(buf, BURST)
-            val n = t.write(buf, 0, buf.size, AudioTrack.WRITE_BLOCKING)
+            if (written == buf.size) {
+                renderBurst(buf, BURST)
+                level = applyFocus(buf, level)
+                written = 0
+            }
+            // pause() can cut a blocking write short: the rest of the burst goes out after the resume,
+            // so the stream continues where it stopped instead of jumping
+            val n = t.write(buf, written, buf.size - written, AudioTrack.WRITE_BLOCKING)
             if (n < 0) {
-                // a dead track (device change): wait a little instead of spinning
+                // a dead track (device change): drop the burst and wait a little instead of spinning
+                written = buf.size
                 LockSupport.parkNanos(this, 20_000_000L)
+            } else {
+                written += n
+                if (n == 0 && !held) LockSupport.parkNanos(this, 1_000_000L)
             }
             underruns = t.underrunCount
         }
+    }
+
+    /**
+     * The effects and the announcer under audio focus ([Focus]): [buf] fades from [from] to the level
+     * the focus wants now over the burst; returns that level. Mixer thread, no allocation.
+     */
+    private fun applyFocus(buf: FloatArray, from: Float): Float {
+        val to = when (focus) {
+            Focus.HELD -> 0f
+            Focus.DUCKED -> DUCK
+            else -> 1f
+        }
+        if (from == 1f && to == 1f) return to
+        val step = (to - from) / (buf.size / 2)
+        var g = from
+        var i = 0
+        while (i < buf.size) {
+            g += step
+            buf[i] *= g
+            buf[i + 1] *= g
+            i += 2
+        }
+        return to
     }
 
     // ================================================================== loading (loader thread)
@@ -352,22 +409,52 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
         }
     }
 
+    /** Music thread (the listener's handler). */
     private fun onFocusChange(change: Int) {
         when (change) {
-            AudioManager.AUDIOFOCUS_LOSS -> focusPaused = true
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> duck = DUCK
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                duck = 1f
-                focusPaused = false
-            }
+            AudioManager.AUDIOFOCUS_GAIN -> focus = Focus.FULL
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> focus = Focus.DUCKED
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> focus = Focus.HELD
+            AudioManager.AUDIOFOCUS_LOSS -> focus = Focus.LOST
         }
         for (m in music) m.applyState.run()
+    }
+
+    /** The music's level under audio focus (it pauses in [Focus.HELD] and [Focus.LOST]). */
+    private val musicDuck: Float get() = if (focus == Focus.DUCKED) DUCK else 1f
+
+    /** The music plays: focus held or ducked. */
+    private val musicAllowed: Boolean get() = focus == Focus.FULL || focus == Focus.DUCKED
+
+    /**
+     * Audio focus (DECISIONS 40). The music follows it (ducked, or paused and continued later); the
+     * effects and the announcer duck with a duckable loss and fall silent while another app needs the
+     * sound to itself (a call, the assistant, a refused request during a call), but keep playing under
+     * another app's music after a lasting loss, as the game's own feedback.
+     */
+    private object Focus {
+        /** Ours: everything plays. */
+        const val FULL = 0
+
+        /** A duckable transient loss: the music and the effects at [DUCK]. */
+        const val DUCKED = 1
+
+        /** A transient loss, or a request refused or delayed (a call): the music paused, the effects silent. */
+        const val HELD = 2
+
+        /** A lasting loss (another app's music): the music paused, the effects on; asked again on resume. */
+        const val LOST = 3
     }
 
     /**
      * One streamed music slot. The game thread writes the wanted state into volatile fields and posts
      * a preallocated Runnable; the music thread applies it to its MediaPlayer (prepare, seek, start,
      * pause, volume) and reports position and completion back.
+     *
+     * A looped track (the menu music, the flight fallback) is not looped with setLooping, which
+     * rewinds only after the output has drained (a dropout at the loop point). Two players hold the
+     * same file instead, the second set as the first's next player: the framework hands the output
+     * over to it without a gap, and the finished one is prepared again as the next of the other.
      */
     private inner class MusicSlot(val slot: Int) {
         @Volatile var active = false
@@ -381,16 +468,20 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
         @Volatile private var ended = false
         @Volatile var positionMs = 0
 
+        // ---- music thread
+        /** The player that plays (or holds) the track. */
         private var player: MediaPlayer? = null
+
+        /** A looped track's second player: prepared on the same file, set as [player]'s next. */
+        private var next: MediaPlayer? = null
         private var appliedGeneration = -1
         private var prepared = false
         @Volatile private var pendingVolume = false
 
+        private val completion = MediaPlayer.OnCompletionListener { mp -> completed(mp) }
+
         val applyState = Runnable { apply() }
-        val release = Runnable {
-            player?.release()
-            player = null
-        }
+        val release = Runnable { releasePlayers() }
         private val applyVolume = Runnable {
             pendingVolume = false
             volume()
@@ -459,39 +550,32 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
         // ---- music thread
         private fun apply() {
             if (!wantPlaying) {
-                player?.let {
-                    try {
-                        if (prepared && it.isPlaying) it.stop()
-                    } catch (_: IllegalStateException) {
-                    }
-                    it.reset()
-                }
-                prepared = false
+                releasePlayers()
                 appliedGeneration = -1
                 return
             }
             val gen = generation
             if (gen != appliedGeneration) {
+                // a new track: fresh players (a completion still queued from the old ones finds them
+                // released and is dropped)
                 appliedGeneration = gen
-                prepared = false
-                val p = player ?: MediaPlayer().also { mp ->
-                    mp.setAudioAttributes(ATTRIBUTES)
-                    mp.setOnCompletionListener { if (!wantLoop) ended = true }
-                    player = mp
-                }
+                releasePlayers()
+                val path = wantPath ?: return
                 try {
-                    p.reset()
-                    assets.openFd(wantPath!!).use { afd -> p.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length) }
-                    p.isLooping = wantLoop
-                    p.prepare()
+                    val p = newPlayer()
+                    player = p
+                    load(p, path)
                     prepared = true
                     if (wantStart > 0f) p.seekTo((wantStart * 1000).toInt())
+                    if (wantLoop) armNext(p, path)
                 } catch (e: IOException) {
                     Log.w(TAG, "music $wantPath", e)
+                    releasePlayers()
                     ended = true
                     return
                 } catch (e: RuntimeException) {
                     Log.w(TAG, "music $wantPath", e)
+                    releasePlayers()
                     ended = true
                     return
                 }
@@ -499,19 +583,98 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
             val p = player ?: return
             if (!prepared) return
             volume()
-            val shouldRun = !wantPaused && !held && !focusPaused
+            val run = shouldRun()
             try {
-                if (shouldRun && !p.isPlaying && !ended) p.start() else if (!shouldRun && p.isPlaying) p.pause()
+                if (run && !p.isPlaying && !ended) p.start() else if (!run && p.isPlaying) p.pause()
             } catch (_: IllegalStateException) {
             }
         }
 
-        private fun volume() {
-            val p = player ?: return
-            if (!prepared) return
-            val v = (gain * musicBus * duck * SoundBank.HEADROOM).coerceIn(0f, 1f)
+        /** Not paused by the game, the app on screen, and the focus lets the music play. */
+        private fun shouldRun(): Boolean = !wantPaused && !held && musicAllowed
+
+        private fun newPlayer(): MediaPlayer = MediaPlayer().also { it.setOnCompletionListener(completion) }
+
+        /** [mp] (idle) on [path], prepared; its volume set. */
+        private fun load(mp: MediaPlayer, path: String) {
+            mp.setAudioAttributes(ATTRIBUTES)
+            assets.openFd(path).use { afd -> mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length) }
+            mp.prepare()
+            setVolume(mp)
+        }
+
+        /**
+         * [mp] (a new player, or one that finished) prepared on [path] as the next player of [current].
+         * Should that fail, the loop goes on with a gap ([completed]) rather than not at all.
+         */
+        private fun armNext(current: MediaPlayer, path: String, mp: MediaPlayer = newPlayer()) {
+            next = mp
             try {
-                p.setVolume(v, v)
+                load(mp, path)
+                current.setNextMediaPlayer(mp)
+            } catch (e: IOException) {
+                Log.w(TAG, "music loop $path", e)
+                mp.release()
+                next = null
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "music loop $path", e)
+                mp.release()
+                next = null
+            }
+        }
+
+        /** A player reached the end of the file (music thread). */
+        private fun completed(mp: MediaPlayer) {
+            if (mp !== player) return // a released or superseded player
+            if (!wantLoop) {
+                ended = true
+                return
+            }
+            val n = next
+            if (n == null) {
+                // no second player: loop with a gap rather than not at all
+                try {
+                    mp.seekTo(0)
+                    if (shouldRun()) mp.start()
+                } catch (_: IllegalStateException) {
+                }
+                return
+            }
+            // the framework has started the next player on the finished one's output: it plays now,
+            // and the finished one, prepared again on the same file, becomes its next
+            player = n
+            next = null
+            positionMs = 0
+            val path = wantPath
+            if (path == null) {
+                mp.release()
+                return
+            }
+            try {
+                mp.reset()
+            } catch (_: IllegalStateException) {
+            }
+            armNext(n, path, mp)
+        }
+
+        private fun releasePlayers() {
+            player?.release()
+            next?.release()
+            player = null
+            next = null
+            prepared = false
+        }
+
+        private fun volume() {
+            if (!prepared) return
+            player?.let { setVolume(it) }
+            next?.let { setVolume(it) }
+        }
+
+        private fun setVolume(mp: MediaPlayer) {
+            val v = (gain * musicBus * musicDuck * SoundBank.HEADROOM).coerceIn(0f, 1f)
+            try {
+                mp.setVolume(v, v)
             } catch (_: IllegalStateException) {
             }
         }
@@ -524,8 +687,11 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
         /** Frames per mixer burst (5.3 ms at 48 kHz). */
         const val BURST = 256
 
-        /** Music level while another app holds transient focus. */
+        /** Music and effects level while another app holds duckable transient focus. */
         const val DUCK = 0.25f
+
+        /** The longest [onPause] waits for the mixer to play out the held sound (ns). */
+        const val SETTLE_NANOS = 80_000_000L
 
         val ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_GAME)

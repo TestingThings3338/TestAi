@@ -41,6 +41,9 @@ class RecordingAudioOut(
     val logGain = FloatArray(LOG)
     val logRate = FloatArray(LOG)
     val logEvent = IntArray(LOG)
+
+    /** Output frame of the mix at which each logged call takes effect (its first burst starts there). */
+    val logAt = LongArray(LOG)
     var logCount = 0
         private set
 
@@ -189,6 +192,7 @@ class RecordingAudioOut(
         logGain[i] = gain
         logRate[i] = rate
         logEvent[i] = event
+        logAt[i] = mixedFrames
         logCount = i + 1
     }
 
@@ -244,14 +248,15 @@ class RecordingAudioOut(
 
     // ================================================================== reading the log (harness; allocates)
 
-    class Event(val frame: Int, val slot: Int, val sound: Int, val gain: Float, val rate: Float, val event: Int) {
+    class Event(val frame: Int, val slot: Int, val sound: Int, val gain: Float, val rate: Float, val event: Int, val at: Long = 0L) {
         val name: String get() = if (slot < 0) Bus.name(sound) else SoundBank.name(sound)
 
         override fun toString(): String =
             "[f%5d] %-9s slot %2d %-28s gain %.3f rate %.3f".format(frame, EVENT_NAMES[event], slot, name, gain, rate)
     }
 
-    fun events(): List<Event> = (0 until logCount).map { Event(logFrame[it], logSlot[it], logSound[it], logGain[it], logRate[it], logEvent[it]) }
+    fun events(): List<Event> =
+        (0 until logCount).map { Event(logFrame[it], logSlot[it], logSound[it], logGain[it], logRate[it], logEvent[it], logAt[it]) }
 
     companion object {
         const val LOG = 200_000

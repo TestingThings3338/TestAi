@@ -387,9 +387,17 @@ class SessionAudio(
 
     // ================================================================== stand-ins
 
-    /** Stand-in for ShipThrust.cruising: Flight Assist on, not boosting, above 1.02 x TopSpeed, nobody else flying. */
-    private fun cruisingStandIn(s: Session): Boolean =
-        s.ship.flightAssist && !s.ship.boosting && !s.mode.controlled && s.ship.speed > s.spec.maxSpeed * 1.02f
+    /**
+     * Stand-in for ShipThrust.cruising: Flight Assist on, not boosting, nobody else flying, above
+     * 1.02 x TopSpeed, and only where the speed law allows more than TopSpeed. Near a station the
+     * pre-port limit is TopSpeed itself, so being above it there is only a boost dying away, which
+     * Roblox never lets become a cruise: its station limit (`ShipClient.lua:2491`) brakes the boost
+     * at TopSpeed (`ShipThrust.lua:390`), below the cruise test of `ShipThrust.lua:279`.
+     */
+    private fun cruisingStandIn(s: Session): Boolean {
+        val above = s.spec.maxSpeed * 1.02f
+        return s.ship.flightAssist && !s.ship.boosting && !s.mode.controlled && s.here.speedLimit > above && s.ship.speed > above
+    }
 
     /** Stand-in for ShipThrust.boostCooldown: the boost's remaining time, then the capacitor's recharge to one boost. */
     private fun boostCooldownStandIn(s: Session): Float {

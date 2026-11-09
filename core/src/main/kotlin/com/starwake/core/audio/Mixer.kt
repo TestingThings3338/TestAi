@@ -18,6 +18,10 @@ class Pcm(val data: ShortArray, val channels: Int, val rate: Int) {
  * with smoothed gains and a pause flag; a master [headroom] and a soft-knee limiter whose output
  * never exceeds [CEILING] (below 0 dBFS).
  *
+ * A hold (a slot's own pause or its bus's) fades the voice out over one burst and a release fades
+ * it back in over one burst, so the pause menu never clicks; the held voice keeps the place where
+ * the hold began (the fade-out burst does not move it), as Roblox's `Pause` keeps `TimePosition`.
+ *
  * Threading: everything here belongs to the mixer thread. The game thread talks to it only through
  * [MixerAudioOut] (a lock-free command ring and parameter blocks); the sounds arrive through [sounds]
  * from the loader threads. What the game thread may read back is published in [pubSeq], [pubEnded]
@@ -44,6 +48,9 @@ class Mixer(
     private val rate = FloatArray(slots)
     private val bus = IntArray(slots)
     private val seq = IntArray(slots)
+
+    /** 1 = the slot was heard at the end of the last burst, 0 = held (paused, its bus paused, or not started). */
+    private val heard = FloatArray(slots)
 
     // ---- buses
     private val busGain = FloatArray(Bus.COUNT)
@@ -93,6 +100,7 @@ class Mixer(
         paused[slot] = false
         stopping[slot] = false
         gain[slot] = 0f // a few ms of ramp from silence: no click, also when starting mid-file
+        heard[slot] = 0f
         pubSeq.set(slot, id)
         pubPos.set(slot, java.lang.Float.floatToRawIntBits(startAt))
         if (p == null) {
@@ -142,25 +150,25 @@ class Mixer(
         if (slot !in 0 until slots || !active[slot]) return
         stopping[slot] = true
         gainTarget[slot] = 0f
-        // nothing audible to fade: free it at once
-        if (waiting[slot] || paused[slot] || busPaused[bus[slot]]) finish(slot, false)
+        // nothing audible to fade (waiting, or fully held): free it at once
+        if (waiting[slot] || heard[slot] == 0f) finish(slot, false)
     }
 
+    /** Holds [slot]: it fades out over the next burst and keeps its place (see the class comment). */
     fun pause(slot: Int) {
         if (slot in 0 until slots && active[slot]) paused[slot] = true
     }
 
+    /** Releases a held [slot]: it fades back in over the next burst from where it was held. */
     fun resume(slot: Int) {
-        if (slot in 0 until slots && active[slot] && paused[slot]) {
-            paused[slot] = false
-            gain[slot] = 0f // back in with a short ramp
-        }
+        if (slot in 0 until slots && active[slot]) paused[slot] = false
     }
 
     fun setBusGain(b: Int, g: Float) {
         if (b in 0 until Bus.COUNT) busTarget[b] = g
     }
 
+    /** Holds (or releases) every slot of bus [b], each with the one-burst fade of [pause] / [resume]. */
     fun setBusPaused(b: Int, p: Boolean) {
         if (b in 0 until Bus.COUNT) busPaused[b] = p
     }
@@ -212,7 +220,11 @@ class Mixer(
         for (s in 0 until slots) {
             if (!active[s]) continue
             val b = bus[s]
-            if (paused[s] || busPaused[b]) continue
+            // a hold fades out over this burst, a release fades in; held on both ends: silent
+            val runStart = heard[s]
+            val runEnd = if (paused[s] || busPaused[b]) 0f else 1f
+            heard[s] = runEnd
+            if (runStart == 0f && runEnd == 0f) continue
             var p = pcm[s]
             if (p == null) {
                 // a waiting loop: its sound may have arrived
@@ -223,7 +235,7 @@ class Mixer(
                 val f = startPosition(p, pos[s].toFloat(), true)
                 pos[s] = if (f < 0.0) 0.0 else f
             }
-            mixSlot(s, p, b, n, l, r)
+            mixSlot(s, p, b, n, l, r, runStart, runEnd)
         }
         // master: headroom, soft-knee limiter with a hard ceiling
         var peak = 0f
@@ -247,18 +259,20 @@ class Mixer(
         limiting = if (env > KNEE) 1f - kneeOut(env) / env else 0f
     }
 
-    private fun mixSlot(s: Int, p: Pcm, b: Int, n: Int, l: FloatArray, r: FloatArray) {
+    /** Mixes slot [s] into [l]/[r]; [runStart] and [runEnd] are its hold ramp (1 heard, 0 held) over the burst. */
+    private fun mixSlot(s: Int, p: Pcm, b: Int, n: Int, l: FloatArray, r: FloatArray, runStart: Float, runEnd: Float) {
         val data = p.data
         val frames = p.frames
         val stereo = p.channels == 2
         val step = rate[s].toDouble() * p.rate / outRate
         val loop = looping[s]
-        // gain ramp over the burst: slot gain x bus gain, both linear from start to end
-        val g0 = gain[s] * busStart[b] * SAMPLE_SCALE
-        val g1 = gainTarget[s] * busGain[b] * SAMPLE_SCALE
+        // gain ramp over the burst: slot gain x bus gain x hold, all linear from start to end
+        val g0 = gain[s] * busStart[b] * runStart * SAMPLE_SCALE
+        val g1 = gainTarget[s] * busGain[b] * runEnd * SAMPLE_SCALE
         val dg = (g1 - g0) / n
         var g = g0
-        var x = pos[s]
+        val held = pos[s]
+        var x = held
         var ended = false
         var i = 0
         while (i < n) {
@@ -294,10 +308,13 @@ class Mixer(
             i++
         }
         gain[s] = gainTarget[s]
-        pos[s] = x
-        if (ended || (stopping[s])) {
+        if (ended || stopping[s]) {
+            pos[s] = x
             finish(s, ended)
+        } else if (runEnd == 0f) {
+            pos[s] = held // faded out into a hold: it keeps the place where the hold began
         } else {
+            pos[s] = x
             pubPos.set(s, java.lang.Float.floatToRawIntBits((x / p.rate).toFloat()))
         }
     }
