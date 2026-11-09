@@ -188,6 +188,45 @@ object Scenarios {
             shot("gp-launched")
         },
 
+        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind HOME STATION routes round the hull; ramming the hull stops at it") {
+            fun info() = game.debugInfo.also { log(it) }
+            fun field(name: String) = Regex("$name=([^ ]+)").find(game.debugInfo)!!.groupValues[1]
+            cmd("launch")
+            frames(30)
+            // --- auto-dock from 1.5 km behind the station: the straight line goes through the hub
+            cmd("behind-station")
+            frames(2)
+            cmd("dock")
+            frames(1)
+            var minHull = Float.MAX_VALUE
+            var n = 0
+            while (game.stateName != "docked" && n < 60 * 120) {
+                frame(); n++
+                minHull = minOf(minHull, field("hull").toFloat())
+                if (n == 300) shot("st-detour")
+            }
+            info()
+            log("auto-dock from behind: $n frames, closest hull gap %.1f m".format(minHull))
+            check(game.stateName == "docked") { "auto-dock from behind never docked: ${info()}" }
+            check(minHull > 0f) { "auto-dock touched the hull (gap $minHull m)" }
+            shot("st-docked")
+            // --- ram the back of the hub at 120 m/s with the throttle held: must stop at the hull
+            game.launchFromStation()
+            frames(5)
+            cmd("ram-station")
+            frames(1)
+            minHull = Float.MAX_VALUE
+            for (i in 0 until 360) {
+                frame()
+                minHull = minOf(minHull, field("hull").toFloat())
+                if (i == 200) shot("st-ram")
+            }
+            info()
+            log("ram: closest hull gap %.1f m".format(minHull))
+            check(minHull > -2.5f) { "ship sank into the hull (gap $minHull m)" }
+            check(minHull < 5f) { "ram never reached the hull (gap $minHull m)" }
+        },
+
         "boost" to gameScenario("boost", "Flight with throttle up, then boost") {
             cmd("launch")
             frames(60)

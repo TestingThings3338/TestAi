@@ -75,7 +75,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     val debugInfo: String
         get() = "state=$stateName landed=$landed landing=$landing docking=$docking docked=$docked " +
             "alt=${"%.1f".format(here.altitude - spec.collisionRadius)} speed=${"%.1f".format(ship.speed)} " +
-            "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex"
+            "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex " +
+            "hull=${"%.1f".format(if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE)}"
 
     // ------------------------------------------------------------------ state
     private var state = STATE_MENU
@@ -156,6 +157,16 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val dockDir = Vec3()
     private val portLocal = Vec3()
     private val portDirLocal = Vec3()
+
+    // station hulls: collision proxies, auto-dock routing around them
+    private val stationCollision = com.starwake.core.game.StationCollision(flight)
+
+    // flight HUD target labels placed this frame (x0, y0, x1, y1), so they never overlap
+    private val labelBoxes = FloatArray(4 * MAX_LABELS)
+    private var labelCount = 0
+    private val dockWaypoint = com.starwake.core.math.DVec3()
+    private var dockBoxedTime = 0f // how long the router has found no way out (it then holds still)
+    private var launchTime = -100f // last launch from a slot: no station proximity warning just after
     private var aimIndex = -1
     private var padZeroHold = false
 
@@ -349,6 +360,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                     ship.pos.set(dockPos.x + dockDir.x * 20.0, dockPos.y + dockDir.y * 20.0, dockPos.z + dockDir.z * 20.0)
                     dockPhase = 1
                 }
+                "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(1500.0, 0f)
+                "ram-station" -> if (state == STATE_FLIGHT) debugBehindStation(400.0, 120f)
                 "livery" -> settings.livery = (settings.livery + 1) % Liveries.all.size
             }
         }
@@ -665,10 +678,19 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 // collide every substep so fast ships can't tunnel through small rocks
                 collide(h)
                 collideBodies(h)
+                collideStation()
             }
             // a press while landed, docking or as an overlay opens is dropped, not latched
             controls.boost = false
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+            // station hulls join the proximity warning. Not while auto-docking (it flies its own clear
+            // route, and collide() did not run to refresh the value) or landed, nor just after a launch,
+            // which starts 40 m off the slot
+            if (docking || landed) {
+                proximity = Float.MAX_VALUE
+            } else if (here.nearestStation >= 0 && time - launchTime > LAUNCH_GRACE) {
+                proximity = minOf(proximity, stationCollision.clearance(ship, system.stations[here.nearestStation]))
+            }
             if (landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
                 landing = false
                 if (!landed) showMessage("LANDING CANCELLED")
@@ -1046,6 +1068,21 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
+    /** Puts the ship [dist] m behind HOME STATION (opposite its slot), nose on the hub, flying at it at [speed]. */
+    private fun debugBehindStation(dist: Double, speed: Float) {
+        stationPort(0)
+        val st = system.stations[0]
+        ship.pos.set(st.pos.x - dockDir.x * dist, st.pos.y - dockDir.y * dist, st.pos.z - dockDir.z * dist)
+        st.rot.rotate(0f, 1f, 0f, upV)
+        ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
+        ship.vel.set(dockDir).scale(speed)
+        ship.angVel.zero()
+        touch.throttle = if (speed > 0f) 0.6f else 0f
+        landing = false
+        docking = false
+        chase.snapTo(ship)
+    }
+
     private fun debugDrop(alt: Double) {
         system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
         val b = system.bodies[here.nearestBody]
@@ -1206,29 +1243,42 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         docking = true
         dockStation = i
         dockPhase = 0
+        dockBoxedTime = 0f
         landing = false
         showMessage("DOCKING GRANTED  ·  AUTO-DOCK ENGAGED")
         haptic(Haptics.TICK)
     }
 
-    /** Auto-dock: fly to a point in front of the slot, line up, then slide in. */
+    /** Auto-dock: around the hull if needed, to a point in front of the slot, line up, then slide in. */
     private fun updateDocking(dt: Float) {
         stationPort(dockStation)
-        // phase 0: hold in front of the slot; phase 1: glide in and park inside the tunnel
+        // phase 0: detour around the hull while the router asks for it, then hold in front of the
+        // slot; phase 1: glide in and park inside the tunnel
+        val detour = dockPhase == 0 && stationCollision.dockWaypoint(system.stations[dockStation], ship.pos, dockWaypoint)
+        // the router found no way out (it holds the ship still): give up rather than wait for ever
+        dockBoxedTime = if (detour && stationCollision.boxedIn) dockBoxedTime + dt else 0f
+        if (dockBoxedTime > DOCK_BOXED_GRACE) {
+            docking = false
+            ship.vel.zero()
+            showMessage("DOCKING ABORTED  ·  MOVE CLEAR OF THE HULL")
+            return
+        }
         val standOff = if (dockPhase == 0) DOCK_STANDOFF else -slotParkDepth(dockStation)
-        val tx = dockPos.x + dockDir.x * standOff
-        val ty = dockPos.y + dockDir.y * standOff
-        val tz = dockPos.z + dockDir.z * standOff
+        val tx = if (detour) dockWaypoint.x else dockPos.x + dockDir.x * standOff
+        val ty = if (detour) dockWaypoint.y else dockPos.y + dockDir.y * standOff
+        val tz = if (detour) dockWaypoint.z else dockPos.z + dockDir.z * standOff
         val dx = tx - ship.pos.x
         val dy = ty - ship.pos.y
         val dz = tz - ship.pos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
-        // nose into the slot (against the outward direction), roll matched to the station's up
+        // nose along the route while going round the hull, otherwise into the slot (against the
+        // outward direction); roll matched to the station's up
         system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
-        landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
+        if (detour && d > 5.0) landRot.lookRotation((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat(), upV.x, upV.y, upV.z)
+        else landRot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
         val turn = if (dockPhase == 0) 1.5f else 3f
         ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
-        val speed = if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
+        val speed = if (detour) DOCK_APPROACH_SPEED else if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
         if (d > 0.5) {
             val k = minOf(1.0, speed * dt / d)
             ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
@@ -1238,13 +1288,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ship.forwardSpeed = speed
         ship.angVel.zero()
         ship.engineOutput += (0.3f - ship.engineOutput) * expApproach(4f, dt)
-        if (dockPhase == 0 && d < 15.0) {
+        if (dockPhase == 0 && !detour && d < 15.0) {
             dockPhase = 1
             showMessage("ENTERING SLOT")
         } else if (dockPhase == 1 && d < 2.0) {
             docking = false
             docked = true
             ship.vel.zero()
+            ship.speed = 0f
+            ship.forwardSpeed = 0f
             touch.throttle = 0f
             controls.clearAxes()
             overlay = OVERLAY_DOCKED
@@ -1267,6 +1319,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         controls.clearAxes()
         chase.snapTo(ship)
         docked = false
+        launchTime = time
         overlay = OVERLAY_NONE
         screenChanged()
         showMessage("LAUNCHED  ·  " + system.stations[dockStation].name)
@@ -1415,9 +1468,40 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (lockKind == LOCK_NONE) findAimed(AIM_CONE_COS, AIM_CONE_SIN) else { aimKind = LOCK_NONE; aimIndex = -1 }
         val showKind = if (lockKind != LOCK_NONE) lockKind else aimKind
         val showIndex = if (lockKind != LOCK_NONE) lockIndex else aimIndex
-        for (i in system.stations.indices) drawMarker(ui, a, LOCK_STATION, i, showKind, showIndex)
-        for (i in system.bodies.indices) drawMarker(ui, a, LOCK_BODY, i, showKind, showIndex)
-        if (lockKind == LOCK_ASTEROID) drawMarker(ui, a, LOCK_ASTEROID, lockIndex, showKind, showIndex)
+        // labels claim screen space in priority order (locked/aimed, stations, bodies); a label
+        // that would overlap one already placed is left out (its marker ring still shows)
+        labelCount = 0
+        if (showKind != LOCK_NONE) drawMarker(ui, a, showKind, showIndex, showKind, showIndex)
+        for (i in system.stations.indices) {
+            if (showKind != LOCK_STATION || i != showIndex) drawMarker(ui, a, LOCK_STATION, i, showKind, showIndex)
+        }
+        for (i in system.bodies.indices) {
+            if (showKind != LOCK_BODY || i != showIndex) drawMarker(ui, a, LOCK_BODY, i, showKind, showIndex)
+        }
+    }
+
+    /**
+     * Claims the screen box of a centred label at ([x], [y]) [w] wide with [lines] lines; false
+     * (nothing claimed) if it would overlap a label already placed this frame.
+     */
+    private fun claimLabel(x: Float, y: Float, w: Float, lines: Int, force: Boolean): Boolean {
+        val u = frame.u
+        val x0 = x - w * 0.5f - 3f * u
+        val x1 = x + w * 0.5f + 3f * u
+        val y0 = y - 9f * u
+        val y1 = y + (if (lines > 1) 20f else 5f) * u
+        if (!force) {
+            for (k in 0 until labelCount) {
+                val o = k * 4
+                if (x0 < labelBoxes[o + 2] && x1 > labelBoxes[o] && y0 < labelBoxes[o + 3] && y1 > labelBoxes[o + 1]) return false
+            }
+        }
+        if (labelCount < MAX_LABELS) {
+            val o = labelCount * 4
+            labelBoxes[o] = x0; labelBoxes[o + 1] = y0; labelBoxes[o + 2] = x1; labelBoxes[o + 3] = y1
+            labelCount++
+        }
+        return true
     }
 
     private fun drawMarker(ui: UiRenderer, a: Float, kind: Int, i: Int, showKind: Int, showIndex: Int) {
@@ -1513,7 +1597,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     private fun labelAndDistance(ui: UiRenderer, a: Float, kind: Int, i: Int, x: Float, y: Float, col: Int, withDistance: Boolean, dist: Double) {
         val u = frame.u
-        ui.text(targetName(kind, i), x, y, 9f * u, col, UiRenderer.CENTER, tracking = 0.18f, shadow = 0.7f)
+        val name = targetName(kind, i)
+        // the locked/aimed label always shows (it is placed first, so nothing is under it yet)
+        if (!claimLabel(x, y, ui.textWidth(name, 9f * u, 0.18f), if (withDistance) 2 else 1, withDistance)) return
+        ui.text(name, x, y, 9f * u, col, UiRenderer.CENTER, tracking = 0.18f, shadow = 0.7f)
         if (withDistance) {
             val unit = formatDistance(buf.clear(), dist.toFloat())
             val tw = ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
@@ -1555,6 +1642,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val dy = p.y - o.y
         val dz = p.z - o.z
         return dx * dx + dy * dy + dz * dz < FIELD_RANGE * FIELD_RANGE
+    }
+
+    /** Station hulls are solid (coarse proxies, see StationCollision). */
+    private fun collideStation() {
+        val i = here.nearestStation
+        if (i < 0) return
+        val impact = stationCollision.collide(ship, system.stations[i])
+        if (impact > 2f && bumpCooldown <= 0f) {
+            bumpCooldown = 0.25f
+            haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
+            chase.addShake(clamp(impact / 50f, 0.2f, 1.2f))
+        }
     }
 
     /** Planet/star surfaces are solid. */
@@ -1744,5 +1843,14 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val GEAR_TIME = 2.2f
         private const val DOCK_STANDOFF = 300.0
         private const val DOCK_APPROACH_SPEED = 180f
+
+        /** Auto-dock gives up after the router has been boxed in this long (s). */
+        private const val DOCK_BOXED_GRACE = 0.5f
+
+        /** No station proximity warning for this long (s) after a launch from a slot. */
+        private const val LAUNCH_GRACE = 1.5f
+
+        /** Most target labels the flight HUD places per frame. */
+        private const val MAX_LABELS = 32
     }
 }
