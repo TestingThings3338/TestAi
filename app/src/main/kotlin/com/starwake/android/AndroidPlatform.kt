@@ -11,6 +11,9 @@ import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import com.starwake.core.Haptics
 import com.starwake.core.Platform
+import com.starwake.core.save.AsyncSaveStorage
+import com.starwake.core.save.FileSaveStorage
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -109,6 +112,23 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     override fun exitApp() {
         mainHandler.post(exitRunnable)
     }
+
+    // ================================================================ saves (core/save: profile.json, galaxy.json)
+
+    /**
+     * <filesDir>/saves: each file replaced atomically (temp + rename, previous kept as .bak), written
+     * off the GL thread. writeSave answers once a write is queued; its outcome reaches the save
+     * manager through [finishedWrites] and [writeState].
+     */
+    private val saves by lazy { AsyncSaveStorage(FileSaveStorage(File(activity.filesDir, "saves"))) }
+
+    override fun readSave(name: String): ByteArray? = saves.readSave(name)
+
+    override fun writeSave(name: String, data: ByteArray): Boolean = saves.writeSave(name, data)
+
+    override val finishedWrites: Int get() = saves.finishedWrites
+
+    override fun writeState(name: String): Int = saves.writeState(name)
 
     // ================================================================ lifecycle hooks (UI thread)
 

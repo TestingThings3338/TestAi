@@ -1,7 +1,9 @@
 package com.starwake.core
 
+import com.starwake.core.save.SaveStorage
+
 /** Services the host platform (Android, desktop harness) provides to the game. */
-interface Platform {
+interface Platform : SaveStorage {
     /** Reads a file from the app's assets, e.g. "font/ui.fnt". */
     fun readAsset(path: String): ByteArray
 
@@ -33,6 +35,20 @@ interface Platform {
 
     /** Short device description for the settings screen, e.g. "Xiaomi 24129PN74G · Android 15". */
     val deviceInfo: String
+
+    /**
+     * Reads save file [name] ("profile.json", "galaxy.json" or its ".bak"), null when missing or
+     * unreadable (save/SaveManager). Default: no save storage.
+     */
+    override fun readSave(name: String): ByteArray? = null
+
+    /**
+     * Stores save file [name] atomically (temp file + rename), keeping the version it replaces as
+     * "<name>.bak"; may finish on a background thread (never block the GL thread on disk), and then
+     * reports the outcome through [finishedWrites] and [writeState] (see [SaveStorage]). False when
+     * saves cannot be stored. Default: no save storage (the game runs, nothing persists).
+     */
+    override fun writeSave(name: String, data: ByteArray): Boolean = false
 }
 
 object Haptics {
