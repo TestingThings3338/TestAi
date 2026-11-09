@@ -184,7 +184,7 @@ class FlightModel(var spec: ShipSpec) {
 
     /**
      * Advances the ship by [dt]. [limit] is the dynamic speed limit for the current location
-     * (≥ the ship's normal top speed; up to 3 Mm/s far from planets and stations). Throttle maps
+     * (≥ the ship's normal top speed; up to 150 Mm/s far from planets and stations). Throttle maps
      * to a fraction of it, and acceleration, braking and drift correction scale with it, so the
      * ship covers interplanetary distances yet slows smoothly when approaching a body.
      * Returns true on the step where a boost was triggered.

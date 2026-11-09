@@ -22,11 +22,11 @@ class StarSystemTest {
     }
 
     @Test
-    fun speedLimitGrowsWithDistanceAndCapsAt3Mms() {
+    fun speedLimitGrowsWithDistanceAndCapsAtHalfLightSpeed() {
         val giant = system.bodies[1]
         var last = 0f
         // fly straight out from the giant's surface, away from everything
-        for (alt in doubleArrayOf(1e4, 1e5, 1e6, 1e7, 1e8)) {
+        for (alt in doubleArrayOf(1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 3e9)) {
             val p = at(giant.pos.x, giant.pos.y + giant.radius + alt, giant.pos.z)
             val l = system.locate(p, Vec3(0f, 1f, 0f), local, StarSystem.Locality())
             assertTrue(l.speedLimit >= last, "limit must not shrink with altitude: $alt -> ${l.speedLimit}")
@@ -98,11 +98,13 @@ class StarSystemTest {
         assertTrue(s.speed <= StarSystem.MAX_SPEED * 1.0001f)
         // arriving: the limit collapses to local speed; the ship must slow down quickly and smoothly
         var t = 0f
-        while (s.speed > local * 1.01f && t < 20f) {
+        while (s.speed > local * 1.01f && t < 30f) {
             model.step(s, c, 1f / 60f, local)
             t += 1f / 60f
         }
-        assertTrue(t < 12f, "took $t s to slow from 3 Mm/s")
+        // braking is exponential (0.9 of the speed per second): ~15 s from 150 Mm/s even when the
+        // limit collapses at once; in flight the approach law lowers it gradually
+        assertTrue(t < 18f, "took $t s to slow from the cruise cap")
         assertTrue(s.speed <= local * 1.01f)
     }
 

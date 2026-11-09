@@ -243,7 +243,7 @@ class StarSystem {
 
     /**
      * Dynamic speed: the limit grows with distance from the nearest surface (or station), faster
-     * when departing than when approaching, from [localMax] up to [MAX_SPEED] (3 Mm/s). The rate
+     * when departing than when approaching, from [localMax] up to [MAX_SPEED] (150 Mm/s). The rate
      * blends smoothly with the heading (level flight gets the mean), so a small pitch change
      * never makes the limit jump.
      */
@@ -260,7 +260,8 @@ class StarSystem {
         const val HOME_STATION_X = -2600.0
         const val HOME_STATION_Y = 250.0
         const val HOME_STATION_Z = -900.0
-        const val MAX_SPEED = 3.0e6f
+        /** Cruise cap: half the speed of light (DECISIONS 2), so crossing the system takes about a minute. */
+        const val MAX_SPEED = 1.5e8f
         const val DEPART_RATE = 0.6
         const val APPROACH_RATE = 0.32
         /** Heading (radial fraction) over which the rate blends from approach to depart: ±~17°. */

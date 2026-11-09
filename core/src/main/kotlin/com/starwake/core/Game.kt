@@ -816,7 +816,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val boostFov = if (ship.boosting) 9f else 0f
         chase.fovBoost += (boostFov - chase.fovBoost) * expApproach(4f, dt)
         val cockpit = chase.mode == 2
-        cam.fovY = (if (cockpit) COCKPIT_FOV else CHASE_FOV + speedFrac * 3f + chase.fovBoost) * DEG2RAD
+        cam.fovY = (if (cockpit) COCKPIT_FOV else CHASE_FOV + clamp(speedFrac, 0f, 1.8f) * 3f + chase.fovBoost) * DEG2RAD
         cam.shiftX = 0f
         cam.shiftY = 0f
         // speed lines move at a capped "visual" speed so they stay readable at Mm/s
