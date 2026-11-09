@@ -403,18 +403,17 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
      * large for a quad or when the body's cone contains the whole view anyway; otherwise a quad
      * around the body's direction, which never shades more pixels than the fullscreen triangle
      * (fill rate: the star glow is wide, but rarely covers the screen). Returns false when it is
-     * off-screen.
+     * off-screen, whichever geometry it would have used.
      */
     private fun coverage(p: BodyProgram, c: Camera, angle: Double, inside: Boolean, exposure: Float): Boolean {
         val dx = imp.dirX
         val dy = imp.dirY
         val dz = imp.dirZ
         val cosFwd = (dx * c.forward.x + dy * c.forward.y + dz * c.forward.z).toDouble()
+        // rejected before the full-screen choice: a wide cone (the star glow near the star, a
+        // planet from low orbit) behind the camera would otherwise shade every pixel for nothing
+        if (!inside && BodyMath.offScreen(cosFwd, angle, halfDiag)) return false
         val full = inside || angle > MAX_QUAD_ANGLE || acos(cosFwd.coerceIn(-1.0, 1.0)) + halfDiag <= angle
-        if (!full) {
-            val lim = angle + halfDiag
-            if (lim < PI && cosFwd < cos(lim)) return false
-        }
         p.p.use()
         gl.uniformMatrix4fv(p.viewProj, viewProj.m, 0)
         gl.uniform3f(p.fwd, c.forward.x, c.forward.y, c.forward.z)
@@ -607,6 +606,17 @@ internal class Impostor {
 
 /** Pure math of [BodyRenderer], kept separate so it can be unit tested without GL. */
 internal object BodyMath {
+    /**
+     * True when a cone of half angle [angle] around a direction at cos [cosFwd] from the view axis
+     * cannot reach any pixel of a view whose corners are [halfDiag] radians off-axis: every pixel
+     * direction is within halfDiag of the axis, so it is more than [angle] from the cone's axis
+     * once the two are more than angle + halfDiag apart.
+     */
+    fun offScreen(cosFwd: Double, angle: Double, halfDiag: Double): Boolean {
+        val lim = angle + halfDiag
+        return lim < PI && cosFwd < cos(lim)
+    }
+
     /**
      * Fills [out] for a body of [radius] metres whose centre is at ([cx], [cy], [cz]) metres from
      * the camera ([dist] = its length). Bodies smaller than [minAngle] radians are enlarged to that

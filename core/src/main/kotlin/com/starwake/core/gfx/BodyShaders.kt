@@ -610,6 +610,11 @@ out vec4 o_color;
 void main() {
     vec3 d = normalize(v_ray);
     float th = atan(length(cross(d, u_center.xyz)), dot(d, u_center.xyz));
+    // past the fade-out the glow adds nothing: skip the exps and the tonemap (blending keeps dst)
+    if (th >= u_glow.w) {
+        o_color = vec4(0.0);
+        return;
+    }
     float w = u_glow.y;
     float x = th / u_glow.x;
     // measured from the limb so the disc keeps a crisp edge

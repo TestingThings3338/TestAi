@@ -14,8 +14,10 @@ import com.starwake.core.math.Mat4
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.TAU_F
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /** Fixed lighting setup of the starting system. */
 object Environment {
@@ -59,6 +61,11 @@ class SceneFrame {
 /**
  * Renders the 3D scene. Everything is drawn camera-relative. Typical frame cost: ~12 draw calls,
  * one texture lookup for the background, no post-processing passes.
+ *
+ * Depth: the near scene shares one 24-bit depth buffer (near plane 0.5 m) only while everything in
+ * it is close. Stations and the asteroid field that are far from the camera, and from whatever is
+ * close to it, go into a far slice with a projection fitted to them, drawn first into the back
+ * half of the depth range (see planSlices); the near slice then uses the front half.
  */
 class SceneRenderer(private val gl: Gl, private val content: Content, quality: Int) {
     private val lit = LitProgram(gl, false)
@@ -105,7 +112,67 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val rockParams = FloatArray(40)
     private val identityRot = Quat()
 
+    // depth slices, planned once per frame (planSlices)
+    private val slices = DepthSlices(1 + content.system.stations.size)
+    private val stationSlot = IntArray(content.system.stations.size)
+    private var fieldSlot = -1
+    private val farProj = Mat4()
+    private val farViewProj = Mat4()
+
+    /** Uniform scale about the eye of everything in the far slice (1 when it starts within [FAR_SCALE_FROM]). */
+    private var farScale = 1f
+
+    /** Bounding radius per station model: the mesh and its light sprites' centres. */
+    private val stationBound = FloatArray(StationMesh.MODELS) { m ->
+        val l = content.stationLights[m]
+        var r = StationMesh.radius(m)
+        var o = 0
+        while (o < l.size) {
+            r = maxOf(r, sqrt(l[o] * l[o] + l[o + 1] * l[o + 1] + l[o + 2] * l[o + 2]))
+            o += 6
+        }
+        r * 1.01f
+    }
+
+    /** Radius around the field origin that holds every rock at any spin, at any quality. */
+    private val fieldRadius: Float
+
+    /** Per rock variant: how many leading instances to keep when thinning (the big rocks are placed first). */
+    private val bigRocks = IntArray(content.rocks.size)
+
+    /** Largest bounding radius of a rock that thinning may drop (metres). */
+    private val smallRockRadius: Float
+
+    /** Depth slices the last frame used: 1, or 2 when far objects got their own (diagnostics). */
+    var depthSlices = 1
+        private set
+
     init {
+        // field bounds from the instance data: rocks spin about their centres, so a rock's sphere is
+        // its scale times its mesh's farthest vertex
+        val field = content.field
+        var fr = 0f
+        var small = 0f
+        for (v in content.rocks.indices) {
+            val mesh = content.rocks[v]
+            var meshR = 0f
+            var o = 0
+            while (o < mesh.size) {
+                meshR = maxOf(meshR, sqrt(mesh[o] * mesh[o] + mesh[o + 1] * mesh[o + 1] + mesh[o + 2] * mesh[o + 2]))
+                o += 8
+            }
+            val d = field.instanceData[v]
+            var lastBig = -1
+            for (k in 0 until field.instanceCount[v]) {
+                val b = k * 8
+                val r = d[b + 3] * meshR
+                fr = maxOf(fr, sqrt(d[b] * d[b] + d[b + 1] * d[b + 1] + d[b + 2] * d[b + 2]) + r)
+                if (d[b + 3] >= BIG_ROCK_SCALE) lastBig = k else small = maxOf(small, r)
+            }
+            bigRocks[v] = lastBig + 1
+        }
+        fieldRadius = fr * 1.01f
+        smallRockRadius = small
         setQuality(quality)
         setupPalettes(0)
         rockMaterial(AsteroidMesh.ROCK, 0.20f, 0.18f, 0.16f, 0.88f, 0.05f)
@@ -171,6 +238,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
 
+        planSlices(f)
         drawBackground(f)
         drawStars(f)
         // star and planets: ray-cast impostors at true scale, drawn back to front without depth
@@ -178,18 +246,27 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.viewport(0, 0, w, h)
 
         // the near scene draws over the bodies (planets use no depth), so a single clear suffices
-        gl.depthRange(0f, 1f)
         gl.depthMask(true)
         gl.enable(GL.DEPTH_TEST)
         gl.depthFunc(GL.LEQUAL)
         gl.enable(GL.CULL_FACE)
         gl.cullFace(GL.BACK)
-        drawAsteroids(f)
-        drawStations(f)
+        if (slices.split) {
+            // far slice first, behind everything: nothing in it overlaps the near slice in depth
+            gl.depthRange(0.5f, 1f)
+            drawAsteroids(f, true)
+            drawStations(f, true)
+            drawStationLights(f, true)
+            gl.depthRange(0f, 0.5f)
+        } else {
+            gl.depthRange(0f, 1f)
+        }
+        drawAsteroids(f, false)
+        drawStations(f, false)
         val ship = f.ship
         if (ship != null) drawShip(f, ship)
         drawDust(f)
-        drawStationLights(f)
+        drawStationLights(f, false)
         if (ship != null) drawShipGlows(f, ship)
         gl.depthMask(true)
         gl.depthRange(0f, 1f)
@@ -226,16 +303,83 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.BLEND)
     }
 
+    // ------------------------------------------------------------------ depth slices
+
+    /**
+     * Decides, once per frame, which slice the field and each station are drawn in, and culls the
+     * ones whose bounding sphere is outside the view. The camera's own cluster is everything within
+     * [NEAR_REACH] (ship, dust) plus whatever overlaps it in depth, transitively; it is drawn with
+     * the camera's projection, so spawn and docking render exactly as with a single slice. Anything
+     * beyond that cluster goes into the far slice, whose projection is fitted to it: at 30 km a
+     * depth step is millimetres instead of ~20 m with the 0.5 m near plane.
+     *
+     * Every object lies wholly in one slice and the slices do not overlap in depth, so nothing is
+     * drawn twice (the field included) and the order between slices is always right. The home
+     * station and the field always overlap in depth (2.7 km apart, radii 0.9 and ~2.3 km), so they
+     * share a slice and occlude each other through one depth buffer.
+     */
+    private fun planSlices(f: SceneFrame) {
+        val c = f.camera
+        val s = slices
+        s.begin()
+        val tx = c.tanHalfX * (1f + abs(c.shiftX))
+        val ty = c.tanHalfY * (1f + abs(c.shiftY))
+        fieldSlot = -1
+        if (f.drawField) {
+            content.field.origin.relativeTo(c.pos, rel)
+            fieldSlot = s.add(rel.dot(c.right), rel.dot(c.up), rel.dot(c.forward), fieldRadius, tx, ty)
+        }
+        val stations = content.system.stations
+        for (i in stations.indices) {
+            val st = stations[i]
+            st.pos.relativeTo(c.pos, rel)
+            stationSlot[i] = if (rel.length() > STATION_DRAW_RANGE || occludedByBody(st.pos, c.pos)) {
+                -1
+            } else {
+                s.add(rel.dot(c.right), rel.dot(c.up), rel.dot(c.forward), stationBound[st.model], tx, ty)
+            }
+        }
+        s.plan(NEAR_REACH)
+        depthSlices = if (s.split) 2 else 1
+        if (!s.split) return
+        // one scale for the whole slice keeps the depth order inside it exact (rocks vs station);
+        // scaling about the eye changes neither the picture nor the precision, it only keeps the
+        // coordinates of a station 3000 km away in the range the rest of the scene uses
+        farScale = if (s.farNear > FAR_SCALE_FROM) FAR_SCALE_FROM / s.farNear else 1f
+        val n = s.farNear * farScale * (1f - FAR_MARGIN)
+        val fa = s.farFar * farScale * (1f + FAR_MARGIN)
+        farProj.perspective(c.fovY, c.width.toFloat() / c.height.coerceAtLeast(1), n, fa, c.shiftX, c.shiftY)
+        farViewProj.mul(farProj, c.view)
+    }
+
+    /** True when [slot] (from [planSlices]) is drawn in the slice [far]. */
+    private fun inSlice(slot: Int, far: Boolean): Boolean = slot >= 0 && slices.isFar(slot) == far
+
     // ------------------------------------------------------------------ near scene
 
-    private fun drawAsteroids(f: SceneFrame) {
-        if (!f.drawField) return
+    /**
+     * The field, in the slice [planSlices] put it in. In the far slice it is shrunk towards the eye
+     * by the slice's scale, so it never reaches the far plane. Once even the largest small rock is
+     * down to a pixel or two, the small rocks are thinned out (the big ones always stay): they
+     * would cost ~400k vertices per frame for a few dots.
+     */
+    private fun drawAsteroids(f: SceneFrame, far: Boolean) {
+        if (!inSlice(fieldSlot, far)) return
         val c = f.camera
         val field = content.field
         field.origin.relativeTo(c.pos, rel)
-        model.setTRS(rel.x, rel.y, rel.z, identityRot, 1f)
-        litInst.begin(c, model, f, envTex, envLod, rockPalette, rockParams, 0f)
-        for (v in rockMeshes.indices) rockMeshes[v].drawInstanced(field.drawCount(v, quality))
+        val k = if (far) farScale else 1f
+        model.setTRS(rel.x * k, rel.y * k, rel.z * k, identityRot, k)
+        litInst.begin(if (far) farViewProj else c.viewProj, model, f, envTex, envLod, rockPalette, rockParams, 0f)
+        // apparent radius (px) of the largest small rock at the field's near edge
+        val edge = rel.length() - fieldRadius
+        val px = if (edge > 1f) smallRockRadius / edge * c.height / (2f * c.tanHalfY) else Float.MAX_VALUE
+        val keep = ((px - THIN_END_PX) / (THIN_START_PX - THIN_END_PX)).coerceIn(0f, 1f)
+        for (v in rockMeshes.indices) {
+            val all = field.drawCount(v, quality)
+            val big = minOf(bigRocks[v], all)
+            rockMeshes[v].drawInstanced(big + ((all - big) * keep).toInt())
+        }
     }
 
     private fun drawShip(f: SceneFrame, ship: ShipState) {
@@ -244,7 +388,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         ship.pos.relativeTo(c.pos, rel)
         model.setTRS(rel.x, rel.y, rel.z, ship.rot, 1f)
         val engine = 0.25f + ship.engineOutput * 0.9f
-        lit.begin(c, model, f, envTex, envLod, shipPalette, shipParams, engine)
+        lit.begin(c.viewProj, model, f, envTex, envLod, shipPalette, shipParams, engine)
         shipMesh.draw()
     }
 
@@ -371,23 +515,24 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     // ------------------------------------------------------------------ stations
 
     /**
-     * Stations within [STATION_DRAW_RANGE]. Beyond [STATION_NEAR] they are drawn scaled towards the
-     * camera (same apparent size) so depth precision stays good. Stations hidden behind a planet
-     * are skipped (planets don't write depth).
+     * The stations [planSlices] put in the slice [far] (within [STATION_DRAW_RANGE], in view, not
+     * hidden behind a planet: planets don't write depth). Far-slice stations are drawn scaled
+     * towards the camera by the slice's scale, which keeps their apparent size and position; it
+     * only keeps very far ones in the coordinate range of the rest of the scene. Their depth
+     * precision comes from the far slice's fitted projection, not from the scaling.
      */
-    private fun drawStations(f: SceneFrame) {
+    private fun drawStations(f: SceneFrame, far: Boolean) {
         val c = f.camera
         val stations = content.system.stations
+        val k = if (far) farScale else 1f
         var begun = false
         for (i in stations.indices) {
+            if (!inSlice(stationSlot[i], far)) continue
             val st = stations[i]
             st.pos.relativeTo(c.pos, rel)
-            val d = rel.length()
-            if (d > STATION_DRAW_RANGE || occludedByBody(st.pos, c.pos)) continue
-            val k = if (d > STATION_NEAR) STATION_NEAR / d else 1f
             model.setTRS(rel.x * k, rel.y * k, rel.z * k, st.rot, k)
             if (!begun) {
-                stationLit.begin(c, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
+                stationLit.begin(if (far) farViewProj else c.viewProj, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
                 begun = true
             } else {
                 stationLit.setModel(model)
@@ -396,17 +541,22 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         }
     }
 
-    private fun drawStationLights(f: SceneFrame) {
+    /** Glow sprites of the stations drawn in the slice [far], depth-tested against them. */
+    private fun drawStationLights(f: SceneFrame, far: Boolean) {
         val c = f.camera
         val stations = content.system.stations
         glowStream.begin()
         val blink = (f.time % 1.6f) < 0.8f
+        val k = if (far) farScale else 1f
         for (i in stations.indices) {
+            if (!inSlice(stationSlot[i], far)) continue
             val st = stations[i]
             st.pos.relativeTo(c.pos, rel)
             val d = rel.length()
-            if (d > STATION_DRAW_RANGE || occludedByBody(st.pos, c.pos)) continue
-            val k = if (d > STATION_NEAR) STATION_NEAR / d else 1f
+            // readable from afar: sprites grow with distance (6..60 m) up to LIGHT_FAR, then keep
+            // their apparent size; in true metres, then scaled with the station
+            val dEff = minOf(d, LIGHT_FAR)
+            val size = maxOf(6f, minOf(dEff * 0.012f, 60f)) * (d / dEff) * k
             val lights = content.stationLights[st.model]
             var o = 0
             while (o < lights.size) {
@@ -419,9 +569,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
                 val lx = (rel.x + tmp.x) * k
                 val ly = (rel.y + tmp.y) * k
                 val lz = (rel.z + tmp.z) * k
-                // keep lights readable from afar: grow with distance up to a cap
-                val dist = d * k
-                val size = maxOf(6f, minOf(dist * 0.012f, 60f)) * if (d > STATION_NEAR) 1f else 1f
                 billboard(lx, ly, lz, size, c, 0f, lights[o + 3], lights[o + 4], lights[o + 5], 0.9f)
                 o += 6
             }
@@ -433,7 +580,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.enable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
         glow.use()
-        gl.uniformMatrix4fv(glow.u("u_viewProj"), c.viewProj.m, 0)
+        gl.uniformMatrix4fv(glow.u("u_viewProj"), (if (far) farViewProj else c.viewProj).m, 0)
         gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
@@ -517,8 +664,31 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     companion object {
         /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
         private const val GLOW_PERIOD = TAU_F / 61f
-        private const val STATION_NEAR = 20_000f
         private const val STATION_DRAW_RANGE = 3.0e6f
+
+        /** Station light sprites keep their apparent size beyond this distance (m). */
+        private const val LIGHT_FAR = 20_000f
+
+        /**
+         * Depth (m) of the camera's own cluster before anything else joins it: the ship (within
+         * ~40 m of the far chase camera), its plume and the dust streaks (~110 m), with margin.
+         */
+        private const val NEAR_REACH = 250f
+
+        /** The far slice is scaled about the eye so that it starts no farther than this (m). */
+        private const val FAR_SCALE_FROM = 20_000f
+
+        /** Relative slack on the far slice's planes (the bounding spheres are exact, float math is not). */
+        private const val FAR_MARGIN = 0.002f
+
+        /** Rocks of at least this scale are the field's big rocks, which thinning never drops. */
+        private const val BIG_ROCK_SCALE = 60f
+
+        /** The small rocks thin out while the largest one shrinks from this apparent radius (px)... */
+        private const val THIN_START_PX = 2f
+
+        /** ...to this one, where only the big rocks are left. */
+        private const val THIN_END_PX = 0.5f
 
         /** Cube face basis (faceZ, faceX, faceY) matching GL's cube map face orientation. */
         private val FACE_BASIS = arrayOf(
@@ -550,9 +720,10 @@ private class LitProgram(private val gl: Gl, instanced: Boolean) {
     private val uEnvLod = prog.u("u_envLod")
     private val uEnv = prog.u("u_env")
 
-    fun begin(c: Camera, model: Mat4, f: SceneFrame, env: Int, envLod: Float, palette: FloatArray, params: FloatArray, engine: Float) {
+    /** Binds the program with [viewProj] (the camera's or the far slice's) and the frame's lighting. */
+    fun begin(viewProj: Mat4, model: Mat4, f: SceneFrame, env: Int, envLod: Float, palette: FloatArray, params: FloatArray, engine: Float) {
         prog.use()
-        gl.uniformMatrix4fv(uViewProj, c.viewProj.m, 0)
+        gl.uniformMatrix4fv(uViewProj, viewProj.m, 0)
         gl.uniformMatrix4fv(uModel, model.m, 0)
         gl.uniform4fv(uPalette, 10, palette, 0)
         gl.uniform4fv(uParams, 10, params, 0)
@@ -579,4 +750,91 @@ private class LitProgram(private val gl: Gl, instanced: Boolean) {
     fun setModel(model: Mat4) = gl.uniformMatrix4fv(uModel, model.m, 0)
 
     fun dispose() = prog.dispose()
+}
+
+/**
+ * Per-frame depth slicing (pure logic, unit tested): bounding spheres in view space are culled
+ * against the view frustum, then split into the camera's own cluster and a far slice; see
+ * SceneRenderer.planSlices. Allocation free after construction.
+ */
+internal class DepthSlices(capacity: Int) {
+    private val zMin = FloatArray(capacity)
+    private val zMax = FloatArray(capacity)
+    private val far = BooleanArray(capacity)
+    var count = 0
+        private set
+
+    /** True when the last [plan] put at least one object in the far slice. */
+    var split = false
+        private set
+
+    /** View depth (m) where the far slice's nearest object starts (0 without a far slice). */
+    var farNear = 0f
+        private set
+
+    /** View depth (m) where the far slice's farthest object ends. */
+    var farFar = 0f
+        private set
+
+    /** View depth (m) where the camera's cluster ends. */
+    var nearEnd = 0f
+        private set
+
+    /** Starts a frame: no objects. */
+    fun begin() {
+        count = 0
+        split = false
+    }
+
+    /**
+     * Adds a sphere of [radius] at view-space ([vx] right, [vy] up, [vz] along the view direction);
+     * [tx]/[ty] are the tangents of the half field of view. Returns its slot, or -1 when it is
+     * behind the camera or outside a side of the frustum.
+     */
+    fun add(vx: Float, vy: Float, vz: Float, radius: Float, tx: Float, ty: Float): Int {
+        if (vz < -radius) return -1
+        // signed distance outside the side planes x = ±tx z and y = ±ty z
+        val nx = 1f / sqrt(1f + tx * tx)
+        val ny = 1f / sqrt(1f + ty * ty)
+        if ((abs(vx) - tx * vz) * nx > radius || (abs(vy) - ty * vz) * ny > radius) return -1
+        val i = count++
+        zMin[i] = vz - radius
+        zMax[i] = vz + radius
+        far[i] = false
+        return i
+    }
+
+    /**
+     * Grows the camera's cluster from depth [nearReach] by every object whose depth range starts
+     * inside it (taking its end along); what is left is far. No object ends up in both slices.
+     */
+    fun plan(nearReach: Float) {
+        var end = nearReach
+        for (i in 0 until count) far[i] = true
+        var grew = true
+        while (grew) {
+            grew = false
+            for (i in 0 until count) {
+                if (far[i] && zMin[i] <= end) {
+                    far[i] = false
+                    if (zMax[i] > end) end = zMax[i]
+                    grew = true
+                }
+            }
+        }
+        nearEnd = end
+        farNear = Float.MAX_VALUE
+        farFar = 0f
+        split = false
+        for (i in 0 until count) {
+            if (!far[i]) continue
+            split = true
+            if (zMin[i] < farNear) farNear = zMin[i]
+            if (zMax[i] > farFar) farFar = zMax[i]
+        }
+        if (!split) farNear = 0f
+    }
+
+    /** Whether [slot] is in the far slice (after [plan]). */
+    fun isFar(slot: Int): Boolean = far[slot]
 }

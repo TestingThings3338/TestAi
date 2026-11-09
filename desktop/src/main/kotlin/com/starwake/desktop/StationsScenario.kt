@@ -155,7 +155,7 @@ object StationsScenario {
         }
     }
 
-    private fun beginLit(gl: Gl, p: ShaderProgram, f: SceneFrame, model: Mat4, env: Int, envLod: Float) {
+    internal fun beginLit(gl: Gl, p: ShaderProgram, f: SceneFrame, model: Mat4, env: Int, envLod: Float) {
         val c = f.camera
         p.use()
         gl.uniformMatrix4fv(p.u("u_viewProj"), c.viewProj.m, 0)
@@ -181,7 +181,7 @@ object StationsScenario {
         gl.uniform1i(p.u("u_env"), 0)
     }
 
-    private fun billboard(
+    internal fun billboard(
         st: QuadStream, right: Vec3, up: Vec3, x: Float, y: Float, z: Float, size: Float,
         r: Float, g: Float, b: Float, a: Float,
     ) {
@@ -209,7 +209,7 @@ object StationsScenario {
     }
 
     /** Same nebula cube map bake as SceneRenderer's (reflections for the lit shader). */
-    private fun bakeEnvironment(gl: Gl, size: Int): Int {
+    internal fun bakeEnvironment(gl: Gl, size: Int): Int {
         val tex = gl.genTexture()
         gl.bindTexture(GL.TEXTURE_CUBE_MAP, tex)
         for (face in 0 until 6) {

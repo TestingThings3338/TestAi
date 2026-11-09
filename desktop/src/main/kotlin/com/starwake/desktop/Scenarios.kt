@@ -56,6 +56,16 @@ object Scenarios {
             "Station collision proxies (CPU-traced, overlaid on the mesh) and routed auto-dock paths around both station models (no Game)",
         ) { CollisionScenario.run(it) },
 
+        "station-depth" to Scenario(
+            "station-depth",
+            "HOME STATION at 1-200 km (oblique front, telephoto) vs a fitted-depth reference: depth precision of far stations",
+        ) { RenderProbe.stationDepth(it) },
+
+        "render-probe" to Scenario(
+            "render-probe",
+            "Draw calls, depth slices, body full-screen passes per frame: spawn, 30 km out, deep space, field 40/55 km, star behind/ahead",
+        ) { RenderProbe.passes(it) },
+
         "menu" to gameScenario("menu", "Main menu after 2 s") {
             frames(120)
             shot("menu")
