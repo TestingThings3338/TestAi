@@ -58,6 +58,9 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
 
     /** Bodies whose surface the terrain draws: the impostor keeps its sky and limb only. */
     private val surfaceCore = FloatArray(count)
+
+    /** Procedural albedo detail per body (1), off (0) once [setSurfaceTexture] gave it its own image. */
+    private val procDetail = FloatArray(count) { 1f }
     private val seeds = FloatArray(count * 4)
 
     /** Distance and angular radius of the star from the home position: reference for light falloff and glare. */
@@ -88,6 +91,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val pCoronaColor = planetProg.p.u("u_coronaColor")
     private val pStarBehind = planetProg.p.u("u_starBehind")
     private val pNoSurface = planetProg.p.u("u_noSurface")
+    private val pProcDetail = planetProg.p.u("u_procDetail")
 
     private val rToBody = ringProg.p.u("u_toBody")
     private val rSunBody = ringProg.p.u("u_sunBody")
@@ -189,7 +193,9 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     /**
      * Replaces body [i]'s baked surface with an equirect RGBA8 image ([w] × [h]: sqrt-encoded albedo,
      * A = emission, the bake's format), e.g. the terrain's own far colours so the impostor and the
-     * terrain agree (DECISIONS 17a). Mipmapped like the bake.
+     * terrain agree (DECISIONS 17a). Mipmapped like the bake. The image is the body's own look: no
+     * procedural detail is added to it (the terrain's far look shows the image as it is, so the
+     * hand-over to the terrain changes nothing).
      */
     fun setSurfaceTexture(i: Int, rgba: java.nio.ByteBuffer, w: Int, h: Int) {
         if (textures[i] != 0) gl.deleteTexture(textures[i])
@@ -204,6 +210,30 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         gl.generateMipmap(GL.TEXTURE_2D)
         textures[i] = tex
         texHeights[i] = h
+        procDetail[i] = 0f
+    }
+
+    /**
+     * Body [i] as its impostor draws it, for the far look of its terrain ([TerrainLight]): the sun
+     * this body sees (direction to the star, the sun colour × the distance falloff of DECISIONS 12),
+     * its air (scattering colour, shell thickness, ground optical depth), its surface image with
+     * its texels per radian, and its type. Allocation free; call every frame (bodies move).
+     */
+    fun fillTerrainLight(i: Int, out: TerrainLight) {
+        sunFor(i)
+        atmoParams(i)
+        out.setSun(sunX, sunY, sunZ)
+        out.sunColor[0] = SUN_COLOR_R * sunScale
+        out.sunColor[1] = SUN_COLOR_G * sunScale
+        out.sunColor[2] = SUN_COLOR_B * sunScale
+        out.farTexture = textures[i]
+        out.farTexelsPerRadian = (texHeights[i] / PI).toFloat()
+        out.farAtmo[0] = betaR
+        out.farAtmo[1] = betaG
+        out.farAtmo[2] = betaB
+        out.farAtmo[3] = atmoThick
+        out.farAtmoK = atmoK
+        out.farType = type[i]
     }
 
     /**
@@ -290,6 +320,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
             gl.uniform1i(pTex, 0)
             gl.uniform1f(pTexScale, (texHeights[i] / PI).toFloat())
             gl.uniform1f(pNoSurface, surfaceCore[i])
+            gl.uniform1f(pProcDetail, procDetail[i])
             // the star, for the part of it this planet's sky hides
             gl.uniform4f(pSunCam, starX, starY, starZ, starDisc.toFloat())
             gl.uniform4f(pSunGlare, starGlare.toFloat(), starFade.toFloat(), cos(starFade).toFloat(), STAR_INTENSITY)

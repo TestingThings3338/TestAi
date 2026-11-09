@@ -14,17 +14,34 @@ import kotlin.math.sqrt
 /**
  * Lighting and aerial-perspective inputs of the terrain for one frame. The defaults are the
  * engine's (sun colour of BodyRenderer and SceneRenderer); [setAir] derives the haze from a surface
- * profile (DECISIONS 17b/17c) until the atmosphere port supplies its own.
+ * profile (DECISIONS 17b/17c) until the atmosphere port supplies its own. The sun and the far look
+ * come from the body's impostor ([BodyRenderer.fillTerrainLight]; `SceneRenderer` does it every
+ * frame), so the terrain is lit like the impostor it replaces.
  */
 class TerrainLight {
     /** World direction towards the star (unit). */
     val sunDir = floatArrayOf(0f, 1f, 0f)
 
-    /** Sun radiance (linear), BodyRenderer's 2.6/2.45/2.25 × its distance falloff × visibility. */
+    /** Sun radiance (linear): BodyRenderer's 2.6/2.45/2.25 × its distance falloff for this body. */
     val sunColor = floatArrayOf(2.6f, 2.45f, 2.25f)
     val ambientDay = floatArrayOf(0.02f, 0.02f, 0.025f)
     val ambientNight = floatArrayOf(0.002f, 0.002f, 0.003f)
     var exposure = 1f
+
+    /**
+     * The impostor's surface image (GL texture; 0 = none: no far look) and its texels per radian.
+     * The image is the impostor's: give it the terrain's own far colours
+     * (`TerrainPlanet.bakeEquirect` → `SceneRenderer.setBodySurfaceTexture`) so far and near agree.
+     */
+    var farTexture = 0
+    var farTexelsPerRadian = 0f
+
+    /** The impostor's air: scattering colour (rgb, max 1), shell thickness (radii; 0 = none), ground optical depth. */
+    val farAtmo = FloatArray(4)
+    var farAtmoK = 0f
+
+    /** The impostor's surface type (BodyShaders codes: 1 lava glow, 2 terran water glint, 4 ice sheen; else 0). */
+    var farType = 0
 
     /** Air: scale height (m), ground extinction (1/m), chromatic weights, in-scatter radiance (linear). */
     var scaleHeight = 8700f
@@ -108,6 +125,21 @@ class TerrainLight {
     }
 }
 
+/**
+ * Scene objects drawn inside the terrain's far depth slices ([TerrainRenderer.drawFar]), so the
+ * terrain and they share each slice's depth buffer: implemented once by the scene (no allocation
+ * per frame).
+ */
+interface TerrainSliceObjects {
+    /**
+     * Draws what overlaps the view depths [near, far] with [viewProj] (the slice's projection ×
+     * the camera view), after the slice's terrain. Point sprites go in exactly one slice: the one
+     * that owns their depth, [ownNear, ownFar). Depth test LEQUAL and depth writes are on, culling
+     * back faces, blending off; anything may be changed (the next slice sets its own state).
+     */
+    fun drawSlice(near: Float, far: Float, ownNear: Float, ownFar: Float, viewProj: Mat4)
+}
+
 /** The GPU side of one [TerrainPlanet]: a VBO and VAO per tile slot (created on first use). */
 class TerrainGpu internal constructor(private val gl: Gl, private val ibo: Int, val planet: TerrainPlanet) : TileUploader {
     private val capacity = planet.tree.slotCapacity
@@ -171,8 +203,16 @@ class TerrainGpu internal constructor(private val gl: Gl, private val ibo: Int, 
  * per frame.
  */
 class TerrainRenderer(private val gl: Gl, val quality: Int) {
-    private val prog = ShaderProgram(gl, "terrain", TerrainShaders.VS, TerrainShaders.FS)
+    private val prog = ShaderProgram(gl, "terrain", TerrainShaders.VS, TerrainShaders.fs(BodyRenderer.atmoSteps(quality)))
     private val uViewProj = prog.u("u_viewProj")
+    private val uFarDist = prog.u("u_farDist")
+    private val uFade = prog.u("u_fade")
+    private val uFarTex = prog.u("u_farTex")
+    private val uFarTexScale = prog.u("u_farTexScale")
+    private val uFarType = prog.u("u_farType")
+    private val uFarAtmo = prog.u("u_farAtmo")
+    private val uFarAtmoK = prog.u("u_farAtmoK")
+    private val uFarCam = prog.u("u_farCam")
     private val uBodyRot = prog.u("u_bodyRot4")
     private val uTile = prog.u("u_tile")
     private val uCamCentre = prog.u("u_camCentre")
@@ -189,8 +229,14 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
     private val uDebug = prog.u("u_debug")
     private val uWater = prog.u("u_water")
 
-    /** Debug view: 0 normal, 1 albedo, 2 water share, 3 normals, 4 morph factor, 5 transmittance. */
+    /** Debug view: 0 normal, 1 albedo, 2 water share, 3 normals, 4 morph factor, 5 transmittance, 6 far-look weight. */
     var debugView = 0
+
+    /**
+     * Opacity of the terrain (1: opaque). Below 1 it is blended over what is drawn (the impostor's
+     * own surface while the terrain fades in at the hand-over, `SceneRenderer`).
+     */
+    var fade = 1f
 
     private val ibo: Int
     private val detailTex: Int
@@ -265,9 +311,14 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
      * Uploads up to the quality's tiles per frame, then culls the cut against [camera]'s frustum and
      * plans the depth slices for a nearest plane of [nearPlane] metres. With [firstSliceFar] > 0 the
      * nearest slice is exactly [nearPlane, firstSliceFar] (the scene's near pass, shared with the ship
-     * and stations); the others follow beyond it. Returns the visible tile count.
+     * and stations); the others follow beyond it. The slices also cover the view depths
+     * [extraNear, extraFar] (the scene's far objects, drawn inside them by [drawFar]) when
+     * extraFar > 0. Returns the visible tile count.
      */
-    fun prepare(gpu: TerrainGpu, camera: Camera, nearPlane: Float = camera.near, firstSliceFar: Float = 0f): Int {
+    fun prepare(
+        gpu: TerrainGpu, camera: Camera, nearPlane: Float = camera.near, firstSliceFar: Float = 0f,
+        extraNear: Float = 0f, extraFar: Float = 0f,
+    ): Int {
         val t0 = System.nanoTime()
         val planet = gpu.planet
         planet.processCompletions(planet.quality.uploadsPerFrame, gpu)
@@ -311,20 +362,26 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         }
         visibleCount = n
         sortByNear(n)
-        planSlices(lo, hi, nearPlane, firstSliceFar)
+        var any = n > 0
+        if (extraFar > 0f && extraFar > extraNear) {
+            lo = minOf(lo, max(nearPlane, extraNear))
+            hi = max(hi, extraFar)
+            any = true
+        }
+        planSlices(lo, hi, nearPlane, firstSliceFar, any)
         lastPrepareNanos = System.nanoTime() - t0
         return n
     }
 
-    /** Slices covering [lo, hi] with far/near ≤ [sliceRatio], nearest first in the arrays. */
-    private fun planSlices(lo: Float, hi: Float, nearPlane: Float, firstFar: Float) {
+    /** Slices covering [lo, hi] (when there is [any]thing to draw) with far/near ≤ [sliceRatio], nearest first in the arrays. */
+    private fun planSlices(lo: Float, hi: Float, nearPlane: Float, firstFar: Float, any: Boolean) {
         sliceCount = 0
         if (firstFar > 0f) {
             sliceNear[0] = nearPlane
             sliceFar[0] = firstFar
             sliceCount = 1
-            if (visibleCount == 0 || hi <= firstFar) return
-        } else if (visibleCount == 0 || hi <= lo) {
+            if (!any || hi <= firstFar) return
+        } else if (!any || hi <= lo) {
             return
         }
         var n = if (firstFar > 0f) max(firstFar * 0.95f, lo * 0.98f) else max(nearPlane, lo * 0.98f)
@@ -392,6 +449,48 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         val sky = if (light.sigma0 > 0f) 1.4f else 0.05f
         gl.uniform4f(uWater, light.airRadiance[0] * sky + 0.01f, light.airRadiance[1] * sky + 0.01f, light.airRadiance[2] * sky + 0.015f,
             (look?.reflectance ?: 0.0).toFloat())
+        gl.uniform1f(uFade, fade)
+        val farTex = light.farTexture
+        val farEnd = farLookEnd(planet, light)
+        if (farEnd > 0f) {
+            gl.uniform2f(uFarDist, 0.5f * farEnd, farEnd)
+            gl.activeTexture(GL.TEXTURE0 + 1)
+            gl.bindTexture(GL.TEXTURE_2D, farTex)
+            gl.uniform1i(uFarTex, 1)
+            gl.activeTexture(GL.TEXTURE0)
+            gl.uniform1f(uFarTexScale, light.farTexelsPerRadian)
+            gl.uniform1i(uFarType, light.farType)
+            val a = light.farAtmo
+            gl.uniform4f(uFarAtmo, a[0], a[1], a[2], a[3])
+            gl.uniform2f(uFarAtmoK, light.farAtmoK, 1f)
+            val inv = 1.0 / planet.radius
+            gl.uniform4f(uFarCam, ((cp.x - ctr.x) * inv).toFloat(), ((cp.y - ctr.y) * inv).toFloat(), ((cp.z - ctr.z) * inv).toFloat(), inv.toFloat())
+        } else {
+            gl.uniform2f(uFarDist, 0f, 0f)
+        }
+    }
+
+    /**
+     * The visible tiles in [near, far] with [vp]: once when opaque. While the terrain fades in
+     * ([fade] < 1), first depth only (blending ZERO, ONE keeps the colour), then blended where the
+     * depth is that of the nearest surface: every pixel takes the terrain once, so neither skirts
+     * nor tiles behind others show through. Depth test LEQUAL is the caller's; leaves depth writes
+     * on and blending in the caller's state only when opaque.
+     */
+    private fun drawTiles(gpu: TerrainGpu, camera: Camera, near: Float, far: Float, vp: Mat4) {
+        if (fade >= 1f) {
+            drawRange(gpu, camera, near, far, vp)
+            return
+        }
+        gl.enable(GL.BLEND)
+        gl.blendFunc(GL.ZERO, GL.ONE)
+        gl.depthMask(true)
+        drawRange(gpu, camera, near, far, vp)
+        gl.blendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
+        gl.depthMask(false)
+        drawRange(gpu, camera, near, far, vp)
+        gl.depthMask(true)
+        gl.disable(GL.BLEND)
     }
 
     /**
@@ -481,51 +580,66 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
             }
             proj.perspective(c.fovY, aspect, sliceNear[k], sliceFar[k], c.shiftX, c.shiftY)
             viewProj.mul(proj, c.view)
-            drawRange(gpu, camera, sliceNear[k], sliceFar[k], viewProj)
+            drawTiles(gpu, camera, sliceNear[k], sliceFar[k], viewProj)
         }
         gl.depthRange(0f, 1f)
+        gl.disable(GL.BLEND)
         gl.bindVertexArray(0)
         lastDrawNanos = System.nanoTime() - t0
     }
 
     /**
      * The slices beyond the nearest one (scene integration, after [prepare] with a first slice):
-     * far to near, each after a depth clear, then one more clear for the scene's near pass, which
-     * draws slice 0 with [drawRange] next to the ship. Resets the counters.
+     * far to near, each after a depth clear, with the scene's [objects] that reach into it drawn
+     * after its terrain (same projection, same depth buffer: a station behind a mountain is hidden
+     * by it), then one more clear for the scene's near pass, which draws slice 0 with [drawRange]
+     * next to the ship. Resets the counters.
      */
-    fun drawFar(gpu: TerrainGpu, camera: Camera, light: TerrainLight, time: Float) {
+    fun drawFar(gpu: TerrainGpu, camera: Camera, light: TerrainLight, time: Float, objects: TerrainSliceObjects? = null) {
         val t0 = System.nanoTime()
         drawCalls = 0
         trianglesDrawn = 0
         if (sliceCount > 1) {
-            gl.enable(GL.DEPTH_TEST)
-            gl.depthFunc(GL.LEQUAL)
-            gl.depthMask(true)
-            gl.enable(GL.CULL_FACE)
-            gl.cullFace(GL.BACK)
-            gl.disable(GL.BLEND)
-            gl.depthRange(0f, 1f)
-            begin(gpu, camera, light, time)
             val c = camera
             val aspect = c.width.toFloat() / max(c.height, 1)
             for (k in sliceCount - 1 downTo 1) {
+                if (k == sliceCount - 1 || objects != null) {
+                    // the objects of the previous slice used programs, textures and state of their own
+                    gl.enable(GL.DEPTH_TEST)
+                    gl.depthFunc(GL.LEQUAL)
+                    gl.depthMask(true)
+                    gl.enable(GL.CULL_FACE)
+                    gl.cullFace(GL.BACK)
+                    gl.disable(GL.BLEND)
+                    gl.depthRange(0f, 1f)
+                    begin(gpu, camera, light, time)
+                }
                 gl.clear(GL.DEPTH_BUFFER_BIT)
                 proj.perspective(c.fovY, aspect, sliceNear[k], sliceFar[k], c.shiftX, c.shiftY)
                 viewProj.mul(proj, c.view)
-                drawRange(gpu, camera, sliceNear[k], sliceFar[k], viewProj)
+                drawTiles(gpu, camera, sliceNear[k], sliceFar[k], viewProj)
+                if (objects != null) {
+                    gl.bindVertexArray(0)
+                    val ownFar = if (k == sliceCount - 1) Float.MAX_VALUE else sliceFar[k]
+                    objects.drawSlice(sliceNear[k], sliceFar[k], sliceFar[k - 1], ownFar, viewProj)
+                }
             }
+            gl.depthMask(true)
+            gl.disable(GL.BLEND)
             gl.clear(GL.DEPTH_BUFFER_BIT)
             gl.bindVertexArray(0)
         }
         lastDrawNanos = System.nanoTime() - t0
     }
 
-    /** Draws slice 0 with the scene's near projection [nearViewProj] (inside the near pass). */
+    /** Draws slice 0 with the scene's near projection [nearViewProj] (inside the near pass; leaves blending off). */
     fun drawNear(gpu: TerrainGpu, camera: Camera, light: TerrainLight, time: Float, nearViewProj: Mat4) {
         if (sliceCount == 0) return
         val t0 = System.nanoTime()
+        gl.disable(GL.BLEND)
         begin(gpu, camera, light, time)
-        drawRange(gpu, camera, sliceNear[0], sliceFar[0], nearViewProj)
+        drawTiles(gpu, camera, sliceNear[0], sliceFar[0], nearViewProj)
+        gl.disable(GL.BLEND)
         gl.bindVertexArray(0)
         lastDrawNanos += System.nanoTime() - t0
     }
@@ -557,6 +671,18 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         const val DEPTH_CLEAR = 0
         const val DEPTH_RANGE = 1
         const val MAX_SLICES = 4
+
+        /**
+         * View distance (m) from which the terrain shows only its far look (the impostor's image,
+         * sun and air), 0 without an image. The tiles' vertex spacing at view distance d is
+         * d/(64ρ)..d/(32ρ), so from 32ρ image texels on the image may carry more detail than a
+         * tile, from 64ρ on it always does: the far look blends in between.
+         */
+        fun farLookEnd(planet: TerrainPlanet, light: TerrainLight): Float {
+            if (light.farTexture == 0 || light.farTexelsPerRadian <= 0f) return 0f
+            val texel = planet.radius / light.farTexelsPerRadian
+            return (64.0 * planet.tree.rho * texel).toFloat()
+        }
 
         /** A tile that appears because its parent split morphs in from the parent's shape over this time. */
         const val MORPH_SECONDS = 0.35

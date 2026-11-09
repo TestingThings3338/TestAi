@@ -60,14 +60,20 @@ class SceneFrame {
 
     /**
      * The seamless terrain of the terrain body (from [SceneRenderer.attachTerrain]), or null. The
-     * game updates the planet before rendering; the scene draws it in depth slices around its own.
+     * game updates the planet before rendering; the scene draws it in depth slices around its own
+     * and hands the body's surface over from the impostor (see SceneRenderer.handOver). Set it to
+     * null when the body is released: the impostor gets its surface back.
      */
     var terrain: TerrainGpu? = null
 
     /** Index of the terrain body in the system's bodies: its impostor stops shading the surface once the terrain covers it. */
     var terrainBody = -1
 
-    /** Light and air of the terrain (sun direction and colour, profile ambient and haze). */
+    /**
+     * Light and air of the terrain: the game sets the profile's ambient and haze once
+     * ([TerrainLight.setAir]); the scene fills the sun, the far look and the exposure from the
+     * body's impostor every frame.
+     */
     val terrainLight = TerrainLight()
 }
 
@@ -168,14 +174,118 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val terrainNearProj = Mat4()
     private val terrainNearVP = Mat4()
 
+    // the pass the field, stations and station lights are drawn in (setPass): the camera's cluster
+    // or the far objects (only those reaching into the view depths [passZNear, passZFar]; light
+    // sprites only in [passOwnZNear, passOwnZFar)), with which projection and scale
+    private var passFarObjects = false
+    private var passVP: Mat4 = nearVP
+    private var passScale = 1f
+    private var passZNear = -Float.MAX_VALUE
+    private var passZFar = Float.MAX_VALUE
+    private var passOwnZNear = -Float.MAX_VALUE
+    private var passOwnZFar = Float.MAX_VALUE
+
+    /** The frame whose far objects the terrain's far slices draw (set during [TerrainRenderer.drawFar]). */
+    private var sliceFrame: SceneFrame? = null
+
+    /** Far stations and the field inside the terrain's far slices: the terrain occludes them there. */
+    private val sliceObjects = object : TerrainSliceObjects {
+        override fun drawSlice(near: Float, far: Float, ownNear: Float, ownFar: Float, viewProj: Mat4) {
+            val f = sliceFrame ?: return
+            setPass(true, viewProj, 1f, near, far, ownNear, ownFar)
+            drawAsteroids(f)
+            drawStations(f)
+            drawStationLights(f)
+        }
+    }
+
+    private fun setPass(
+        far: Boolean, vp: Mat4, scale: Float,
+        zNear: Float = -Float.MAX_VALUE, zFar: Float = Float.MAX_VALUE,
+        ownNear: Float = -Float.MAX_VALUE, ownFar: Float = Float.MAX_VALUE,
+    ) {
+        passFarObjects = far
+        passVP = vp
+        passScale = scale
+        passZNear = zNear
+        passZFar = zFar
+        passOwnZNear = ownNear
+        passOwnZFar = ownFar
+    }
+
+    /** True when the object in [slot] (from [planSlices]) is drawn in the current pass. */
+    private fun inPass(slot: Int): Boolean =
+        slot >= 0 && slices.isFar(slot) == passFarObjects && slices.zMaxOf(slot) >= passZNear && slices.zMinOf(slot) <= passZFar
+
     /** The terrain renderer (null until a terrain was attached). */
     val terrain: TerrainRenderer? get() = terrainRenderer
+
+    // the impostor-to-terrain hand-over (handOver)
+    private var hiddenBody = -1
+    private var fadePlanet: TerrainPlanet? = null
+    private var fadeStart = -1f
+
+    /** Opacity of the terrain in the last frame: 0 while the impostor still shades the surface, 1 once handed over. */
+    var terrainFade = 0f
+        private set
+
+    /**
+     * The hand-over of the terrain body's surface from its impostor to the terrain, once per
+     * frame: the terrain's sun, far look and exposure come from the impostor
+     * ([BodyRenderer.fillTerrainLight]); the impostor shades the surface until the terrain covers
+     * the sphere ([TerrainPlanet.surfaceReady]), then the terrain takes over and the impostor draws
+     * only the black core at the terrain's lowest radius under it. When all the terrain is beyond
+     * its far look's end ([TerrainRenderer.farLookEnd]: the usual case, the planet is created
+     * ~20,000 km out) the terrain is the impostor and takes over at once; nearer (after a GL
+     * context loss, a quality change, a late creation) it fades in over [HANDOVER_SECONDS]. A body
+     * that stops being the terrain body gets its surface back. Returns the terrain's opacity (0:
+     * do not draw it).
+     */
+    private fun handOver(f: SceneFrame): Float {
+        val tg = f.terrain
+        val body = if (tg != null && terrainRenderer != null) f.terrainBody else -1
+        if (hiddenBody >= 0 && hiddenBody != body) bodies.setSurfaceHidden(hiddenBody, false)
+        hiddenBody = body
+        if (tg == null || body < 0) {
+            fadePlanet = null
+            fadeStart = -1f
+            terrainFade = 0f
+            return 0f
+        }
+        val p = tg.planet
+        if (p !== fadePlanet) {
+            fadePlanet = p
+            fadeStart = -1f
+        }
+        bodies.fillTerrainLight(body, f.terrainLight)
+        f.terrainLight.exposure = f.exposure
+        if (!p.surfaceReady()) {
+            fadeStart = -1f
+        } else if (fadeStart < 0f || f.time < fadeStart) {
+            // all the terrain beyond its far look's end: it is the impostor, hand over at once
+            val farEnd = TerrainRenderer.farLookEnd(p, f.terrainLight)
+            val clear = p.cameraAltitude - (p.field.maxRadius - p.radius)
+            fadeStart = if (farEnd > 0f && clear > farEnd) f.time - HANDOVER_SECONDS else f.time
+        }
+        val x = if (fadeStart < 0f) 0f else ((f.time - fadeStart) / HANDOVER_SECONDS).coerceIn(0f, 1f)
+        val fade = if (fadeStart < 0f) 0f else maxOf(x * x * (3f - 2f * x), MIN_FADE)
+        bodies.setSurfaceHidden(body, fade >= 1f, p.field.minRadius)
+        terrainFade = fade
+        return fade
+    }
 
     /** GPU side of a terrain planet; set the result as [SceneFrame.terrain]. Dispose it when the body changes. */
     fun attachTerrain(planet: TerrainPlanet): TerrainGpu {
         val tr = terrainRenderer ?: TerrainRenderer(gl, quality).also { terrainRenderer = it }
         return tr.attach(planet)
     }
+
+    /**
+     * Gives body [i]'s impostor its surface image ([BodyRenderer.setSurfaceTexture]): for a terrain
+     * body the terrain's own far colours (`TerrainPlanet.bakeEquirect`), which the terrain's far
+     * look shows too. Upload on the GL thread; again after the renderer is rebuilt.
+     */
+    fun setBodySurfaceTexture(i: Int, rgba: java.nio.ByteBuffer, w: Int, h: Int) = bodies.setSurfaceTexture(i, rgba, w, h)
 
     init {
         // field bounds from the instance data: rocks spin about their centres, so a rock's sphere is
@@ -268,23 +378,38 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
 
-        planSlices(f)
+        val tg = f.terrain
+        val tr = terrainRenderer
+        // the hand-over: the impostor shades the surface until the terrain covers the sphere, then
+        // the terrain fades in over it (its far look is the impostor's, so normally nothing changes)
+        val fade = handOver(f)
+        val withTerrain = tg != null && tr != null && fade > 0f
+        planSlices(f, withTerrain)
         drawBackground(f)
         drawStars(f)
-        val tg = f.terrain
-        if (tg != null && f.terrainBody >= 0) bodies.setSurfaceHidden(f.terrainBody, tg.planet.surfaceReady(), tg.planet.field.minRadius)
         // star and planets: ray-cast impostors at true scale, drawn back to front without depth
         bodies.render(cam, f.time, f.exposure)
         gl.viewport(0, 0, w, h)
         nearVP = cam.viewProj
         var terrainFirstFar = 0f
-        val tr = terrainRenderer
-        if (tg != null && tr != null) {
-            // the near pass ends where the camera's cluster ends (at least TERRAIN_NEAR m); farther
-            // terrain goes into slices of its own, drawn now, behind everything else
-            terrainFirstFar = maxOf(TERRAIN_NEAR, slices.nearEnd * 1.05f).coerceAtMost(cam.far)
-            tr.prepare(tg, cam, cam.near, terrainFirstFar)
-            tr.drawFar(tg, cam, f.terrainLight, f.time)
+        if (tg != null && tr != null && !withTerrain) {
+            // not drawn yet: the finished tiles still go to the GPU
+            tr.prepare(tg, cam)
+        } else if (tg != null && tr != null) {
+            // the near pass ends where the camera's cluster ends (at least TERRAIN_NEAR m: nothing
+            // nearer is a far object); farther terrain goes into slices of its own, drawn now, with
+            // the far stations and the field inside them (the terrain occludes them)
+            val split = slices.split
+            terrainFirstFar = maxOf(TERRAIN_NEAR, slices.nearEnd * 1.05f)
+            // a far object never starts inside the near slice: the near terrain, drawn after the
+            // far slices, ends in front of every far object
+            if (split) terrainFirstFar = minOf(terrainFirstFar, maxOf(slices.nearEnd, slices.farNear))
+            terrainFirstFar = terrainFirstFar.coerceAtMost(cam.far)
+            tr.fade = fade
+            tr.prepare(tg, cam, cam.near, terrainFirstFar, if (split) slices.farNear else 0f, if (split) slices.farFar else 0f)
+            sliceFrame = f
+            tr.drawFar(tg, cam, f.terrainLight, f.time, if (split) sliceObjects else null)
+            sliceFrame = null
             terrainNearProj.perspective(cam.fovY, w.toFloat() / h.coerceAtLeast(1), cam.near, terrainFirstFar, cam.shiftX, cam.shiftY)
             terrainNearVP.mul(terrainNearProj, cam.view)
             nearVP = terrainNearVP
@@ -296,12 +421,13 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.depthFunc(GL.LEQUAL)
         gl.enable(GL.CULL_FACE)
         gl.cullFace(GL.BACK)
-        if (slices.split) {
+        if (slices.split && !withTerrain) {
             // far slice first, behind everything: nothing in it overlaps the near slice in depth
             gl.depthRange(0.5f, 1f)
-            drawAsteroids(f, true)
-            drawStations(f, true)
-            drawStationLights(f, true)
+            setPass(true, farViewProj, farScale)
+            drawAsteroids(f)
+            drawStations(f)
+            drawStationLights(f)
             gl.depthRange(0f, 0.5f)
         } else {
             gl.depthRange(0f, 1f)
@@ -311,12 +437,13 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             gl.enable(GL.CULL_FACE)
             gl.cullFace(GL.BACK)
         }
-        drawAsteroids(f, false)
-        drawStations(f, false)
+        setPass(false, nearVP, 1f)
+        drawAsteroids(f)
+        drawStations(f)
         val ship = f.ship
         if (ship != null) drawShip(f, ship)
         drawDust(f)
-        drawStationLights(f, false)
+        drawStationLights(f)
         if (ship != null) drawShipGlows(f, ship)
         gl.depthMask(true)
         gl.depthRange(0f, 1f)
@@ -367,8 +494,13 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
      * drawn twice (the field included) and the order between slices is always right. The home
      * station and the field always overlap in depth (2.7 km apart, radii 0.9 and ~2.3 km), so they
      * share a slice and occlude each other through one depth buffer.
+     *
+     * [withTerrain]: the near pass shares its depth slice with the terrain out to at least
+     * [TERRAIN_NEAR], so the cluster starts from there (nothing nearer may be a far object: the
+     * near terrain would be drawn over it); the far objects are drawn inside the terrain's far
+     * slices instead of a slice of their own.
      */
-    private fun planSlices(f: SceneFrame) {
+    private fun planSlices(f: SceneFrame, withTerrain: Boolean) {
         val c = f.camera
         val s = slices
         s.begin()
@@ -389,9 +521,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
                 s.add(rel.dot(c.right), rel.dot(c.up), rel.dot(c.forward), stationBound[st.model], tx, ty)
             }
         }
-        s.plan(NEAR_REACH)
+        s.plan(if (withTerrain) maxOf(NEAR_REACH, TERRAIN_NEAR) else NEAR_REACH)
         depthSlices = if (s.split) 2 else 1
-        if (!s.split) return
+        if (!s.split || withTerrain) return
         // one scale for the whole slice keeps the depth order inside it exact (rocks vs station);
         // scaling about the eye changes neither the picture nor the precision, it only keeps the
         // coordinates of a station 3000 km away in the range the rest of the scene uses
@@ -402,25 +534,22 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         farViewProj.mul(farProj, c.view)
     }
 
-    /** True when [slot] (from [planSlices]) is drawn in the slice [far]. */
-    private fun inSlice(slot: Int, far: Boolean): Boolean = slot >= 0 && slices.isFar(slot) == far
-
     // ------------------------------------------------------------------ near scene
 
     /**
-     * The field, in the slice [planSlices] put it in. In the far slice it is shrunk towards the eye
-     * by the slice's scale, so it never reaches the far plane. Once even the largest small rock is
-     * down to a pixel or two, the small rocks are thinned out (the big ones always stay): they
-     * would cost ~400k vertices per frame for a few dots.
+     * The field, in the pass [setPass] selected (the slice [planSlices] put it in). In the far
+     * slice it is shrunk towards the eye by the slice's scale, so it never reaches the far plane.
+     * Once even the largest small rock is down to a pixel or two, the small rocks are thinned out
+     * (the big ones always stay): they would cost ~400k vertices per frame for a few dots.
      */
-    private fun drawAsteroids(f: SceneFrame, far: Boolean) {
-        if (!inSlice(fieldSlot, far)) return
+    private fun drawAsteroids(f: SceneFrame) {
+        if (!inPass(fieldSlot)) return
         val c = f.camera
         val field = content.field
         field.origin.relativeTo(c.pos, rel)
-        val k = if (far) farScale else 1f
+        val k = passScale
         model.setTRS(rel.x * k, rel.y * k, rel.z * k, identityRot, k)
-        litInst.begin(if (far) farViewProj else nearVP, model, f, envTex, envLod, rockPalette, rockParams, 0f)
+        litInst.begin(passVP, model, f, envTex, envLod, rockPalette, rockParams, 0f)
         // apparent radius (px) of the largest small rock at the field's near edge
         val edge = rel.length() - fieldRadius
         val px = if (edge > 1f) smallRockRadius / edge * c.height / (2f * c.tanHalfY) else Float.MAX_VALUE
@@ -565,24 +694,26 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     // ------------------------------------------------------------------ stations
 
     /**
-     * The stations [planSlices] put in the slice [far] (within [STATION_DRAW_RANGE], in view, not
-     * hidden behind a planet: planets don't write depth). Far-slice stations are drawn scaled
-     * towards the camera by the slice's scale, which keeps their apparent size and position; it
-     * only keeps very far ones in the coordinate range of the rest of the scene. Their depth
-     * precision comes from the far slice's fitted projection, not from the scaling.
+     * The stations of the pass [setPass] selected (the slice [planSlices] put them in, within
+     * [STATION_DRAW_RANGE], in view, not hidden behind a planet: planets don't write depth).
+     * Far-slice stations are drawn scaled towards the camera by the slice's scale, which keeps
+     * their apparent size and position; it only keeps very far ones in the coordinate range of the
+     * rest of the scene. Their depth precision comes from the far slice's fitted projection, not
+     * from the scaling. Inside the terrain's far slices a station is drawn in every slice it
+     * reaches into (the slice planes clip it), unscaled.
      */
-    private fun drawStations(f: SceneFrame, far: Boolean) {
+    private fun drawStations(f: SceneFrame) {
         val c = f.camera
         val stations = content.system.stations
-        val k = if (far) farScale else 1f
+        val k = passScale
         var begun = false
         for (i in stations.indices) {
-            if (!inSlice(stationSlot[i], far)) continue
+            if (!inPass(stationSlot[i])) continue
             val st = stations[i]
             st.pos.relativeTo(c.pos, rel)
             model.setTRS(rel.x * k, rel.y * k, rel.z * k, st.rot, k)
             if (!begun) {
-                stationLit.begin(if (far) farViewProj else nearVP, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
+                stationLit.begin(passVP, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
                 begun = true
             } else {
                 stationLit.setModel(model)
@@ -591,15 +722,19 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         }
     }
 
-    /** Glow sprites of the stations drawn in the slice [far], depth-tested against them. */
-    private fun drawStationLights(f: SceneFrame, far: Boolean) {
+    /**
+     * Glow sprites of the stations of the current pass, depth-tested against them; inside the
+     * terrain's far slices each sprite in the one slice that owns its depth (additive: drawn once).
+     */
+    private fun drawStationLights(f: SceneFrame) {
         val c = f.camera
         val stations = content.system.stations
         glowStream.begin()
         val blink = (f.time % 1.6f) < 0.8f
-        val k = if (far) farScale else 1f
+        val k = passScale
+        val owned = passOwnZNear > -Float.MAX_VALUE || passOwnZFar < Float.MAX_VALUE
         for (i in stations.indices) {
-            if (!inSlice(stationSlot[i], far)) continue
+            if (!inPass(stationSlot[i])) continue
             val st = stations[i]
             st.pos.relativeTo(c.pos, rel)
             val d = rel.length()
@@ -616,6 +751,13 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
                     continue
                 }
                 st.rot.rotate(lights[o], lights[o + 1], lights[o + 2], tmp)
+                if (owned) {
+                    val z = (rel.x + tmp.x) * c.forward.x + (rel.y + tmp.y) * c.forward.y + (rel.z + tmp.z) * c.forward.z
+                    if (z < passOwnZNear || z >= passOwnZFar) {
+                        o += 6
+                        continue
+                    }
+                }
                 val lx = (rel.x + tmp.x) * k
                 val ly = (rel.y + tmp.y) * k
                 val lz = (rel.z + tmp.z) * k
@@ -630,7 +772,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.enable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
         glow.use()
-        gl.uniformMatrix4fv(glow.u("u_viewProj"), (if (far) farViewProj else nearVP).m, 0)
+        gl.uniformMatrix4fv(glow.u("u_viewProj"), passVP.m, 0)
         gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
@@ -715,6 +857,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     companion object {
         /** The near pass reaches at least this far when a terrain is drawn (m): 0.48 m depth steps there. */
         private const val TERRAIN_NEAR = 2000f
+
+        /** The terrain fades in over the impostor's surface in this time (s) once it covers the sphere. */
+        const val HANDOVER_SECONDS = 1f
+
+        /** Smallest opacity once the fade started (the first frame already draws the terrain). */
+        private const val MIN_FADE = 1f / 64f
 
         /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
         private const val GLOW_PERIOD = TAU_F / 61f
@@ -891,4 +1039,10 @@ internal class DepthSlices(capacity: Int) {
 
     /** Whether [slot] is in the far slice (after [plan]). */
     fun isFar(slot: Int): Boolean = far[slot]
+
+    /** View depth (m) where the object in [slot] starts. */
+    fun zMinOf(slot: Int): Float = zMin[slot]
+
+    /** View depth (m) where the object in [slot] ends. */
+    fun zMaxOf(slot: Int): Float = zMax[slot]
 }

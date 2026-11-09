@@ -244,6 +244,8 @@ uniform vec3 u_coronaColor;
 uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
 uniform float u_noSurface;   // 0, or k > 0: the terrain draws the surface; the disc is a black core of k radii
                              // (the terrain's lowest point: never above its horizon), haze in front kept
+uniform float u_procDetail;  // 1: procedural albedo detail at close range; 0: the image is the body's own
+                             // far look (its terrain's colours), shown as it is, as the terrain's far look shows it
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -357,7 +359,7 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
     // and clouds stay below 0.06) gets no ground detail, and skips evaluating it
     float water = u_type == T_TERRAN ? clamp((tx.b - tx.r) * 8.0 - 0.45, 0.0, 1.0) : 0.0;
     // gas bands are noise stretched 5x in y: 5x smaller footprint-relative features
-    float det = water < 1.0 ? detail(ns, u_type == T_GAS ? fpS * 5.0 : fpS) * (1.0 - water) : 0.0;
+    float det = water < 1.0 && u_procDetail > 0.0 ? detail(ns, u_type == T_GAS ? fpS * 5.0 : fpS) * (1.0 - water) : 0.0;
     alb *= clamp(1.0 + det * vec3(1.0, 0.92, 0.8), 0.25, 2.0);
 
     float ndl = dot(N, u_sunDir);

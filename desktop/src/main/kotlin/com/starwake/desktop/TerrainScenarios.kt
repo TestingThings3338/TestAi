@@ -47,9 +47,11 @@ import kotlin.math.sqrt
  *
  * - `terrain`: static views down one descent path at 20,000 km … 20 m above the ground, looking
  *   down and towards the horizon, on HIGH and LOW (each view waits until its tiles are built);
- *   then a flight-speed descent per planet under the speed laws (DECISIONS 2/3) in real time: every
- *   frame gives the workers 16.7 ms of wall time and takes what is finished, nothing waits for
- *   completion, so the shots show what a player would see.
+ *   on HIGH, through the game's own `SceneRenderer`, the impostor-to-terrain hand-over (frames
+ *   before and after, their difference), the ship on the ground and two outposts half buried in
+ *   it; then a flight-speed descent per planet under the speed laws (DECISIONS 2/3) in real time:
+ *   every frame gives the workers 16.7 ms of wall time and takes what is finished, nothing waits
+ *   for completion, so the shots show what a player would see.
  * - `terrain-perf`: the same descents on a no-op GL (the engine's CPU cost) with per-frame
  *   game-thread time, allocations, uploads, worker time per tile, tiles resident/drawn, triangles,
  *   draw calls, slices, memory; plus a few llvmpipe frames.
@@ -98,6 +100,11 @@ object TerrainScenarios {
         val light = TerrainLight()
         val camera = Camera()
 
+        /** The impostor's image from the terrain functions (null without [bake]). */
+        var bakeImage: java.nio.ByteBuffer? = null
+        var bakeW = 0
+        var bakeH = 0
+
         init {
             renderer.debugView = System.getenv("TERRAIN_DEBUG")?.toIntOrNull() ?: 0
         }
@@ -125,6 +132,9 @@ object TerrainScenarios {
                 val w = if (quality == 0) 512 else 1024
                 val img = planet.bakeEquirect(w, w / 2)
                 bodies.setSurfaceTexture(1, img, w, w / 2)
+                bakeImage = img
+                bakeW = w
+                bakeH = w / 2
                 env.report.note("%s q%d: impostor texture from the terrain functions, %dx%d in %.0f ms".format(tp.label, quality, w, w / 2, (System.nanoTime() - t0) / 1e6))
             }
             planet.setBodyPose(centre, Quat())
@@ -293,6 +303,9 @@ object TerrainScenarios {
         sc.bodies.setSurfaceHidden(1, hidden, sc.planet.field.minRadius)
         sc.bodies.render(c, time, 1f)
         gl.viewport(0, 0, w, h)
+        // the sun and the far look as the impostor has them (SceneRenderer does this every frame)
+        sc.bodies.fillTerrainLight(1, sc.light)
+        sc.light.exposure = 1f
         sc.renderer.prepare(sc.gpu, c)
         sc.renderer.drawSlices(sc.gpu, c, sc.light, time)
         gl.disable(GL.DEPTH_TEST)
@@ -350,7 +363,7 @@ object TerrainScenarios {
     /**
      * Debug filters (environment): TERRAIN_PLANETS=earth,luna  TERRAIN_QUALITIES=2 (empty: no static
      * views)  TERRAIN_ALTS=0,3,8 (indices into [ALTITUDES])  TERRAIN_VIEWS=down  TERRAIN_SEAMS=0
-     * TERRAIN_DESCENT=0  TERRAIN_DEBUG=1..5 (albedo, water, normals, morph, transmittance).
+     * TERRAIN_DESCENT=0  TERRAIN_DEBUG=1..6 (albedo, water, normals, morph, transmittance, far-look weight).
      */
     private fun envList(name: String): List<String>? = System.getenv(name)?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
 
@@ -401,7 +414,7 @@ object TerrainScenarios {
                         }
                     }
                     montage(shots, File(outDir, "terrain-$qn-${tp.label}-montage.png"), 4)
-                    if (quality == 2) sceneShot(env, s, sc, w, h)
+                    if (quality == 2) sceneChecks(env, s, sc, w, h)
                     sc.dispose()
                     if (quality == 2 && doSeams && tp.label != "mars") seamShots(env, s, gl, sky, tp, pool, w, h)
                 }
@@ -456,28 +469,54 @@ object TerrainScenarios {
 
     /**
      * The terrain inside the game's own render pass: a [SceneRenderer] with this planet as the
-     * terrain body, the ship parked 2 m above the ground (levelled to it) and the chase camera
-     * behind: the ship and the terrain share the near depth slice.
+     * terrain body (the impostor's image from the terrain functions, as the game sets it):
+     *
+     * - the hand-over ([handOver]): the impostor alone vs the terrain once it has faded in, at
+     *   20,000 km (where the game creates the planet) and 2,000 km;
+     * - the ship parked 2 m above the ground (levelled to it) and the chase camera behind: the ship
+     *   and the terrain share the near depth slice;
+     * - two outposts half buried in the ground 1.2 km and 5 km east of the ship, seen from it: the
+     *   near one in the near pass (it starts within 2 km), the far one inside the terrain's far
+     *   slices; the ground hides their lower halves and they hide the ground behind them.
      */
-    private fun sceneShot(env: ScenarioEnv, s: GlSession, sc: Scene, w: Int, h: Int) {
+    private fun sceneChecks(env: ScenarioEnv, s: GlSession, sc: Scene, w: Int, h: Int) {
         val gl = s.gl
+        val surf = sc.planet.surface
+        val u = sc.target
+        val n = sc.north
+        val e = sc.east
+        val R = sc.tp.radius
+        // the outposts (before the content is built: the renderer sizes its slices by the station count)
+        val stationDir = DoubleArray(3)
+        for ((dist, bearing) in listOf(1_200.0 to 0.0, 5_000.0 to 0.17)) {
+            tangentOffset(u[0], u[1], u[2], bearing, dist / R, stationDir)
+            val fl = surf.floorAt(stationDir[0], stationDir[1], stationDir[2]) + 40.0
+            // upright (its +Y along the local up), facing north
+            val rot = Quat().lookRotation(n[0].toFloat(), n[1].toFloat(), n[2].toFloat(),
+                stationDir[0].toFloat(), stationDir[1].toFloat(), stationDir[2].toFloat())
+            sc.system.stations += StarSystem.Station(
+                "TEST ${dist.toInt()}", com.starwake.core.content.StationMesh.OUTPOST,
+                DVec3(sc.centre.x + stationDir[0] * fl, sc.centre.y + stationDir[1] * fl, sc.centre.z + stationDir[2] * fl),
+                rot, 257.0, 1,
+            )
+        }
         val platform = DesktopPlatform(env.opts.assetsDir, null)
         val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"), sc.system)
         val sr = SceneRenderer(gl, content, 2)
-        // one GPU side per planet: the tiles of the scenario's own renderer are dropped and stream
-        // again into the scene's
-        sc.planet.tree.clear()
+        sc.bakeImage?.let { sr.setBodySurfaceTexture(1, it, sc.bakeW, sc.bakeH) }
+        // one GPU side per planet: the tiles of the scenario's own renderer are dropped (as after a
+        // context loss) and stream again into the scene's
+        sc.planet.onGpuLost()
         val gpu = sr.attachTerrain(sc.planet)
         val f = SceneFrame()
         f.terrain = gpu
         f.terrainBody = 1
         f.terrainLight.setAir(sc.planet.profile, sc.tp.radius)
-        f.terrainLight.setSun(sc.sunDir.x, sc.sunDir.y, sc.sunDir.z)
         f.sunDir.set(sc.sunDir)
         f.drawField = false
-        val surf = sc.planet.surface
-        val u = sc.target
-        val n = sc.north
+
+        for (alt in doubleArrayOf(20_000_000.0, 2_000_000.0)) handOver(env, s, sc, sr, gpu, f, alt, w, h)
+
         val floor = surf.floorAt(u[0], u[1], u[2])
         val ship = ShipState()
         ship.pos.set(sc.centre.x + u[0] * (floor + 2.5), sc.centre.y + u[1] * (floor + 2.5), sc.centre.z + u[2] * (floor + 2.5))
@@ -498,24 +537,130 @@ object TerrainScenarios {
             u[0].toFloat(), u[1].toFloat(), u[2].toFloat(),
         )
         c.update(w, h)
-        // stream the tiles around the ship (the game would call update every frame)
+        streamScene(sc, gpu, c, ship)
+        renderScene(sr, f, s)
+        s.screenshot("terrain-scene-${sc.tp.label}-ship-on-ground")
+        env.report.note("  scene (SceneRenderer + terrain + ship): ${sr.terrain?.sliceCount} terrain slices, ${sr.terrain?.drawCalls} terrain draws in the far slices, ship ${"%.1f".format(surf.altitudeAt(ship.pos))} m above the floor (${PlanetSurface.stateName(surf.groundState(ship.pos))})")
+
+        // the outposts east of the ship, from 40 m above it (over the nearest dunes)
+        c.pos.set(ship.pos.x + u[0] * 40.0, ship.pos.y + u[1] * 40.0, ship.pos.z + u[2] * 40.0)
+        val look = -0.05
+        c.rot.lookRotation(
+            (e[0] * cos(look) + u[0] * sin(look) + n[0] * 0.08).toFloat(), (e[1] * cos(look) + u[1] * sin(look) + n[1] * 0.08).toFloat(),
+            (e[2] * cos(look) + u[2] * sin(look) + n[2] * 0.08).toFloat(), u[0].toFloat(), u[1].toFloat(), u[2].toFloat(),
+        )
+        c.update(w, h)
+        streamScene(sc, gpu, c, ship)
+        renderScene(sr, f, s)
+        s.screenshot("terrain-scene-${sc.tp.label}-outposts")
+        env.report.note("  outposts 1.2 km and 5 km east, 40 m above the ground: ${sr.depthSlices} scene slices, ${sr.terrain?.sliceCount} terrain slices")
+        f.ship = null
+        gpu.dispose()
+        sr.dispose()
+    }
+
+    /** Streams the tiles for camera [c] until nothing is wanted (the game would call update every frame). */
+    private fun streamScene(sc: Scene, gpu: TerrainGpu, c: Camera, ship: ShipState?) {
         val end = System.currentTimeMillis() + 20_000
         var quiet = 0
         while (System.currentTimeMillis() < end) {
-            sc.planet.update(c.pos, 1.0 / 60, ship.pos, ship.vel)
+            sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel)
             sc.planet.processCompletions(64, gpu)
             if (sc.planet.tree.wantedCount == 0 && sc.planet.pool.idle()) { if (++quiet > 3) break } else quiet = 0
             Thread.sleep(1)
         }
-        sc.planet.update(c.pos, 1.0 / 60, ship.pos, ship.vel)
+        sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel)
+    }
+
+    /** Two frames 2 s apart (the hand-over fade completes), the second one stays on screen. */
+    private fun renderScene(sr: SceneRenderer, f: SceneFrame, s: GlSession) {
+        f.time += 5f
         sr.render(f)
+        f.time += 2f
         sr.render(f)
         GLES20.glFinish()
         s.drainErrors(0)
-        s.screenshot("terrain-scene-${sc.tp.label}-ship-on-ground")
-        env.report.note("  scene (SceneRenderer + terrain + ship): ${sr.terrain?.sliceCount} terrain slices, ${sr.terrain?.drawCalls} terrain draws in the far slices, ship ${"%.1f".format(surf.altitudeAt(ship.pos))} m above the floor (${PlanetSurface.stateName(surf.groundState(ship.pos))})")
-        gpu.dispose()
-        sr.dispose()
+    }
+
+    private fun grab(s: GlSession): ByteArray {
+        val px = s.target.readPixels()
+        val out = ByteArray(px.remaining())
+        px.get(out)
+        return out
+    }
+
+    /**
+     * The hand-over at [alt] above the ground, looking down: A = the frame before the terrain covers
+     * the sphere (the impostor shades the surface), B = the frame after the terrain has faded in
+     * (the impostor draws only its core and air under it). Reports the pixels that changed by more
+     * than 24/255, the largest change and the mean colour of the disc, and writes the change ×8.
+     */
+    private fun handOver(env: ScenarioEnv, s: GlSession, sc: Scene, sr: SceneRenderer, gpu: TerrainGpu, f: SceneFrame, alt: Double, w: Int, h: Int) {
+        val r = env.report
+        placeCamera(sc, alt, "down")
+        val c = f.camera
+        c.pos.set(sc.camera.pos)
+        c.rot.set(sc.camera.rot)
+        c.update(w, h)
+        f.ship = null
+        // before: no tiles (a new planet), the impostor shades the surface
+        sc.planet.onGpuLost()
+        f.time += 5f
+        sr.render(f)
+        GLES20.glFinish()
+        val a = grab(s)
+        val hiddenBefore = sr.terrainFade
+        val name = "terrain-handover-${sc.tp.label}-${altLabel(alt)}"
+        s.screenshot("$name-A-impostor")
+        // the tiles arrive; the terrain fades in over one second (the frame half-way kept too)
+        streamScene(sc, gpu, c, null)
+        f.time += 5f
+        sr.render(f)
+        f.time += 0.5f
+        sr.render(f)
+        GLES20.glFinish()
+        val mid = sr.terrainFade
+        s.screenshot("$name-fade-%.2f".format(mid))
+        f.time += 2f
+        sr.render(f)
+        GLES20.glFinish()
+        s.drainErrors(0)
+        val b = grab(s)
+        s.screenshot("$name-B-terrain")
+        val img = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
+        var changed = 0
+        var mx = 0
+        var n = 0L
+        val sa = DoubleArray(3)
+        val sb = DoubleArray(3)
+        for (y in 0 until h) for (x in 0 until w) {
+            val o = (y * w + x) * 4
+            var dd = 0
+            var la = 0
+            var lb = 0
+            for (k in 0 until 3) {
+                val va = a[o + k].toInt() and 255
+                val vb = b[o + k].toInt() and 255
+                dd = max(dd, kotlin.math.abs(va - vb))
+                la += va
+                lb += vb
+            }
+            if (dd > 24) changed++
+            if (dd > mx) mx = dd
+            if (la > 60 && lb > 60) {
+                n++
+                for (k in 0 until 3) {
+                    sa[k] += (a[o + k].toInt() and 255).toDouble()
+                    sb[k] += (b[o + k].toInt() and 255).toDouble()
+                }
+            }
+            val v = min(255, dd * 8)
+            img.setRGB(x, h - 1 - y, (v shl 16) or (v shl 8) or v)
+        }
+        ImageIO.write(img, "png", File(env.opts.outDir, "$name-diff.png"))
+        val nn = max(n, 1L).toDouble()
+        r.note("  %s: opacity before %.2f after %.2f; pixels changed by > 24/255: %d (%.2f %% of the frame), largest change %d; disc mean (%.0f, %.0f, %.0f) -> (%.0f, %.0f, %.0f) over %d px".format(
+            name, hiddenBefore, sr.terrainFade, changed, changed * 100.0 / (w * h), mx, sa[0] / nn, sa[1] / nn, sa[2] / nn, sb[0] / nn, sb[1] / nn, sb[2] / nn, n))
     }
 
     // ------------------------------------------------------------------ descent
