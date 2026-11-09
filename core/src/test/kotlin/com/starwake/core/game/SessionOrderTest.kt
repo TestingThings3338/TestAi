@@ -83,7 +83,7 @@ class SessionOrderTest {
         s.decks.begin()
         val before = DVec3().set(s.ship.pos)
         val order = traced(s)
-        assertEquals(steps("F0", "A2", "A3", "A4", "A5", "A7", "A9", "A10", "A11", "A12", "A13", "A14"), order)
+        assertEquals(steps("F0", "A2", "A3", "A4", "A5", "A6", "A7", "A9", "A10", "A11", "A12", "A13", "A14"), order)
         assertEquals(Branch.DECK, s.mode.branch)
         assertEquals(PlayerState.ON_DECK, s.mode.state)
         assertEquals(before.x, s.ship.pos.x, "the flight rests on a deck")

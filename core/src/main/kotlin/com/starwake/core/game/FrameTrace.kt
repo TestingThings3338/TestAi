@@ -16,6 +16,7 @@ enum class FrameStep(val owner: String, val label: String) {
     A3("09", "decks:update"),
     A4("09", "deck session ended: return"),
     A5("09", "parked ship pose, walking flag"),
+    A6("09", "walking: parked hull update, ramp watch"),
     A7("01", "seated: input (look-around)"),
     A9("06", "parked cockpit state"),
     A10("06", "gear down, hull, head motion settles"),

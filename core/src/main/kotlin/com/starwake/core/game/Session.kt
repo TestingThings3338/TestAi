@@ -304,6 +304,10 @@ class Session(
         mark(FrameStep.A4)
         if (!decks.isActive()) return // the frame the deck session ends returns early (4.9 #1)
         mark(FrameStep.A5) // 09: parked ship pose from the deck, walking flag
+        // 09: walking: hull:update when the parked pose changed, aboard:watchRamp in the HANGAR. In
+        // Roblox the walking step and the seated steps A7-A13 are the two arms of one if; the port has
+        // no walking yet, so the seated arm always follows (09 makes the choice here)
+        mark(FrameStep.A6)
         mark(FrameStep.A7)
         InputGate.filterActions(input, mode)
         camera.addLook(input.lookX, input.lookY)
