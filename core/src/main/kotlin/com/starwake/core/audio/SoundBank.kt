@@ -128,8 +128,9 @@ object SoundBank {
      * false leaves the voice lines out (tests that do not need them).
      */
     fun loadAll(out: AudioOut, voices: Boolean = true) {
-        for (i in SFX_FILES.indices) out.load(i, SFX_FILES[i], false)
+        // the music first: a stream only needs its header, and the menu music can start at once
         for (i in MUSIC_FILES.indices) out.load(MUSIC_MENU + i, MUSIC_FILES[i], true)
+        for (i in SFX_FILES.indices) out.load(i, SFX_FILES[i], false)
         if (voices) {
             for (line in VoiceLine.ALL) out.loadVoice(voice(line), voicePath(line), line.text, line.radio)
         }

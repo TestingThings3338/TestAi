@@ -80,6 +80,12 @@ class SessionAudio(
 
     init {
         SoundBank.loadAll(out)
+        applyGroups()
+    }
+
+    /** The groups of a fresh ShipAudio from the settings (it may follow a muted one). */
+    private fun applyGroups() {
+        ship.setVolumes(settings.masterVolume, if (mutedByDebug) 0f else settings.effectsVolume, settings.musicVolume)
         ship.applyVolumes()
     }
 
@@ -92,7 +98,7 @@ class SessionAudio(
         ship = ShipAudio(out, clock, rng)
         voice = Voice(out, clock)
         callouts = Callouts(voice, clock)
-        ship.applyVolumes()
+        applyGroups()
         ship.start()
         prevKnown = false
         lastFlightAssist = s.ship.flightAssist

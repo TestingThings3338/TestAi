@@ -26,8 +26,15 @@ abstract class MixerAudioOut(
     protected val pcms = AtomicReferenceArray<Pcm?>(soundCapacity)
     private val failedFlags = AtomicReferenceArray<Boolean?>(soundCapacity)
 
-    /** Seconds of a stream sound whose length the loader read from its header (0 = unknown). */
-    protected val streamLength = FloatArray(soundCapacity)
+    /** Seconds of a stream sound whose length the loader read from its header (float bits; 0 = unknown). */
+    private val streamLength = java.util.concurrent.atomic.AtomicIntegerArray(soundCapacity)
+
+    /** A stream sound (music) is ready to start: its length is known (loader threads). */
+    protected fun publishStream(sound: Int, seconds: Float) {
+        if (sound in 0 until streamLength.length()) streamLength.set(sound, java.lang.Float.floatToRawIntBits(seconds))
+    }
+
+    private fun streamSeconds(sound: Int): Float = java.lang.Float.intBitsToFloat(streamLength.get(sound))
 
     val mixer = Mixer(slots, pcms, outRate, maxBurst)
 
@@ -81,14 +88,14 @@ abstract class MixerAudioOut(
     }
 
     override fun isLoaded(sound: Int): Boolean =
-        sound in 0 until pcms.length() && (pcms.get(sound) != null || streamLength[sound] > 0f)
+        sound in 0 until pcms.length() && (pcms.get(sound) != null || streamSeconds(sound) > 0f)
 
     override fun failed(sound: Int): Boolean = sound in 0 until failedFlags.length() && failedFlags.get(sound) == true
 
     override fun length(sound: Int): Float {
         if (sound !in 0 until pcms.length()) return 0f
         val p = pcms.get(sound)
-        return p?.seconds ?: streamLength[sound]
+        return p?.seconds ?: streamSeconds(sound)
     }
 
     // ================================================================== game thread

@@ -193,7 +193,7 @@ internal class AndroidAudio(private val context: Context) : MixerAudioOut() {
                 ex.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 val f = ex.getTrackFormat(0)
                 val us = if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
-                if (us > 0) streamLength[sound] = us / 1e6f else markFailed(sound)
+                if (us > 0) publishStream(sound, us / 1e6f) else markFailed(sound)
             }
         } catch (e: IOException) {
             markFailed(sound)

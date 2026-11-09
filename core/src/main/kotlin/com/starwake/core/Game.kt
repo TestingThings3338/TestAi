@@ -325,7 +325,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
      * `near <body> [alt]`, `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
      * `behind-station [i]`, `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next
-     * frame's step order into [frameTrace]), `branch deck|destroyed|flight`.
+     * frame's step order into [frameTrace]), `branch deck|destroyed|flight`. Sound (`09` 9.3): `audio`
+     * (status into [audioReport]), `music [skip|on|off]`, `say <VoiceKey>`, `mute [on|off]`,
+     * `volume master|effects|music <0..1>`.
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
