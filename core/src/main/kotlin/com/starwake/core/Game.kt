@@ -96,6 +96,7 @@ class Game(
         get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
             "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
+            "fog=${"%.2f".format(sceneFrame.fogAmount)} " +
             (session?.debugState() ?: "menu")
 
     /** True when the terrain body has built every tile this view wants (harness: shots of the finished ground). */

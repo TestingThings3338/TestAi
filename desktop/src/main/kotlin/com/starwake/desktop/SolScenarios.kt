@@ -139,6 +139,17 @@ object SolScenarios {
             shot("sol-earth-%07dm".format(alt))
             report.note("earth %d m: zone %s alt %s g %s air %s terrain %s".format(alt, state("zone"), state("alt"), state("g"), state("air"), state("terrain")))
         }
+        // inside the cloud deck (2,500 m above the reference sphere): the cloud around the cockpit
+        val sea = state("sea").toDoubleOrNull() ?: 0.0
+        val ground = sea - (state("alt").toDoubleOrNull() ?: 0.0)
+        if (ground < 2300.0) {
+            cmd("over EARTH $lat $lon ${2500.0 - ground}")
+            settle()
+            shot("sol-earth-in-cloud")
+            report.note("in the deck: sea %s fog %s".format(state("sea"), state("fog")))
+            cmd("over EARTH $lat $lon 300")
+            settle()
+        }
         cmd("view external")
         settle(200)
         shot("sol-earth-external")

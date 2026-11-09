@@ -104,7 +104,7 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
   - The ground is a cube-sphere quadtree of 65 × 65-vertex tiles, built on background threads and uploaded a few per frame, so the frame rate does not depend on how fast you descend.
   - The view is drawn in up to four depth slices, so one 24-bit depth buffer resolves half a metre at the ship and the horizon 300 km away.
   - From orbit the terrain shows the planet's baked far image, the same one the distant planet is drawn with, so the change from "planet in the sky" to "ground below" cannot be seen.
-  - Clouds cost five texture lookups per pixel: one weather map for the whole planet and a 64³ tiling noise for the detail. There is no ray marching.
+  - Clouds cost a handful of texture lookups per pixel: one weather map for the whole planet and a 64³ tiling noise for the detail. There is no ray marching.
 
 ## Porting from Roblox
 

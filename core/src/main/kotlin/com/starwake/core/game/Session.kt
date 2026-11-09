@@ -49,6 +49,10 @@ interface SessionHost : UiHost {
  * C19-C21 limit, C23 the sub-stepped move with its collisions, C28 ground, C30 docking) until the
  * flight, world and station ports replace it.
  *
+ * The world under it is real: with a [Ground] the ship flies over the terrain body's actual surface
+ * (altitude, gear and hull contacts, landings), and every body pulls and, where it has air, drags
+ * and heats the hull ([updateEnvironment], [applyEnvironment], [updateEntry]; DECISIONS 36-42).
+ *
  * Also here: the key handlers (Roblox `InputBegan` glue: view, Flight Assist, boost, target, land,
  * dock, autopilot) and the frame-local state of 2.1.9. GL thread; the frame performs no allocation.
  */
@@ -1709,6 +1713,7 @@ class Session(
             "cam=${"%.2f".format(cameraPos.x - ship.pos.x)},${"%.2f".format(cameraPos.y - ship.pos.y)},${"%.2f".format(cameraPos.z - ship.pos.z)} " +
             "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
             "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name.replace(' ', '-') else "-"} terrain=${surface != null} " +
+            "sea=${"%.1f".format(if (here.nearestBody >= 0) here.bodyDistance - system.bodies[here.nearestBody].radius else 0.0)} " +
             "g=${"%.2f".format(gravity)} air=${"%.4f".format(airDensity)} heat=${"%.2f".format(heat)} glow=${"%.2f".format(entryGlow)} integrity=${"%.2f".format(hull)}"
 
     companion object {
@@ -1792,8 +1797,8 @@ class Session(
         /** Hull lost per second for each unit of [heat] above 1. */
         const val HEAT_DAMAGE = 0.35f
 
-        /** Dynamic pressure (Pa) from which the airflow shakes the cockpit. */
-        const val BUFFET_PRESSURE = 20_000f
+        /** Dynamic pressure (Pa) from which the airflow shakes the cockpit: above the hull's top speed at sea level, so a low cruise is calm. */
+        const val BUFFET_PRESSURE = 45_000f
 
         /** Ground impacts below this speed (m/s) leave the hull intact; [IMPACT_RANGE] m/s more destroy a sound hull. */
         const val SAFE_IMPACT = 12f
