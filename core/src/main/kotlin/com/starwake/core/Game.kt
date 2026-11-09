@@ -89,8 +89,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     val debugInfo: String
         get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
-            "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} " +
+            "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
             (session?.debugState() ?: "menu")
+
+    /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
+    val messageLine: String get() = session?.message ?: ""
 
     /** The step order of the last frame traced with the "trace" command ("F0 C1 C2 ..."), "" before. */
     var frameTrace = ""
@@ -602,7 +605,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         overlay = Overlay.NONE
         touch.releaseAll()
         touch.throttle = s.throttle
-        hud.hints = 1f
+        hud.resetHints()
         menu.dragHint = 0f
         screenChanged()
         return s
@@ -710,13 +713,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             } else {
                 s.frame(dt, inputFrame)
             }
-            hud.updateHints(dt, s, touch)
+            // the first-flight hints count only the time the pilot can see them (not under the
+            // services of a docked start, a map or the LOADING curtain)
+            if (flightHudShown(s) && !mode.curtain) hud.updateHints(dt, touch)
         }
         // the touch controls mirror the session: the latched lever, the action pill, the look strip
         touch.throttle = s.throttle
         touch.actionLabel = s.actionLabel
         touch.lookEnabled = mode.view != ShipView.CHASE
     }
+
+    /** The flight HUD and the touch controls are on screen: no overlay, the flight branch (render and the hint clock agree). */
+    private fun flightHudShown(s: Session): Boolean = overlay == Overlay.NONE && s.mode.branch == Branch.FLIGHT
 
     /** One [InputFrame] from touch and gamepad for whoever owns the input this frame (01 9.2). */
     private fun buildInput(dt: Float, s: Session) {
@@ -934,7 +942,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val u = frame.u
         if (!world) {
             if (overlay == Overlay.NONE) menu.draw(ui, frame, 1f, time)
-        } else if (overlay == Overlay.NONE && s!!.mode.branch == Branch.FLIGHT) {
+        } else if (flightHudShown(s!!)) {
             hud.draw(ui, s, f.camera, touch, 1f, time)
         }
         when (overlay) {
@@ -944,6 +952,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             Overlay.SERVICES -> if (s != null && s.dockStation >= 0) dockedScreen.draw(ui, frame, 1f, system.stations[s.dockStation].name)
             Overlay.NONE -> Unit
         }
+        // the message line over an overlay that leaves room for it (the services: the welcome lines
+        // of a docked start show there, D31); with no overlay the HUD draws it
+        if (world && overlay != Overlay.NONE && overlay.showsMessages) hud.drawMessage(ui, s!!, 1f)
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
             ui.text(buf, frame.w - frame.sr - 14f * u, frame.st + 66f * u, 10f * u, withAlpha(Theme.OK, 0.9f), UiRenderer.RIGHT, shadow = 0.7f)

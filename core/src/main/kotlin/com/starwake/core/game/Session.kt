@@ -1171,7 +1171,12 @@ class Session(
         }
     }
 
-    /** C64: the voice queue; the welcome lines once per app run, [Voice.WELCOME_DELAY] after the reveal. */
+    /**
+     * C64: the voice queue; the welcome lines once per app run, [Voice.WELCOME_DELAY] after the
+     * reveal. Voice lines are text until recordings exist (D31), so a line leaves the queue only
+     * while the message line is free and can be seen: with the HUD or over the station services of
+     * a docked start, not under a map or the curtain, where the lines wait rather than expire unseen.
+     */
     private fun updateVoice(dt: Float) {
         if (welcomeIn > 0f) {
             welcomeIn -= dt
@@ -1180,9 +1185,12 @@ class Session(
                 voice.say(Voice.SYSTEMS_ONLINE)
             }
         }
-        val line = voice.next(message == null)
+        val line = voice.next(message == null && messageShown())
         if (line != null) showMessage(line)
     }
+
+    /** The message line is on screen this frame (the game draws it on these terms). */
+    fun messageShown(): Boolean = mode.overlay.showsMessages && !mode.curtain
 
     /** C74 / A14: the message line expires after [MESSAGE_TIME]. */
     private fun updateMessages() {

@@ -310,7 +310,7 @@ object Scenarios {
 
         "start-docked" to Scenario(
             "start-docked",
-            "D13: a fresh start (real LAUNCH tap) parks the ship docked in HOME STATION's slot, services after the reveal; LAUNCH on the services flies out",
+            "D13: a fresh start (real LAUNCH tap) parks the ship docked in HOME STATION's slot, services after the reveal, the welcome lines over them 5 s later; LAUNCH on the services flies out with the first-flight hints unspent (30 s docked, no-op GL) and clear of BOOST",
         ) { SessionScenarios.startDocked(it) },
 
         "camera-views" to Scenario(

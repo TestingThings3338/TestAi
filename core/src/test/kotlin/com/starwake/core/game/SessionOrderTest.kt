@@ -274,4 +274,55 @@ class SessionOrderTest {
         }
         assertEquals(Voice.SYSTEMS_ONLINE, s.message)
     }
+
+    /** Runs [seconds] of 60 Hz frames; returns the first message that appears in them (not the one already showing), or null. */
+    private fun fly(s: Session, seconds: Float): String? {
+        val before = s.message
+        var seen: String? = null
+        var t = 0f
+        while (t < seconds) {
+            input.begin()
+            s.frame(1f / 60f, input)
+            val m = s.message
+            if (seen == null && m != null && m != before) seen = m
+            t += 1f / 60f
+        }
+        return seen
+    }
+
+    @Test
+    fun theWelcomeLinesShowOverTheServicesOfADockedStart() {
+        // D13 + D31: every start is docked with the services open; the lines are text and show
+        // over the services (the game draws the message line there), 5 s after the reveal
+        val s = session()
+        s.startDocked()
+        s.mode.overlay = Overlay.SERVICES
+        assertTrue(s.messageShown())
+        s.afterReveal(welcome = true)
+        assertEquals(null, fly(s, 4.9f), "nothing before 5 s")
+        assertEquals(Voice.WELCOME, fly(s, 0.2f))
+        assertEquals(Voice.SYSTEMS_ONLINE, fly(s, 3.2f))
+        assertTrue(s.mode.docked)
+        assertEquals(0, s.voice.pending)
+    }
+
+    @Test
+    fun voiceLinesWaitWhileTheMessageLineIsHidden() {
+        // under a map (it covers the screen) and under the curtain the queue keeps its lines
+        val s = session()
+        s.afterReveal(welcome = true)
+        s.mode.overlay = Overlay.MAP
+        assertFalse(s.messageShown())
+        assertEquals(null, fly(s, 12f), "no line is used up under the map")
+        assertEquals(2, s.voice.pending)
+        s.mode.overlay = Overlay.NONE
+        s.mode.curtain = true
+        assertFalse(s.messageShown())
+        assertEquals(null, fly(s, 1f), "nor under the curtain")
+        s.mode.curtain = false
+        // the map closes: the lines follow in order
+        assertEquals(Voice.WELCOME, fly(s, 1f / 60f))
+        assertEquals(Voice.SYSTEMS_ONLINE, fly(s, 3.2f))
+        assertEquals(0, s.voice.pending)
+    }
 }

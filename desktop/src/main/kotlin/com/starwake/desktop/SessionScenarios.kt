@@ -3,6 +3,7 @@ package com.starwake.desktop
 import com.starwake.core.Game
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.game.StarSystem
+import com.starwake.core.game.Voice
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
@@ -157,6 +158,7 @@ object SessionScenarios {
             if (n > 60 * 5) fail("never saw the docked services after LAUNCH")
         }
         phaseAtDocked = field("phase")!!
+        val reveal = frame
         log("services after $n frames, in phase $phaseAtDocked")
         if (phaseAtDocked != "REVEAL") fail("the services must open with the reveal, came in $phaseAtDocked")
         frames(60)
@@ -167,11 +169,19 @@ object SessionScenarios {
         if (gap <= 0.0) fail("parked inside the station's walls (gap $gap m)")
         report.note("docked at HOME STATION, hull gap %.1f m to the slot walls".format(gap))
         shot("start-docked")
-        // the world runs behind the services (they do not pause): the session clock advances
-        val f0 = num("frame")
-        frames(30)
-        if (game.stateName != "docked") fail("the services closed by themselves")
-        log("30 frames later at frame ${num("frame") - f0 + f0}")
+        // the world runs behind the services (they do not pause): the welcome lines (text until
+        // recordings exist, D31) show over them 5 s after the reveal. The docked view is static,
+        // so the wait runs at 10 frames a second (the 60 Hz timeline is checked on the no-op GL)
+        frameNanos = 100_000_000L
+        while (game.messageLine != Voice.WELCOME) {
+            frame()
+            if (game.stateName != "docked") fail("the services closed by themselves")
+            if (frame - reveal > 60 + 60) fail("no '${Voice.WELCOME}' over the services 5 s after the reveal")
+        }
+        frameNanos = FRAME_NANOS
+        shot("start-docked-welcome")
+        // the first-flight hints wait for the flight HUD: still full after 5 s behind the services
+        if (num("hints") != 1.0) fail("the hints faded behind the services: ${field("hints")}")
         // LAUNCH on the services (DockedScreen.layout)
         val bx = insets[0] + 144f * u
         val by = h - insets[3] - 67f * u
@@ -180,7 +190,77 @@ object SessionScenarios {
         if (game.stateName != "flight") fail("LAUNCH on the services did not fly out")
         if (field("docked") != "false") fail("still docked after LAUNCH")
         if (num("speed") < 10.0) fail("launched without a push")
+        if (num("hints") != 1.0) fail("the hints are not full in the first flight: ${field("hints")}")
+        // the stick's hint plate moves inward where BOOST (y 192, 5.6) reaches into its row
+        val sh = touchLayout.stickHint
+        val bb = touchLayout.boostBtn
+        if (sh.x < bb.x + bb.w && bb.x < sh.x + sh.w && sh.y < bb.y + bb.h && bb.y < sh.y + sh.h) fail("the DRAG TO STEER plate covers BOOST")
         shot("start-launched")
+        firstFlightWaits(env)
+    }
+
+    /** A fresh app run on the no-op GL (no rendering cost, no shots), docked by a real LAUNCH: its driver and the reveal frame. */
+    private fun noopDockedStart(env: ScenarioEnv): Pair<GameDriver, Long> {
+        val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
+        val d = GameDriver(Game(platform), NoopGl(), null, platform, env.report, env.opts, env.opts.insets)
+        d.start()
+        d.frames(100)
+        d.cmd("launch fade")
+        var n = 0
+        while (d.game.stateName != "docked") {
+            d.frame()
+            if (++n > 60 * 5) d.fail("no docked start")
+        }
+        return d to d.frame
+    }
+
+    /**
+     * The long waits of a first flight at 60 Hz, on the no-op GL: the welcome lines over the
+     * services 5 s after the reveal and the second one 3 s later; 30 s behind the services leave
+     * the first-flight hints untouched, and after the launch they stay 25 s on screen, then fade.
+     * A map opened over the services before the welcome holds the lines until it closes.
+     */
+    private fun firstFlightWaits(env: ScenarioEnv) {
+        val (d, reveal) = noopDockedStart(env)
+        with(d) {
+            var welcomeAt = -1L
+            var onlineAt = -1L
+            while (frame - reveal < 60 * 30) {
+                frame()
+                if (game.stateName != "docked") fail("the services closed by themselves")
+                val m = game.messageLine
+                if (welcomeAt < 0 && m == Voice.WELCOME) welcomeAt = frame
+                if (onlineAt < 0 && m == Voice.SYSTEMS_ONLINE) onlineAt = frame
+            }
+            if (welcomeAt < 0 || abs(welcomeAt - reveal - 300) > 2) fail("'${Voice.WELCOME}' ${welcomeAt - reveal} frames after the reveal, expected 300 (5 s)")
+            if (onlineAt < 0 || onlineAt - welcomeAt !in 179L..184L) fail("'${Voice.SYSTEMS_ONLINE}' ${onlineAt - welcomeAt} frames after the first line, expected ~181 (3 s)")
+            if (num("hints") != 1.0) fail("the hints faded in 30 s behind the services: ${field("hints")}")
+            cmd("undock")
+            frames(2)
+            if (game.stateName != "flight") fail("undock did not fly out")
+            frames(60 * 24)
+            if (num("hints") != 1.0) fail("the hints faded before 25 s on screen: ${field("hints")}")
+            frames(60 * 5)
+            if (num("hints") != 0.0) fail("the hints did not fade after 25 s on screen: ${field("hints")}")
+            report.note(
+                "no-op GL: welcome lines over the services %.2f s and %.2f s after the reveal; hints 1.00 after 30 s docked and 24 s of flight, 0.00 at 29 s"
+                    .format((welcomeAt - reveal) / 60.0, (onlineAt - reveal) / 60.0),
+            )
+        }
+        val (m, reveal2) = noopDockedStart(env)
+        with(m) {
+            frames(60)
+            cmd("map") // debug: a map over the services, before the welcome
+            frame()
+            if (game.stateName != "map") fail("the map did not open over the services")
+            while (frame - reveal2 < 60 * 8) frame()
+            if (game.messageLine.isNotEmpty()) fail("'${game.messageLine}' was used up under the map")
+            back()
+            frame()
+            if (game.stateName != "docked") fail("closing the map did not return to the services")
+            if (game.messageLine != Voice.WELCOME) fail("the welcome did not follow the map: '${game.messageLine}'")
+            report.note("no-op GL: under a map the welcome waited 3 s past its time and showed as the map closed")
+        }
     }
 
     /** The UI unit, as Game.onSurfaceChanged derives it. */

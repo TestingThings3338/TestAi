@@ -16,13 +16,16 @@ enum class Branch {
  * The single overlay slot of the game (Roblox's exclusive screens). Only [PAUSE] and [SETTINGS]
  * freeze the simulation (DECISIONS 21): the maps and the station services are overlays the flight
  * keeps running under. [fullScreen] overlays take the touches from the flight controls (01 8.1.2).
+ * [showsMessages]: the message line (the pre-port notice line, which also carries the voice lines
+ * as text, D31) is on screen with this overlay up: the flight HUD draws it, and the station
+ * services panel leaves the top of the screen free for it; a map covers it.
  */
-enum class Overlay(val pauses: Boolean, val fullScreen: Boolean) {
-    NONE(false, false),
-    MAP(false, true),
-    SERVICES(false, true),
-    PAUSE(true, true),
-    SETTINGS(true, true),
+enum class Overlay(val pauses: Boolean, val fullScreen: Boolean, val showsMessages: Boolean) {
+    NONE(false, false, true),
+    MAP(false, true, false),
+    SERVICES(false, true, true),
+    PAUSE(true, true, false),
+    SETTINGS(true, true, false),
 }
 
 /** Camera views: the Roblox cockpit (default) and external views, and the optional chase view (DECISIONS 21a). */

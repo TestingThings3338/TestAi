@@ -11,7 +11,7 @@ import org.lwjgl.opengles.GLES20
 import java.io.File
 import kotlin.math.min
 
-/** 60 Hz in nanoseconds: frame N is presented at N * FRAME_NANOS, so runs are deterministic. */
+/** 60 Hz in nanoseconds: frame N is presented at N * FRAME_NANOS (unless a script changes the step), so runs are deterministic. */
 const val FRAME_NANOS = 16_666_667L
 
 class Options(
@@ -143,6 +143,14 @@ class GameDriver(
     val dp = opts.density
     var frame = 0L
         private set
+
+    /**
+     * Simulated time per frame, ns (60 Hz). A script may raise it for an uneventful wait, such as
+     * sitting docked until a timer fires (the game caps a frame's dt at 0.1 s); runs stay
+     * deterministic either way.
+     */
+    var frameNanos = FRAME_NANOS
+    private var clock = 0L
     var observer: FrameObserver? = null
     private var lastState: String? = null
 
@@ -211,12 +219,13 @@ class GameDriver(
         log("start: ${opts.width}x${opts.height} @ ${opts.density} px/dp, insets ${insets.joinToString(",") { it.toInt().toString() }}, state ${game.stateName}")
     }
 
-    /** Renders one frame at simulated time frame * 16.67 ms. */
+    /** Renders one frame, [frameNanos] (16.67 ms) of simulated time after the last one. */
     fun frame() {
         frame++
+        clock += frameNanos
         val o = observer
         o?.beforeDraw()
-        game.drawFrame(frame * FRAME_NANOS)
+        game.drawFrame(clock)
         o?.afterDraw()
         session?.endFrame(frame)
         o?.afterPresent()

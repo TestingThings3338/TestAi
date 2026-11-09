@@ -36,13 +36,29 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     private val labelBoxes = FloatArray(4 * MAX_LABELS)
     private var labelCount = 0
 
-    /** First-flight hints (fade once lever and stick were used, or after a while). */
+    /** First-flight hints, 0..1 (fade once lever and stick were used, or after [HINT_TIME] on screen). */
     var hints = 1f
+        private set
 
-    /** Fades the first-flight hints (call per simulated frame). */
-    fun updateHints(dt: Float, s: Session, touch: TouchFlightControls) {
+    /** Seconds the hints have been on screen this session. */
+    var hintTime = 0f
+        private set
+
+    /** A new flight: the hints show again, for [HINT_TIME] of their own screen time. */
+    fun resetHints() {
+        hints = 1f
+        hintTime = 0f
+    }
+
+    /**
+     * Fades the first-flight hints. Call once per simulated frame, and only while the flight HUD is
+     * on screen: the hints count their own screen time, so the station services of a docked start
+     * (D13), a map or the curtain do not use them up before the pilot has seen them.
+     */
+    fun updateHints(dt: Float, touch: TouchFlightControls) {
+        hintTime += dt
         if (touch.throttleUsed && touch.stickUsed) hints -= dt * 0.8f
-        else if (s.flightTime > 25f) hints -= dt * 0.3f
+        else if (hintTime > HINT_TIME) hints -= dt * 0.3f
         hints = clamp(hints, 0f, 1f)
     }
 
@@ -117,10 +133,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
         }
-        val msg = s.message
-        if (msg != null) {
-            ui.textCentered(msg, cx, frame.h * 0.30f, 13f * u, withAlpha(Theme.LOCK, a), tracking = 0.25f, shadow = 0.8f)
-        }
+        drawMessage(ui, s, a)
         if (s.proximity < 60f) {
             val blink = if ((time * 4f).toInt() % 2 == 0) 1f else 0.4f
             ui.textCentered("PROXIMITY", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
@@ -130,6 +143,23 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             ui, a, ship.forwardSpeed / spec.maxSpeed, ship.flightAssist,
             ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, s.lockKind != Session.LOCK_NONE,
         )
+    }
+
+    /**
+     * The message line at 30 % of the height (the pre-port notice line; `06` Notices replace it),
+     * on a soft dark plate so it reads over a bright station interior as well as over space. Part
+     * of the flight HUD, and drawn by the game over the station services, which leave that part
+     * of the screen free (voice lines are text, D31).
+     */
+    fun drawMessage(ui: UiRenderer, s: Session, a: Float) {
+        val msg = s.message ?: return
+        val u = frame.u
+        val cx = frame.w * 0.5f
+        val cy = frame.h * 0.30f
+        val size = 13f * u
+        val tw = ui.textWidth(msg, size, 0.25f)
+        ui.rect(cx - tw * 0.5f - 24f * u, cy - 16f * u, tw + 48f * u, 32f * u, withAlpha(Theme.BLACK, a * 0.5f), 8f * u, 0f, 12f * u)
+        ui.textCentered(msg, cx, cy, size, withAlpha(Theme.LOCK, a), tracking = 0.25f, shadow = 0.8f)
     }
 
     /** Converts a ship-relative offset into camera-relative coordinates (in place). */
@@ -475,5 +505,8 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     companion object {
         /** Most target labels the flight HUD places per frame. */
         private const val MAX_LABELS = 32
+
+        /** The first-flight hints start to fade after this long on screen, s. */
+        const val HINT_TIME = 25f
     }
 }
