@@ -246,6 +246,7 @@ uniform float u_noSurface;   // 0, or k > 0: the terrain draws the surface; the 
                              // (the terrain's lowest point: never above its horizon), haze in front kept
 uniform float u_procDetail;  // 1: procedural albedo detail at close range; 0: the image is the body's own
                              // far look (its terrain's colours), shown as it is, as the terrain's far look shows it
+uniform vec4 u_cloudGeo;     // x = deck height above the radius (radii), y = radius (m), z = fog around the camera 0..1
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -375,6 +376,11 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
             shadow = 1.0 - 0.8 * ringProfile(ringX(length(q.xz)), blur, blur);
         }
     }
+    if (u_cloud.x < 1.5 && ndl > 0.02) {
+        // the deck's shadow: where the ray from the ground to the star crosses it
+        vec3 ps = N + u_sunDir * (u_cloudGeo.x / max(ndl, 0.12));
+        shadow *= cloudShadow(mat3(u_toCloud) * normalize(ps), vec3(0.0), vec3(0.0), fpS * u_cloudGeo.y, 0.0);
+    }
     vec3 sun = u_sunColor * (diff * shadow);
     if (u_atmo.a > 0.0) sun *= exp(-u_atmo.rgb * (u_atmoK.x * airmass(ndl, 0.0)));
     vec3 col = alb * (sun + vec3(0.004));
@@ -395,6 +401,27 @@ vec3 shadeSurface(vec3 N, vec3 d, float tHit) {
     return col;
 }
 
+/**
+ * The cloud deck where the ray meets it at x (distance along the ray from its closest approach to
+ * the centre, radii), t radii from the camera: rgb = radiance, a = opacity.
+ */
+vec4 deck(vec3 d, vec3 pca, float x, float t, float below) {
+    vec3 nw = normalize(pca + d * x);
+    mat3 M = mat3(u_toCloud);
+    vec3 n = M * nw;
+    float fp = t * u_pxAngle * u_cloudGeo.y / max(abs(dot(nw, d)), 0.06);
+    float mu = dot(nw, u_sunDir);
+    vec3 sunLight = u_sunColor;
+    vec3 amb = vec3(0.004);
+    if (u_atmo.a > 0.0) {
+        // the deck lies under three quarters of the air
+        sunLight *= exp(-u_atmo.rgb * (u_atmoK.x * 0.75 * airmass(mu, 0.0)));
+        amb += u_sunColor * u_atmo.rgb * (0.10 * smoothstep(-0.12, 0.25, mu));
+    }
+    vec3 q = n * u_cloud.z;
+    return cloudShade(n, q, cloudBank(q), fp, M * u_sunDir, sunLight, amb, below);
+}
+
 void main() {
     vec3 d = normalize(v_ray);
     float b;
@@ -404,6 +431,14 @@ void main() {
     rayInfo(d, b, h2, disc, pca);
     float cov = coverage(b, h2, disc);
     float sqHit = sqrt(max(disc, 0.0));
+    // the cloud deck: a sphere of 1 + kc radii; discC = its squared half chord along the ray,
+    // ccC > 0 while the camera is above it (both without rounding (1 + kc)^2 - 1)
+    bool clouds = u_cloud.x < 1.5;
+    float kc2 = u_cloudGeo.x * (2.0 + u_cloudGeo.x);
+    float discC = kc2 + disc;
+    float ccC = u_cc - kc2;
+    float xc = sqrt(max(discC, 0.0));
+    float cloudA = 0.0;
     if (u_noSurface > 0.0) {
         // the black core instead of the surface: a sphere of k radii (the same coverage rule)
         float discK = disc - (1.0 - u_noSurface * u_noSurface);
@@ -425,6 +460,11 @@ void main() {
             vec3 N = normalize(pca - d * sq);
             float tHit = u_cc / (b + sq);
             surf = shadeSurface(N, d, tHit);
+            if (clouds && ccC > 0.0 && discC > 0.0) {
+                // from above: the deck in front of the ground
+                vec4 c = deck(d, pca, -xc, ccC / (b + xc), 0.0);
+                surf = mix(surf, c.rgb, c.a);
+            }
         }
         if (atmo && -sq > x0) {
             vec3 T;
@@ -436,21 +476,48 @@ void main() {
     if (cov < 1.0 && atmo && xa > x0) {
         vec3 skyT;
         vec3 sky = atmosphere(d, pca, h2, x0, xa, skyT);
+        if (clouds && discC > 0.0) {
+            if (ccC > 0.0) {
+                // from above, past the horizon: the deck where the ray enters it
+                if (b > 0.0) {
+                    vec4 c = deck(d, pca, -xc, ccC / (b + xc), 0.0);
+                    sky = mix(sky, c.rgb, c.a);
+                    cloudA = c.a;
+                }
+            } else {
+                // from below: the deck overhead, fading into the haze towards the horizon
+                float t = b >= 0.0 ? b + xc : -ccC / (xc - b);
+                vec4 c = deck(d, pca, xc, t, 1.0);
+                cloudA = c.a * exp(-t * u_cloudGeo.y * (1.0 / 70000.0));
+                sky = mix(sky, c.rgb, cloudA);
+            }
+        }
         tk = tonemap(sky);
         // a bright sky hides what is behind it (stars in daylight), a thin one barely does
         skyA = clamp(1.0 - dot(skyT, vec3(0.3333)) + 2.5 * dot(tk, vec3(0.3, 0.59, 0.11)), 0.0, 1.0);
+        skyA = max(skyA, cloudA);
         // that includes the star (drawn before, being farther away): put the hidden part back,
         // dimmed and reddened by the sky
         vec3 sl = starLight(d);
         if (sl.r + sl.g + sl.b > 0.0) tk = tonemap(sky + sl * (skyT * mix(1.0, skyA, u_starBehind)));
     }
-    o_color = vec4(dither(ts * cov + tk * (1.0 - cov)), 1.0 - (1.0 - cov) * (1.0 - skyA));
+    vec3 outC = ts * cov + tk * (1.0 - cov);
+    float outA = 1.0 - (1.0 - cov) * (1.0 - skyA);
+    if (u_cloudGeo.z > 0.0) {
+        // inside the deck: the cloud around the camera
+        float mu = dot(-u_center.xyz, u_sunDir);
+        vec3 fog = tonemap(u_cloudCol.rgb * u_sunColor * (0.10 + 0.42 * smoothstep(-0.1, 0.3, mu)));
+        outC = mix(outC, fog, u_cloudGeo.z);
+        outA = max(outA, u_cloudGeo.z);
+    }
+    o_color = vec4(dither(outC), outA);
 }
 """
 
     fun planetFs(atmoSteps: Int, detailOctaves: Int) = HEADER +
         "#define ATMO_STEPS $atmoSteps\n#define DETAIL_OCTAVES $detailOctaves\n" +
-        PRECISION + TYPES + PLANET_FS + TONEMAP + NOISE + NOISE_FAST + RING_DENSITY + RAY + ATMOSPHERE + DETAIL + PLANET_MAIN
+        PRECISION + TYPES + PLANET_FS + CloudShaders.UNIFORMS + TONEMAP + NOISE + NOISE_FAST + RING_DENSITY + RAY + ATMOSPHERE + DETAIL +
+        CloudShaders.FUNCTIONS + PLANET_MAIN
 
     // ---------------------------------------------------------------- rings
 
@@ -663,6 +730,7 @@ in vec2 v_ndc;
 uniform int u_type;
 uniform vec4 u_seed;     // xyz noise offset, w = 0..1
 uniform vec2 u_rect;
+uniform vec4 u_tint;     // rgb = the body's own colour (linear), a = how much of the generic look it replaces
 out vec4 o_color;
 """ + NOISE + """
 /** Cellular craters: at most one per cell, so the 8 cells around q are enough. Albedo offset. */
@@ -817,6 +885,8 @@ void main() {
     else if (u_type == T_GAS) col = gas(p);
     else if (u_type == T_ICE) col = ice(p, sp);
     else col = rock(p, sp);
+    // a body with a colour of its own keeps the generic look's light and dark, in that colour
+    if (u_tint.a > 0.0) col = mix(col, u_tint.rgb * (0.30 + 2.2 * dot(col, vec3(0.30, 0.59, 0.11))), u_tint.a);
     o_color = vec4(sqrt(clamp(col, 0.0, 1.0)), clamp(a, 0.0, 1.0));
 }
 """

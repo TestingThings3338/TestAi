@@ -161,7 +161,7 @@ object Perf {
         // 1) real engine on llvmpipe: CPU numbers include the software rasterizer's command processing
         GlSession(env, debug = false).use { s ->
             val platform = DesktopPlatform(opts.assetsDir, opts.settings)
-            val game = Game(platform)
+            val game = Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE)
             val d = GameDriver(game, s.gl, s, platform, r, opts, opts.insets)
             val meter = PerfMeter(frames) { val n = s.gl.drawCalls; s.gl.resetCounters(); n }
             meter.game = game
@@ -175,7 +175,7 @@ object Perf {
         for ((label, n) in listOf("no-op GL" to frames, "no-op GL, ${frames * 5} frames (JIT steady state)" to frames * 5)) {
             val noop = NoopGl()
             val platform = DesktopPlatform(opts.assetsDir, opts.settings)
-            val game = Game(platform)
+            val game = Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE)
             val d = GameDriver(game, noop, null, platform, r, opts, opts.insets)
             val meter = PerfMeter(n) { val c = noop.drawCalls.toInt(); noop.resetCounters(); c }
             meter.game = game

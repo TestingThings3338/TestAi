@@ -16,9 +16,13 @@ import com.starwake.core.math.Vec3
 import com.starwake.core.math.clamp
 import com.starwake.core.math.expApproach
 import com.starwake.core.math.expoCurve
+import com.starwake.core.terrain.FloorHit
+import com.starwake.core.terrain.PlanetSurface
 import com.starwake.core.ui.UiHost
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.exp
+import kotlin.math.log10
 import kotlin.math.sqrt
 
 /** What a [Session] needs from the game shell. */
@@ -56,6 +60,8 @@ class Session(
     private val host: SessionHost,
     /** The shown ship's landing-gear rig (shared with the menu backdrop, which keeps it stowed). */
     val gearRig: GearRig,
+    /** The real ground of the solid bodies (the seamless terrain); null = every body is a smooth sphere. */
+    private val ground: Ground? = null,
 ) {
     val mode = PlayerMode()
     val ship = ShipState()
@@ -117,6 +123,45 @@ class Session(
     var landedBody = -1
         private set
 
+    /** The terrain under the ship: the nearest body's ground queries, or null over a smooth sphere. */
+    private var surface: PlanetSurface? = null
+    private val floor = FloorHit()
+    private val probeW = DVec3()
+
+    // ---- the place's physics, once per frame ([updateEnvironment])
+    /** Gravity here, m/s² towards the nearest body's centre (inverse square above its surface). */
+    var gravity = 0f
+        private set
+
+    /** Air density here, kg/m³ (0 in space). */
+    var airDensity = 0f
+        private set
+
+    /** Dynamic pressure of the airflow, Pa: buffeting and the wind noise of a fast, low flight. */
+    var dynamicPressure = 0f
+        private set
+
+    /**
+     * Entry heating, 0..1+: how hot the hull's skin is from the airflow (heat flux ∝ √ρ·v³, lagged
+     * by the skin's thermal mass). The plasma glow follows it; above 1 the hull takes damage.
+     */
+    var heat = 0f
+        private set
+
+    /** The glow of the air around the hull, 0..1 (the instantaneous heat flux: bright before the skin is hot). */
+    var entryGlow = 0f
+        private set
+
+    /** Hull integrity, 1 = intact; impacts and overheating wear it down, docking restores it. 0 = lost. */
+    var hull = 1f
+        private set
+
+    /** The screen goes dark while the ship is lost, 0..1 (the game draws it over the scene). */
+    var blackout = 0f
+        private set
+    private var wrecked = false
+    private var heatWarned = false
+
     /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
     private var liftTime = 0f
 
@@ -171,6 +216,7 @@ class Session(
     // scratch
     private val tmp = Vec3()
     private val tmp2 = Vec3()
+    private val envUp = Vec3(0f, 1f, 0f)
     private val upV = Vec3()
     private val fwdV = Vec3()
     private val landRot = Quat()
@@ -216,6 +262,12 @@ class Session(
         impact.reset()
         voice.interrupt()
         welcomeIn = -1f
+        heat = 0f
+        entryGlow = 0f
+        hull = 1f
+        blackout = 0f
+        wrecked = false
+        heatWarned = false
         setView(ShipView.COCKPIT)
     }
 
@@ -239,9 +291,10 @@ class Session(
     fun startInSpace() {
         resetFlight()
         ship.pos.set(system.home)
+        ship.rot.set(system.homeRot)
         throttle = 0.3f
         controls.throttle = 0.3f
-        ship.vel.set(0f, 0f, -0.3f * spec.maxSpeed)
+        ship.rot.rotate(0f, 0f, -0.3f * spec.maxSpeed, ship.vel)
         afterPlacement()
     }
 
@@ -249,9 +302,26 @@ class Session(
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
         gearRig.update(0f, gearWanted(), true)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        locateHere()
         zoneLabel = here.zone.label
         updateCamera(0f)
+    }
+
+    /**
+     * Where the ship is ([StarSystem.locate]), over the real ground: the terrain body follows the
+     * ship, and below [GROUND_QUERY_ALTITUDE] the altitude is the height above the terrain (or the
+     * water) under the ship instead of above the reference sphere, which mountains and basins
+     * leave by kilometres; zone and speed limit follow it.
+     */
+    private fun locateHere() {
+        ground?.select(ship.pos)
+        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        val s = ground?.surface(here.nearestBody)
+        surface = s
+        if (s != null && here.altitude < GROUND_QUERY_ALTITUDE) {
+            here.altitude = s.altitudeAt(ship.pos)
+            system.classify(here, spec.maxSpeed)
+        }
     }
 
     /**
@@ -328,6 +398,9 @@ class Session(
         mark(FrameStep.B1) // 02: attitude hidden
         mark(FrameStep.B2)
         destruction.update(dt)
+        blackout = minOf(1f, blackout + dt / WRECK_FADE)
+        entryGlow *= exp(-3f * dt)
+        if (!destruction.isActive() && wrecked) recover()
         mark(FrameStep.B3) // the flight UI stays hidden (the HUD reads the branch)
         mark(FrameStep.B4) // 09: traffic leaves
         mark(FrameStep.B6) // 05: entry glow fades
@@ -383,7 +456,8 @@ class Session(
         mark(FrameStep.C14) // 03: orbits:update
         mark(FrameStep.C15) // 03/08: frame carry
         mark(FrameStep.C16)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here) // the previous frame's velocity, as Roblox
+        locateHere() // the previous frame's velocity, as Roblox
+        updateEnvironment(dt)
         mark(FrameStep.C19)
         val limit = if (mode.landing) minOf(here.speedLimit, LANDING_SPEED) else here.speedLimit
         mark(FrameStep.C20)
@@ -416,7 +490,7 @@ class Session(
 
         // ---- C34-C40 derived state, cockpit, hull, camera
         mark(FrameStep.C34)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        locateHere()
         zoneLabel = here.zone.label
         mark(FrameStep.C35) // 02: flight cursor hidden while looking, docked or on foot
         mark(FrameStep.C36) // 06: cockpit state
@@ -429,7 +503,8 @@ class Session(
         updateCamera(dt)
 
         // ---- C41-C69 effects, warnings, markers, maps, HUD
-        mark(FrameStep.C41) // 05: entry effects
+        mark(FrameStep.C41)
+        updateEntry(dt)
         mark(FrameStep.C43) // 09: audio
         mark(FrameStep.C44)
         if (ship.flightAssist != lastFlightAssist) lastFlightAssist = ship.flightAssist // 09: FA voice
@@ -800,6 +875,7 @@ class Session(
         val h = dt / steps
         for (i in 0 until steps) {
             if (mode.landed || mode.docking || mode.docked) break
+            applyEnvironment(h)
             if (flight.step(ship, controls, h, limit)) {
                 host.haptic(Haptics.HEAVY)
                 addShake(0.8f)
@@ -877,6 +953,11 @@ class Session(
         val i = here.nearestBody
         if (i < 0) return
         val b = system.bodies[i]
+        val s = surface
+        if (s != null) {
+            collideTerrain(i, s)
+            return
+        }
         if (here.altitude > maxOf(spec.reach, spec.groundClearance) * 2 + ship.speed * dt * 2) return
         if (mode.landing && landable(i)) {
             // touchdown: slow, gear down and roughly level -> stand on the gear (RootToGround)
@@ -892,16 +973,7 @@ class Session(
                 val gear = gearRig.downFraction
                 if (radial < 0.5f) {
                     if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
-                        mode.landed = true
-                        landedBody = i
-                        ship.vel.zero()
-                        ship.angVel.zero()
-                        throttle = 0f
-                        // a thumb still on the throttle lever must not lift off by accident
-                        host.releaseControls()
-                        controls.clearAxes()
-                        host.haptic(Haptics.BUMP)
-                        showMessage("TOUCHDOWN  ·  " + b.name)
+                        touchDown(i)
                         return
                     }
                     showMessage(
@@ -921,6 +993,199 @@ class Session(
             host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
             addShake(clamp(hit / 50f, 0.2f, 1.2f))
         }
+    }
+
+    private fun touchDown(i: Int) {
+        mode.landed = true
+        landedBody = i
+        ship.vel.zero()
+        ship.angVel.zero()
+        throttle = 0f
+        // a thumb still on the throttle lever must not lift off by accident
+        host.releaseControls()
+        controls.clearAxes()
+        host.haptic(Haptics.BUMP)
+        showMessage("TOUCHDOWN  ·  " + system.bodies[i].name)
+    }
+
+    /**
+     * The ship against the real ground of terrain body [i] (exact queries on the height function the
+     * tiles are built from, so the hull meets the ground it sees). In landing mode the gear meets
+     * the floor [ShipSpec.groundClearance] under the origin: slow, level, gear down and on ground
+     * that is not too steep it sets down (water is a floor too, as in Roblox); otherwise each hull
+     * probe is pushed out of the ground and bounces, and a hard hit on ground that is already drawn
+     * at full detail costs hull (a ship crashes only on ground it can see, 04 9.10).
+     */
+    private fun collideTerrain(i: Int, s: PlanetSurface) {
+        // the altitude is the frame's first: allow for the sub-steps' travel and for rising ground
+        if (here.altitude > spec.reach * 2f + 60f + ship.speed * 0.35f) return
+        val clearance = spec.groundClearance.toDouble()
+        s.upAt(ship.pos, upV)
+        if (mode.landing && landable(i) && s.floorHit(ship.pos, clearance + 0.5, floor)) {
+            val n = floor.normal
+            val radial = ship.vel.dot(upV)
+            ship.rot.rotate(0f, 1f, 0f, tmp)
+            val level = tmp.dot(n)
+            val gear = gearRig.downFraction
+            if (radial < 0.5f) {
+                val flat = n.dot(upV) > LANDING_SLOPE
+                if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED && flat) {
+                    touchDown(i)
+                    return
+                }
+                showMessage(
+                    when {
+                        gear < 1f -> "GEAR NOT DOWN"
+                        radial <= -TOUCHDOWN_SPEED -> "HARD LANDING"
+                        ship.speed >= TOUCHDOWN_MAX_SPEED -> "TOO FAST  ·  TOUCH DOWN BELOW 40 M/S"
+                        !flat -> "SLOPE TOO STEEP  ·  FIND LEVEL GROUND"
+                        else -> "LEVEL OUT TO TOUCH DOWN"
+                    },
+                )
+            }
+            // the gear holds the origin at its height over the floor
+            if (floor.altitude < clearance) {
+                ship.pos.addScaled(upV, clearance - floor.altitude)
+                groundHit(s, flight.resolveContact(ship, n.x, n.y, n.z, 0.0))
+            }
+        }
+        if (mode.landing && landable(i)) {
+            // a slow, level approach on the gear: the legs meet the ground, not the hull (on a slope
+            // the level hull's ends would touch first and hold the gear off the floor)
+            ship.rot.rotate(0f, 1f, 0f, tmp)
+            if (gearRig.downFraction >= 1f && ship.speed < TOUCHDOWN_MAX_SPEED && tmp.dot(upV) > TOUCHDOWN_LEVEL) return
+        }
+        val p = spec.probes
+        val r = spec.collisionRadius.toDouble()
+        var k = 0
+        while (k < p.size) {
+            ship.rot.rotate(p[k], p[k + 1], p[k + 2], tmp)
+            k += 3
+            probeW.set(ship.pos.x + tmp.x, ship.pos.y + tmp.y, ship.pos.z + tmp.z)
+            if (s.altitudeAt(probeW) >= r) continue
+            if (!s.floorHit(probeW, r + 1.0, floor)) continue
+            ship.pos.addScaled(upV, r - floor.altitude)
+            val n = floor.normal
+            groundHit(s, flight.resolveContact(ship, n.x, n.y, n.z, 0.0))
+        }
+    }
+
+    /** Feedback and damage of a ground contact at impact speed [hit] (m/s). */
+    private fun groundHit(s: PlanetSurface, hit: Float) {
+        if (hit > 2f && bumpCooldown <= 0f) {
+            bumpCooldown = 0.25f
+            host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
+            addShake(clamp(hit / 50f, 0.2f, 1.2f))
+        }
+        if (hit > SAFE_IMPACT && s.groundState(ship.pos) == PlanetSurface.SOLID) {
+            damage((hit - SAFE_IMPACT) / IMPACT_RANGE, "IMPACT WITH THE GROUND")
+        }
+    }
+
+    // ================================================================== the place's physics (C16, C23, C41)
+
+    /** C16: gravity and air where the ship is, once per frame (the sub-steps apply them). */
+    private fun updateEnvironment(dt: Float) {
+        if (field == null) bumpCooldown -= dt // the asteroid pass counts it down where there is a field
+        val i = here.nearestBody
+        if (i < 0 || here.bodyDistance < 1.0) {
+            gravity = 0f
+            airDensity = 0f
+            return
+        }
+        val b = system.bodies[i]
+        gravity = b.gravityAt(here.bodyDistance).toFloat()
+        airDensity = b.airDensityAt(here.bodyDistance - b.radius).toFloat()
+        val inv = 1.0 / here.bodyDistance
+        envUp.set(((ship.pos.x - b.pos.x) * inv).toFloat(), ((ship.pos.y - b.pos.y) * inv).toFloat(), ((ship.pos.z - b.pos.z) * inv).toFloat())
+        if (blackout > 0f && !wrecked) blackout = maxOf(0f, blackout - dt / WRECK_FADE)
+    }
+
+    /**
+     * One sub-step of the place's physics on the velocity. Gravity acts when Flight Assist is off:
+     * the ship falls, and with enough speed it orbits (with Flight Assist on, the thrusters hold it
+     * against gravity, as they hold it against drift). Air drags on every ship: quadratic drag,
+     * integrated exactly over the step, v' = v / (1 + k·v·h), so no step size can reverse the motion.
+     */
+    private fun applyEnvironment(h: Float) {
+        if (!ship.flightAssist && gravity > 0f) ship.vel.addScaled(envUp, -gravity * h)
+        if (airDensity > 0f) {
+            val v = ship.vel.length()
+            if (v > 1f) ship.vel.scale(1f / (1f + 0.5f * airDensity * DRAG_AREA_PER_MASS * v * h))
+        }
+    }
+
+    /**
+     * C41: entry heating. The heat flux on the hull's nose goes with √ρ·v³ (Sutton-Graves): the
+     * glow of the air follows it over two decades at once, the skin's temperature ([heat]) after
+     * [HEAT_TIME], and a skin beyond its limit costs hull. Close to the star its light heats the
+     * hull the same way. A fast, low flight shakes the cockpit with the dynamic pressure.
+     */
+    private fun updateEntry(dt: Float) {
+        val v = ship.speed
+        val flux = if (airDensity > 0f) sqrt(airDensity) * v * v * v else 0f
+        dynamicPressure = 0.5f * airDensity * v * v
+        val g = if (flux > 1f) clamp((log10(flux) - GLOW_LOG_MIN) / (GLOW_LOG_MAX - GLOW_LOG_MIN), 0f, 1f) else 0f
+        entryGlow += (g - entryGlow) * expApproach(if (g > entryGlow) 6f else 2.5f, dt)
+        var target = sqrt(flux / HEAT_FLUX_LIMIT)
+        if (here.nearestBody == 0 && system.bodies[0].type == StarSystem.BodyType.STAR) {
+            val r = system.bodies[0].radius
+            target = maxOf(target, (1.5 * (1.0 - here.altitude / (0.5 * r))).toFloat())
+        }
+        if (mode.docked || mode.landed) target = 0f
+        heat += (target - heat) * expApproach(1f / HEAT_TIME, dt)
+        if (heat > 1f) damage((heat - 1f) * HEAT_DAMAGE * dt, "HULL BURNED UP")
+        if (heat > HEAT_WARNING && !heatWarned) {
+            heatWarned = true
+            voice.say(Voice.HEAT)
+        } else if (heat < HEAT_WARNING * 0.6f) {
+            heatWarned = false
+        }
+        if (dynamicPressure > BUFFET_PRESSURE && !mode.docked && !mode.landed) {
+            impact.add(clamp(sqrt(dynamicPressure / BUFFET_PRESSURE) * 0.06f, 0f, 0.5f))
+        }
+        if (mode.docked && hull < 1f) hull = minOf(1f, hull + dt * 0.2f) // the station's crews patch the hull
+    }
+
+    /** Takes [amount] off the hull; at 0 the ship is lost ([cause] on the message line). */
+    private fun damage(amount: Float, cause: String) {
+        if (wrecked || amount <= 0f) return
+        hull -= amount
+        if (hull > 0f) return
+        hull = 0f
+        wrecked = true
+        mode.landing = false
+        mode.landed = false
+        mode.docking = false
+        ship.vel.zero()
+        ship.angVel.zero()
+        throttle = 0f
+        controls.clearAxes()
+        host.releaseControls()
+        host.haptic(Haptics.HEAVY)
+        addShake(1.5f)
+        destruction.start(WRECK_TIME)
+        showMessage("SHIP LOST  ·  $cause")
+    }
+
+    /** After the loss: a new hull in front of the nearest station (`respawnAfterCrash`, [SpawnRules.recoveryPose]). */
+    private fun recover() {
+        wrecked = false
+        dockPos.set(ship.pos)
+        val i = SpawnRules.recoveryPose(system, dockPos, ship.pos, ship.rot)
+        ship.vel.zero()
+        ship.angVel.zero()
+        ship.speed = 0f
+        ship.forwardSpeed = 0f
+        ship.capacitor = 1f
+        ship.boostTime = 0f
+        hull = 1f
+        heat = 0f
+        entryGlow = 0f
+        throttle = 0f
+        gearRig.update(0f, gearWanted(), true)
+        snapAfterJump()
+        showMessage(if (i >= 0) "RECOVERED  ·  " + system.stations[i].name else "RECOVERED")
     }
 
     // ================================================================== landing mode (L), ground (C28)
@@ -955,8 +1220,16 @@ class Session(
         val dz = ship.pos.z - b.pos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
         upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-        val rest = b.radius + spec.groundClearance
-        ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
+        val s = ground?.surface(landedBody)
+        if (s != null && s.floorHit(ship.pos, 1000.0, floor)) {
+            // on the real ground: over the floor point, the gear along the slope
+            val c = spec.groundClearance.toDouble()
+            ship.pos.set(floor.point.x + upV.x * c, floor.point.y + upV.y * c, floor.point.z + upV.z * c)
+            upV.set(floor.normal)
+        } else {
+            val rest = b.radius + spec.groundClearance
+            ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
+        }
         ship.vel.zero()
         ship.angVel.zero()
         ship.speed = 0f
@@ -1218,7 +1491,13 @@ class Session(
         f.ship = ship
         f.shipView = if (mode.view == ShipView.COCKPIT) ShipModel.VIEW_COCKPIT else ShipModel.VIEW_EXTERIOR
         f.shipReach = shipReach
+        // the sheath of glowing air closes in around the view as the skin heats up
+        f.entryGlow = entryGlow * (0.5f + 0.5f * clamp(heat, 0f, 1f))
+        if (ship.speed > 1f) f.entryDir.set(ship.vel).scale(1f / ship.speed)
     }
+
+    /** Index of the body whose air and gravity the ship is in (the nearest one), -1 before the first frame. */
+    val nearBody: Int get() = here.nearestBody
 
     // ================================================================== debug (Roblox ShipDebug equivalents)
 
@@ -1273,13 +1552,47 @@ class Session(
         ship.rot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
         ship.vel.zero()
         ship.angVel.zero()
+        aboveGround(i, alt)
         snapAfterJump()
     }
 
-    /** Harness hook: 20 km above PLANET II's day side, nose a little down, in landing range. */
+    /**
+     * "over body lat lon [alt]": [alt] metres above the ground of body [i] at latitude [latDeg] and
+     * longitude [lonDeg] (degrees, the body's own axes), nose level towards the north, at rest.
+     */
+    fun over(i: Int, latDeg: Double, lonDeg: Double, alt: Double) {
+        undockQuietly()
+        val b = system.bodies[i]
+        val lat = latDeg * Math.PI / 180.0
+        val lon = lonDeg * Math.PI / 180.0
+        val cl = kotlin.math.cos(lat)
+        b.rot.rotate((cl * kotlin.math.cos(lon)).toFloat(), kotlin.math.sin(lat).toFloat(), (cl * kotlin.math.sin(lon)).toFloat(), upV)
+        upV.normalize()
+        val r = b.radius + alt
+        ship.pos.set(b.pos.x + upV.x * r, b.pos.y + upV.y * r, b.pos.z + upV.z * r)
+        b.rot.rotate(0f, 1f, 0f, fwdV)
+        fwdV.addScaled(upV, -fwdV.dot(upV))
+        if (fwdV.lengthSq() < 1e-6f) fwdV.set(1f, 0f, 0f)
+        fwdV.normalize()
+        ship.rot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
+        ship.vel.zero()
+        ship.angVel.zero()
+        aboveGround(i, alt)
+        snapAfterJump()
+    }
+
+    /** Moves the ship along the local up so that it is [alt] metres above the real ground of terrain body [i]. */
+    private fun aboveGround(i: Int, alt: Double) {
+        ground?.select(ship.pos)
+        val s = ground?.surface(i) ?: return
+        s.upAt(ship.pos, tmp)
+        ship.pos.addScaled(tmp, alt - s.altitudeAt(ship.pos))
+    }
+
+    /** Harness hook: 20 km above the day side of the first ocean world (PLANET II; Earth in Sol), nose a little down, in landing range. */
     fun debugTeleportLow() {
         undockQuietly()
-        val b = system.bodies.first { it.name == "PLANET II" }
+        val b = system.bodies.first { it.type == StarSystem.BodyType.TERRAN }
         val d = sqrt(b.pos.x * b.pos.x + b.pos.y * b.pos.y + b.pos.z * b.pos.z)
         val ux = -b.pos.x / d
         val uy = -b.pos.y / d
@@ -1292,12 +1605,13 @@ class Session(
         ship.rot.lookRotation(fwdV.x - upV.x * 0.25f, fwdV.y - upV.y * 0.25f, fwdV.z - upV.z * 0.25f, upV.x, upV.y, upV.z)
         ship.vel.zero()
         throttle = 0.2f
+        aboveGround(system.bodies.indexOf(b), 20_000.0)
         snapAfterJump()
     }
 
     /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
     fun debugDrop(alt: Double) {
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        locateHere()
         val b = system.bodies[here.nearestBody]
         val dx = ship.pos.x - b.pos.x
         val dy = ship.pos.y - b.pos.y
@@ -1312,6 +1626,7 @@ class Session(
         ship.vel.zero()
         ship.angVel.zero()
         throttle = 0f
+        aboveGround(here.nearestBody, spec.groundClearance + alt)
         snapAfterJump()
     }
 
@@ -1366,7 +1681,7 @@ class Session(
         controls.clearAxes()
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        locateHere()
         updateCamera(0f)
     }
 
@@ -1382,7 +1697,9 @@ class Session(
             "hull=${"%.1f".format(stationClearance())} prox=${"%.1f".format(proximity)} " +
             "pos=${"%.1f".format(ship.pos.x)},${"%.1f".format(ship.pos.y)},${"%.1f".format(ship.pos.z)} " +
             "cam=${"%.2f".format(cameraPos.x - ship.pos.x)},${"%.2f".format(cameraPos.y - ship.pos.y)},${"%.2f".format(cameraPos.z - ship.pos.z)} " +
-            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"}"
+            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
+            "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name.replace(' ', '-') else "-"} terrain=${surface != null} " +
+            "g=${"%.2f".format(gravity)} air=${"%.4f".format(airDensity)} heat=${"%.2f".format(heat)} glow=${"%.2f".format(entryGlow)} integrity=${"%.2f".format(hull)}"
 
     companion object {
         const val LOCK_NONE = 0
@@ -1438,5 +1755,45 @@ class Session(
 
         /** How long the message line shows a message, s. */
         const val MESSAGE_TIME = 3f
+
+        /** Below this height above a terrain body's reference sphere the altitude is the height above its real ground (m). */
+        const val GROUND_QUERY_ALTITUDE = 400_000.0
+
+        /**
+         * Drag area per mass, Cd·A/m (m²/kg): a dense, streamlined hull (ballistic coefficient
+         * 500 kg/m²). At sea level on Earth the engines hold about 250 m/s against it and an
+         * unpowered ship falls at about 90 m/s.
+         */
+        const val DRAG_AREA_PER_MASS = 0.002f
+
+        /** log10 of the heat flux measure √ρ·v³ where the air starts to glow, and where the glow is full. */
+        const val GLOW_LOG_MIN = 9.0f
+        const val GLOW_LOG_MAX = 10.8f
+
+        /** The heat flux measure √ρ·v³ the skin stands for ever ([heat] 1). */
+        const val HEAT_FLUX_LIMIT = 1.8e11f
+
+        /** The skin follows the heat flux with this time constant, s. */
+        const val HEAT_TIME = 5f
+
+        /** [heat] from which the ship computer warns. */
+        const val HEAT_WARNING = 0.6f
+
+        /** Hull lost per second for each unit of [heat] above 1. */
+        const val HEAT_DAMAGE = 0.35f
+
+        /** Dynamic pressure (Pa) from which the airflow shakes the cockpit. */
+        const val BUFFET_PRESSURE = 20_000f
+
+        /** Ground impacts below this speed (m/s) leave the hull intact; [IMPACT_RANGE] m/s more destroy a sound hull. */
+        const val SAFE_IMPACT = 12f
+        const val IMPACT_RANGE = 80f
+
+        /** cos of the steepest ground the gear stands on (~22°). */
+        const val LANDING_SLOPE = 0.927f
+
+        /** The wreck: seconds until the recovery, and the fade to black and back. */
+        const val WRECK_TIME = 3.2f
+        const val WRECK_FADE = 1.2f
     }
 }

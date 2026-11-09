@@ -123,6 +123,8 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val system = s.system
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         var warnY = frame.st + 52f * u
+        // under the look strip's first-flight hint
+        if (drawFlightData(ui, s, cx, warnY + 12f * u, a, time)) warnY += 50f * u
         if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
             val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
             ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
@@ -143,6 +145,55 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             ui, a, ship.forwardSpeed / spec.maxSpeed, ship.flightAssist,
             ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, s.lockKind != Session.LOCK_NONE,
         )
+    }
+
+    /**
+     * The flight data of a planet's neighbourhood, under the zone line: height above the real
+     * ground, climb rate and local gravity while below [ALT_READOUT]; the hull's skin temperature
+     * as a bar while the air heats it; the hull's integrity once it is damaged. True when anything
+     * was drawn (the warnings move down).
+     */
+    private fun drawFlightData(ui: UiRenderer, s: Session, cx: Float, y: Float, a: Float, time: Float): Boolean {
+        val u = frame.u
+        val here = s.here
+        val nb = here.nearestBody
+        if (nb < 0 || s.mode.docked) return false
+        val body = s.system.bodies[nb]
+        val planet = body.type != com.starwake.core.game.StarSystem.BodyType.STAR && here.altitude < ALT_READOUT
+        val hot = s.heat > 0.06f
+        val hurt = s.hull < 0.995f
+        if (!planet && !hot && !hurt) return false
+        if (planet) {
+            // ALT 12.4 km   VS -120 m/s   1.00 g
+            val alt = if (s.mode.landed) 0.0 else maxOf(0.0, here.altitude - s.spec.groundClearance)
+            buf.clear().append("ALT ")
+            Units.distance(buf, alt, upper = true)
+            buf.append("    VS ").append(if (s.mode.landed) 0f else here.radialSpeed, if (abs(here.radialSpeed) < 100f) 1 else 0).append(" M/S    ")
+            buf.append(s.gravity / 9.81f, 2).append(" G")
+            ui.text(buf, cx, y, 9.5f * u, withAlpha(Theme.TEXT, a * 0.9f), UiRenderer.CENTER, tracking = 0.08f, shadow = 0.7f, face = FontData.MONO)
+        }
+        var x = cx
+        val by = y + 13f * u
+        val bw = 96f * u
+        if (hot && hurt) x -= bw * 0.5f + 34f * u
+        if (hot) {
+            val h = clamp(s.heat, 0f, 1.25f) / 1.25f
+            val col = if (s.heat > 1f) Theme.DANGER else if (s.heat > Session.HEAT_WARNING) Theme.WARN else Theme.ACCENT
+            val blink = if (s.heat > 1f && (time * 5f).toInt() % 2 == 0) 0.5f else 1f
+            ui.text("HEAT", x - bw * 0.5f - 6f * u, by + 4f * u, 8.5f * u, withAlpha(col, a * blink), UiRenderer.RIGHT, tracking = 0.2f, shadow = 0.7f)
+            ui.rect(x - bw * 0.5f, by, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
+            ui.rect(x - bw * 0.5f, by, bw * h, 4f * u, withAlpha(col, a * blink), 2f * u)
+            // the skin's limit
+            ui.rect(x - bw * 0.5f + bw * (1f / 1.25f), by - 3f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
+            x += bw + 68f * u
+        }
+        if (hurt) {
+            val col = if (s.hull < 0.35f) Theme.DANGER else Theme.WARN
+            ui.text("HULL", x - bw * 0.5f - 6f * u, by + 4f * u, 8.5f * u, withAlpha(col, a), UiRenderer.RIGHT, tracking = 0.2f, shadow = 0.7f)
+            ui.rect(x - bw * 0.5f, by, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
+            ui.rect(x - bw * 0.5f, by, bw * clamp(s.hull, 0f, 1f), 4f * u, withAlpha(col, a), 2f * u)
+        }
+        return true
     }
 
     /**
@@ -469,7 +520,8 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
                 buf.append(pitchDeg, 0).append('°')
                 ui.textCentered(buf, x + bw * 0.5f, cy, 13f * u, col, face = FontData.MONO)
             } else {
-                val alt = maxOf(0.0, d - b.radius - s.spec.groundClearance)
+                // above the real ground while flying (the session's altitude), 0 once landed
+                val alt = if (mode.landed) 0.0 else maxOf(0.0, s.here.altitude - s.spec.groundClearance)
                 val unit = Units.distanceParts(buf, alt)
                 val tw = ui.textWidth(buf, 13f * u, face = FontData.MONO)
                 ui.textCentered(buf, x + bw * 0.5f - 6f * u, cy, 13f * u, col, face = FontData.MONO)
@@ -503,6 +555,9 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     }
 
     companion object {
+        /** The altitude line shows below this height above a planet's ground, m. */
+        const val ALT_READOUT = 300_000.0
+
         /** Most target labels the flight HUD places per frame. */
         private const val MAX_LABELS = 32
 

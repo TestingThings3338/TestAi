@@ -28,7 +28,7 @@ object SessionScenarios {
     private fun run(env: ScenarioEnv, script: GameDriver.() -> Unit) {
         GlSession(env).use { session ->
             val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
-            val game = Game(platform)
+            val game = Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE)
             val d = GameDriver(game, session.gl, session, platform, env.report, env.opts, env.opts.insets)
             d.start()
             d.script()
@@ -202,7 +202,7 @@ object SessionScenarios {
     /** A fresh app run on the no-op GL (no rendering cost, no shots), docked by a real LAUNCH: its driver and the reveal frame. */
     private fun noopDockedStart(env: ScenarioEnv): Pair<GameDriver, Long> {
         val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
-        val d = GameDriver(Game(platform), NoopGl(), null, platform, env.report, env.opts, env.opts.insets)
+        val d = GameDriver(Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE), NoopGl(), null, platform, env.report, env.opts, env.opts.insets)
         d.start()
         d.frames(100)
         d.cmd("launch fade")

@@ -503,6 +503,54 @@ void main() {
 }
 """
 
+    /**
+     * The glow of the air around a hull at entry speed, over the finished scene (additive): a
+     * sheath of streaks streaming away from the point the airflow comes from ([u_glow].xy, where
+     * the velocity vector meets the screen), brightest towards the edges of the view, with the
+     * shock's hot core at that point. One pass, no textures.
+     */
+    val entryFs = HEADER + """
+precision highp float;
+in vec2 v_ndc;
+uniform vec4 u_glow;     // xy = the airflow's origin on screen (ndc), z = intensity 0..1, w = time (s, wrapped)
+uniform vec4 u_color;    // rgb = glow colour (linear), a = width / height
+out vec4 o_color;
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+void main() {
+    vec2 r = (v_ndc - u_glow.xy) * vec2(u_color.a, 1.0);
+    float d = length(r);
+    float ang = atan(r.y, r.x);
+    float t = u_glow.w;
+    // streaks along the flow: fine in angle, long in radius, sliding outwards (seamless across the angle's wrap)
+    float a1 = ang * 3.8197186;    // 24 cells round
+    float s1 = mix(noise(vec2(a1, d * 1.6 - t * 7.0)), noise(vec2(a1 - 24.0, d * 1.6 - t * 7.0)), smoothstep(2.6, 3.1415927, ang));
+    float a2 = ang * 10.185916;    // 64 cells round
+    float s2 = mix(noise(vec2(a2, d * 4.0 - t * 13.0)), noise(vec2(a2 - 64.0, d * 4.0 - t * 13.0)), smoothstep(2.6, 3.1415927, ang));
+    float streak = s1 * 0.65 + s2 * 0.35;
+    streak = streak * streak * 1.8;
+    float k = u_glow.z;
+    // the sheath lies at the edges of the view and closes in as the heating grows; the middle stays clear
+    float sheath = smoothstep(1.75 - 0.95 * k, 2.7 - 0.95 * k, d + 0.30 * streak);
+    float core = exp(-d * d * 9.0) * 0.22 * k;
+    float flicker = 0.90 + 0.10 * noise(vec2(t * 23.0, 1.7));
+    float glow = (sheath * (0.12 + 0.88 * streak) + core) * k * flicker;
+    vec3 col = mix(u_color.rgb, vec3(1.0, 0.90, 0.72), clamp(glow * 0.9, 0.0, 1.0)) * (glow * 0.85);
+    // tone-mapped like the scene it is added to
+    col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);
+    o_color = vec4(pow(col, vec3(0.4545)), 0.0);
+}
+"""
+
     val nebulaFs = HEADER + """
 precision highp float;
 in vec2 v_ndc;

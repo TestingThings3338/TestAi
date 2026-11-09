@@ -126,7 +126,7 @@ object SpawnRules {
     }
 
     /** The station a new pilot starts docked at (D13: MERIDIAN once the world is ported; the home station now). */
-    fun startStation(system: StarSystem): Int = system.stations.indexOfFirst { it.name == HOME_STATION }.coerceAtLeast(0)
+    fun startStation(system: StarSystem): Int = system.stations.indexOfFirst { it.name == system.homeStation }.coerceAtLeast(0)
 
     /** Index of the station nearest to [p] (crash recovery, `nearestStation`), or -1. */
     fun nearestStation(system: StarSystem, p: DVec3): Int {
@@ -160,6 +160,6 @@ object SpawnRules {
     fun lookAt(from: DVec3, to: DVec3, out: Quat): Quat =
         out.lookRotation((to.x - from.x).toFloat(), (to.y - from.y).toFloat(), (to.z - from.z).toFloat(), 0f, 1f, 0f)
 
-    /** Name of the home station in the current system (the world port replaces it by SOL-MERIDIAN). */
+    /** Name of the test range's home station (Sol's is MERIDIAN STATION: [StarSystem.homeStation]). */
     const val HOME_STATION = "HOME STATION"
 }

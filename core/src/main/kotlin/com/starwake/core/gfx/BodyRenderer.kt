@@ -39,8 +39,24 @@ import kotlin.math.tan
  * viewport is left at the bake size (set it before drawing). [fullscreenTriangle] stays owned by
  * the caller.
  */
-class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscreenTriangle: GpuMesh) {
+class BodyRenderer(
+    private val gl: Gl, system: StarSystem, quality: Int, fullscreenTriangle: GpuMesh,
+    /** The cloud decks' textures (shared with the terrain); null: this renderer owns a set of its own. */
+    sharedClouds: CloudTextures? = null,
+) {
     private val fullscreen = fullscreenTriangle
+    // on its own (harness scenes of single bodies) the field is never built: no decks, as before
+    private val ownClouds = if (sharedClouds == null) CloudTextures(gl, CloudField()) else null
+    val clouds: CloudTextures = sharedClouds ?: ownClouds!!
+
+    /** The deck of the body being drawn ([deckFor]). */
+    private val deck = CloudDeckState()
+    private val toCloud = FloatArray(16).also { it[15] = 1f }
+
+    /** Fog around the camera inside body [fogBody]'s deck, 0..1 (the game sets both every frame). */
+    var fogBody = -1
+    var fogAmount = 0f
+
     private val bodies: Array<StarSystem.Body> = system.bodies.toTypedArray()
     private val count = bodies.size
     private val type = IntArray(count) { typeCode(bodies[it].type) }
@@ -92,6 +108,12 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     private val pStarBehind = planetProg.p.u("u_starBehind")
     private val pNoSurface = planetProg.p.u("u_noSurface")
     private val pProcDetail = planetProg.p.u("u_procDetail")
+    private val pCloudMap = planetProg.p.u("u_cloudMap")
+    private val pCloudNoise = planetProg.p.u("u_cloudNoise")
+    private val pToCloud = planetProg.p.u("u_toCloud")
+    private val pCloud = planetProg.p.u("u_cloud")
+    private val pCloudCol = planetProg.p.u("u_cloudCol")
+    private val pCloudGeo = planetProg.p.u("u_cloudGeo")
 
     private val rToBody = ringProg.p.u("u_toBody")
     private val rSunBody = ringProg.p.u("u_sunBody")
@@ -214,12 +236,36 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     }
 
     /**
+     * The cloud deck of body [i] at [time] into [out]: off for a body without one, and for every
+     * body until the cloud field is on the GPU (then the decks fade in).
+     */
+    fun deckFor(i: Int, time: Float, out: CloudDeckState) {
+        val b = bodies[i]
+        clouds.upload()
+        val fade = if (b.cloudCover > 0f) clouds.fade(time) else 0f
+        if (fade <= 0f) {
+            out.off()
+            return
+        }
+        out.on = true
+        out.threshold = CloudField.threshold(b.cloudCover)
+        out.shadow = b.cloudShadow
+        out.height = b.cloudHeight
+        out.radius = b.radius + b.cloudHeight
+        out.colour[0] = b.cloudColor[0]; out.colour[1] = b.cloudColor[1]; out.colour[2] = b.cloudColor[2]
+        out.fade = fade
+        out.angle = CloudField.DRIFT * time
+        out.fog = if (i == fogBody) fogAmount else 0f
+    }
+
+    /**
      * Body [i] as its impostor draws it, for the far look of its terrain ([TerrainLight]): the sun
      * this body sees (direction to the star, the sun colour × the distance falloff of DECISIONS 12),
      * its air (scattering colour, shell thickness, ground optical depth), its surface image with
      * its texels per radian, and its type. Allocation free; call every frame (bodies move).
      */
-    fun fillTerrainLight(i: Int, out: TerrainLight) {
+    fun fillTerrainLight(i: Int, out: TerrainLight, time: Float = 0f) {
+        deckFor(i, time, out.clouds)
         sunFor(i)
         atmoParams(i)
         out.setSun(sunX, sunY, sunZ)
@@ -321,6 +367,25 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
             gl.uniform1f(pTexScale, (texHeights[i] / PI).toFloat())
             gl.uniform1f(pNoSurface, surfaceCore[i])
             gl.uniform1f(pProcDetail, procDetail[i])
+            // the cloud deck (its samplers always need their own units, deck or not)
+            deckFor(i, time, deck)
+            gl.activeTexture(GL.TEXTURE0 + 1)
+            gl.bindTexture(GL.TEXTURE_2D, clouds.map)
+            gl.activeTexture(GL.TEXTURE0 + 2)
+            gl.bindTexture(GL.TEXTURE_3D, clouds.noise)
+            gl.activeTexture(GL.TEXTURE0)
+            gl.uniform1i(pCloudMap, 1)
+            gl.uniform1i(pCloudNoise, 2)
+            if (deck.on) {
+                cloudMatrix(b.rot, deck.angle, toCloud, axis)
+                gl.uniformMatrix4fv(pToCloud, toCloud, 0)
+                gl.uniform4f(pCloud, deck.threshold, deck.shadow, deck.radius.toFloat(), (CloudField.MAP_HEIGHT / (PI * deck.radius)).toFloat())
+                gl.uniform4f(pCloudCol, deck.colour[0], deck.colour[1], deck.colour[2], deck.fade)
+                gl.uniform4f(pCloudGeo, (deck.height / b.radius).toFloat(), b.radius.toFloat(), deck.fog, 0f)
+            } else {
+                gl.uniform4f(pCloud, 2f, 0f, 1f, 1f)
+                gl.uniform4f(pCloudGeo, 0f, 1f, 0f, 0f)
+            }
             // the star, for the part of it this planet's sky hides
             gl.uniform4f(pSunCam, starX, starY, starZ, starDisc.toFloat())
             gl.uniform4f(pSunGlare, starGlare.toFloat(), starFade.toFloat(), cos(starFade).toFloat(), STAR_INTENSITY)
@@ -536,6 +601,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         val uType = prog.u("u_type")
         val uSeed = prog.u("u_seed")
         val uRect = prog.u("u_rect")
+        val uTint = prog.u("u_tint")
         val fbo = gl.genFramebuffer()
         gl.bindFramebuffer(GL.FRAMEBUFFER, fbo)
         gl.disable(GL.DEPTH_TEST)
@@ -558,6 +624,8 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
             check(status == GL.FRAMEBUFFER_COMPLETE) { "body bake framebuffer incomplete: 0x${status.toString(16)}" }
             gl.uniform1i(uType, type[i])
             gl.uniform4f(uSeed, seeds[i * 4], seeds[i * 4 + 1], seeds[i * 4 + 2], seeds[i * 4 + 3])
+            val tint = bodies[i].tint
+            if (tint != null) gl.uniform4f(uTint, tint[0] * tint[0], tint[1] * tint[1], tint[2] * tint[2], 0.85f) else gl.uniform4f(uTint, 0f, 0f, 0f, 0f)
             for (s in 0 until BAKE_STRIPS) {
                 val y0 = s * texH / BAKE_STRIPS
                 val y1 = (s + 1) * texH / BAKE_STRIPS
@@ -581,6 +649,7 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
         starProg.p.dispose()
         glowProg.p.dispose()
         quad.dispose()
+        ownClouds?.dispose()
         for (t in textures) if (t != 0) gl.deleteTexture(t)
     }
 
@@ -621,6 +690,28 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
 
         /** Packs everything [quality] decides at construction; equal keys share programs and bakes. */
         internal fun configKey(quality: Int): Int = (bakeWidth(quality) * 100 + atmoSteps(quality)) * 100 + detailOctaves(quality)
+
+        /**
+         * World → the deck's frame as a column-major mat4: the inverse of the body's rotation
+         * [rot], then the deck's turn by [angle] about the body's +Y.
+         */
+        fun cloudMatrix(rot: Quat, angle: Double, out: FloatArray, v: Vec3) {
+            val c = cos(angle).toFloat()
+            val s = sin(angle).toFloat()
+            // row k of the world → body matrix is the body's axis k in world space
+            rot.rotate(1f, 0f, 0f, v)
+            val xx = v.x; val xy = v.y; val xz = v.z
+            rot.rotate(0f, 1f, 0f, v)
+            val yx = v.x; val yy = v.y; val yz = v.z
+            rot.rotate(0f, 0f, 1f, v)
+            val zx = v.x; val zy = v.y; val zz = v.z
+            // turn about Y: x' = c x + s z, z' = -s x + c z
+            out[0] = c * xx + s * zx; out[4] = c * xy + s * zy; out[8] = c * xz + s * zz
+            out[1] = yx; out[5] = yy; out[9] = yz
+            out[2] = -s * xx + c * zx; out[6] = -s * xy + c * zy; out[10] = -s * xz + c * zz
+            out[3] = 0f; out[7] = 0f; out[11] = 0f
+            out[12] = 0f; out[13] = 0f; out[14] = 0f; out[15] = 1f
+        }
 
         /** Angle from the star's centre where its glow has faded out (rad). */
         private fun glowFadeOut(disc: Double, glare: Double) = min(disc * 2.0 + glare * 10.0, 1.45)

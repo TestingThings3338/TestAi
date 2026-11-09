@@ -61,6 +61,7 @@ class FakeGl : Gl {
     override fun bindTexture(target: Int, id: Int) {}
     override fun activeTexture(unit: Int) {}
     override fun texImage2D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, format: Int, type: Int, data: ByteBuffer?) {}
+    override fun texImage3D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, d: Int, format: Int, type: Int, data: ByteBuffer?) {}
     override fun texParameteri(target: Int, pname: Int, param: Int) {}
     override fun generateMipmap(target: Int) {}
     override fun pixelStorei(pname: Int, param: Int) {}

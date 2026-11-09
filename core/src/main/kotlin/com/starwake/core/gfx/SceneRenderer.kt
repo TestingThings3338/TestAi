@@ -83,6 +83,18 @@ class SceneFrame {
      * body's impostor every frame.
      */
     val terrainLight = TerrainLight()
+
+    /** The camera is inside body [fogBody]'s cloud deck: the cloud around it, 0..1 (-1 / 0: clear air). */
+    var fogBody = -1
+    var fogAmount = 0f
+
+    /**
+     * Entry heating: the glow of the air around the hull, 0..1, its colour (linear RGB) and the
+     * direction the ship moves in (world, unit): the airflow streams from there.
+     */
+    var entryGlow = 0f
+    val entryColor = floatArrayOf(1f, 0.26f, 0.04f)
+    val entryDir = Vec3(0f, 0f, -1f)
 }
 
 /**
@@ -100,6 +112,11 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val star = ShaderProgram(gl, "stars", Shaders.starVs, Shaders.starFs)
     private val dust = ShaderProgram(gl, "dust", Shaders.dustVs, Shaders.dustFs)
     private val glow = ShaderProgram(gl, "glow", Shaders.glowVs, Shaders.glowFs)
+    private val entry = ShaderProgram(gl, "entry", Shaders.bakeVs, Shaders.entryFs)
+    private val entryPt = Vec3()
+
+    /** The cloud decks' textures, shared by the impostors and the terrain. */
+    private val clouds = CloudTextures(gl, content.clouds)
 
     private val fullscreen = GpuMesh(gl, Primitives.fullscreenTriangle, intArrayOf(2))
     private val ships = ShipRenderer(gl)
@@ -120,7 +137,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     private val envSize = if (quality == 0) 256 else 512
     private val envTex = bakeEnvironment(envSize)
-    private val bodies = BodyRenderer(gl, content.system, quality, fullscreen)
+    private val bodies = BodyRenderer(gl, content.system, quality, fullscreen, clouds)
     private val envLod = ln(envSize.toFloat()) / ln(2f) - 1.5f
     var quality = quality
         private set
@@ -262,7 +279,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             fadePlanet = p
             fadeStart = -1f
         }
-        bodies.fillTerrainLight(body, f.terrainLight)
+        bodies.fillTerrainLight(body, f.terrainLight, f.time)
         f.terrainLight.exposure = f.exposure
         if (!p.surfaceReady()) {
             fadeStart = -1f
@@ -281,7 +298,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     /** GPU side of a terrain planet; set the result as [SceneFrame.terrain]. Dispose it when the body changes. */
     fun attachTerrain(planet: TerrainPlanet): TerrainGpu {
-        val tr = terrainRenderer ?: TerrainRenderer(gl, quality).also { terrainRenderer = it }
+        val tr = terrainRenderer ?: TerrainRenderer(gl, quality, clouds).also { terrainRenderer = it }
         return tr.attach(planet)
     }
 
@@ -368,6 +385,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.CULL_FACE)
         ships.resetStats()
 
+        bodies.fogBody = f.fogBody
+        bodies.fogAmount = f.fogAmount
         val tg = f.terrain
         val tr = terrainRenderer
         // the hand-over: the impostor shades the surface until the terrain covers the sphere, then
@@ -441,7 +460,27 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.depthRange(0f, 1f)
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
+        if (f.entryGlow > 0.004f) drawEntryGlow(f)
         gl.disable(GL.BLEND)
+    }
+
+    /** The glowing air of an entry, added over the finished scene (see [Shaders.entryFs]). */
+    private fun drawEntryGlow(f: SceneFrame) {
+        val c = f.camera
+        // where the velocity vector meets the screen; behind the camera, the point it leaves it by
+        val d = f.entryDir
+        val z = d.dot(c.forward)
+        val x = d.dot(c.right) / c.tanHalfX
+        val y = d.dot(c.up) / c.tanHalfY
+        val k = 1f / maxOf(abs(z), 0.15f)
+        entryPt.set((x * k).coerceIn(-3f, 3f), (y * k).coerceIn(-3f, 3f), 0f)
+        gl.enable(GL.BLEND)
+        gl.blendFunc(GL.ONE, GL.ONE)
+        entry.use()
+        gl.uniform4f(entry.u("u_glow"), entryPt.x + c.shiftX, entryPt.y + c.shiftY, f.entryGlow.coerceIn(0f, 1f), f.time % 64f)
+        val e = f.entryColor
+        gl.uniform4f(entry.u("u_color"), e[0], e[1], e[2], c.width.toFloat() / c.height.coerceAtLeast(1))
+        fullscreen.draw()
     }
 
     // ------------------------------------------------------------------ background layers
@@ -863,7 +902,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
 
     fun dispose() {
         litInst.dispose()
-        for (p in arrayOf(sky, star, dust, glow)) p.dispose()
+        for (p in arrayOf(sky, star, dust, glow, entry)) p.dispose()
+        clouds.dispose()
         stationLit.dispose()
         for (m in stationMeshes) m.dispose()
         bodies.dispose()

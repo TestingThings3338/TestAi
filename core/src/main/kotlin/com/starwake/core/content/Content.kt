@@ -18,6 +18,8 @@ class Content(fontMetrics: String, val fontAtlas: ByteArray, val system: StarSys
         // the field was generated around the home position; place it there in the real system
         f.origin.set(system.fieldOrigin)
     }
+    /** The cloud decks' weather map and detail noise, built in the background from the first frame on. */
+    val clouds = com.starwake.core.gfx.CloudField().also { it.start() }
     val stars: FloatArray = StarField.build(MAX_STARS)
     val dust: Pair<FloatArray, ShortArray> = DustField.build(MAX_DUST)
     val stationMeshes: Array<FloatArray> = Array(StationMesh.MODELS) { StationMesh.build(it) }

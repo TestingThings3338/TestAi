@@ -2,9 +2,27 @@
 
 A native Android version of **Untitled Space Exploration**, a game by AFloidDEV originally built on Roblox. It is single-player for now. The goal is a 1:1 port of the Roblox game: its ships, cockpits, flight feel, HUD and look. It runs at 60 fps by default, and smoothly up to 120 Hz (Settings) on phones such as the Xiaomi 15.
 
-**Status:** port milestone 1. It has the engine, the main menu, the flight model and touch controls, in an asteroid field next to a ringed gas giant.
+**Status:** you fly in **Sol at real scale**, from MERIDIAN STATION down to the ground of the Earth and back, without a loading screen.
+
+- **Real sizes.** The Earth is 6,360 km in radius, the Moon 1,740 km at 384,000 km, Mars 3,390 km. MERIDIAN hangs 19,800 km from the Earth's centre, where the planet fills 37° of the sky. The Sun, 8 planets, 9 moons and 6 stations are there. (As in the Roblox game, the giants are 0.4× real and the planets' orbits 1/60 of real, so a trip between planets takes about a minute.)
+- **Procedural planets, seamless from orbit to the ground.** Every solid body (the Earth, the Moon, Mars, Venus, Mercury, the big moons) is generated on the phone from its seed: continents, seas, mountain ranges, then relief and ground cover down to 2.5 m. The same functions draw the planet from 20,000 km and the hill you land on.
+- **Atmosphere and weather.** The air scatters sunlight (blue days, red dusks, a thin bright limb from space). A cloud deck covers the worlds with air: weather systems with cyclones seen from orbit, broken cloud you fly down through (it fogs the cockpit inside), and cloud shadows on the ground.
+- **Physics of the place.**
+  - Gravity is the real 9.81 m/s² on the Earth (1.62 on the Moon) and falls with the square of the distance. With Flight Assist on, the thrusters hold the ship against it. With Flight Assist off the ship falls, and at 7.7 km/s it stays in orbit.
+  - Air drags on the ship (density falls by e every 8.5 km on the Earth). The ship cannot hold orbital speed in thick air.
+  - A fast entry heats the hull: the air glows around the cockpit, the HEAT bar fills, and a hull kept beyond its limit burns. The star burns a hull that comes too close.
+  - Hard ground contacts cost hull. A lost ship is recovered at the nearest station.
+- **Landing.** Tap LAND below 60 km: the gear comes down. Set down slowly on level ground (or on water) and the ship stands on its gear on the real terrain.
 
 You fly the real ships of the Roblox game: VARROW (the starter ship), TORRIN, CALDER, LOCHRAN, BRANNOCK, KESSOCK, DORNOCH and MORVEN, with their 3D cockpits, canopy glass, engine glow and animated landing gear. Pick one with the arrows on the ship card in the main menu. For now they all share one flight model; each ship's own handling comes with the flight-model port.
+
+### A first flight to the ground
+
+1. Tap **LAUNCH** in the menu, then **LAUNCH** on the station screen. The ship leaves the slot with the Earth ahead.
+2. Push the throttle up and point at the planet. The speed limit grows with the distance from everything, so the 13,000 km to the atmosphere take well under a minute.
+3. From 300 km up the top of the screen shows **ALT** (height above the real ground), **VS** (climb rate) and the local gravity.
+4. Below about 90 km the air starts to glow. Watch the **HEAT** bar and pull the throttle back if it turns amber.
+5. Below 60 km **LAND** appears. Tap it, slow down, and use ▼ to settle onto level ground.
 
 ## Install the latest build on your phone
 
@@ -27,7 +45,7 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
 | **▲ ▼ ◀ ▶** | Thrusters: up, down, left, right. |
 | **Top strip** | Drag a finger along the top of the screen to look around (up to 140° to each side, 80° up, 70° down). Let go and the view swings back. |
 | **BOOST** | A short burst up to 400 m/s. It uses one capacitor charge (the pips), which recharge over time. |
-| **FA** | Flight Assist. **On:** the ship flies where it points. **Off:** Newtonian drift. |
+| **FA** | Flight Assist. **On:** the ship flies where it points and hovers against gravity. **Off:** Newtonian flight: drift, free fall, orbits. |
 | **LOCK** | Tap: locks the target nearest your nose, or the next one farther away when something is locked. Amber brackets mark it and show its distance. Hold for half a second: release the lock. |
 | **MAP** | System map. The ship keeps flying while it is open. |
 | **VIEW** | Cockpit and external view (behind and above the ship). The old chase camera can be added in Settings. |
@@ -82,6 +100,11 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
   - Menus and the pause screen drop to 60 fps, and the screen is only kept awake while you are flying.
 - **No garbage-collection stutter.** The per-frame code makes no memory allocations.
 - **Big coordinates without jitter.** World positions are stored with high precision and drawn relative to the camera.
+- **Planet terrain.**
+  - The ground is a cube-sphere quadtree of 65 × 65-vertex tiles, built on background threads and uploaded a few per frame, so the frame rate does not depend on how fast you descend.
+  - The view is drawn in up to four depth slices, so one 24-bit depth buffer resolves half a metre at the ship and the horizon 300 km away.
+  - From orbit the terrain shows the planet's baked far image, the same one the distant planet is drawn with, so the change from "planet in the sky" to "ground below" cannot be seen.
+  - Clouds cost five texture lookups per pixel: one weather map for the whole planet and a 64³ tiling noise for the detail. There is no ray marching.
 
 ## Porting from Roblox
 
@@ -99,6 +122,9 @@ The script header documents the binary format: quantised vertices, the view clas
 
 ```
 core/     Engine and game in pure Kotlin. No Android dependencies, so it can be unit tested.
+          game/SolData.kt is the star system, game/WorldTerrain.kt the terrain body and the
+          planets' far looks, terrain/ the height functions and the tile quadtree,
+          gfx/CloudField.kt the weather.
 app/      Android shell: Activity, GLSurfaceView, GLES30 binding, touch and gamepad,
           refresh rate, keep-awake and performance hints
 desktop/  Headless preview tool: runs the real engine on Mesa (software OpenGL) and saves
@@ -116,7 +142,10 @@ You need JDK 17 or newer and an Android SDK with platform 36 (set it in `local.p
 ./gradlew :core:test                 # engine unit tests
 ./gradlew :app:assembleRelease       # app/build/outputs/apk/release/app-release.apk
 ./gradlew :desktop:run --args="--scenario all"   # render preview screenshots to desktop/out
+./gradlew :desktop:run --args="--scenario sol,sol-entry"   # MERIDIAN to the ground of the Earth; a real-time entry
 ```
+
+The harness scenes written for the flight mechanics (`flight`, `gameplay`, `station-game` and others) run on a small test range (`StarSystem()`: a gas giant, smooth planets, an asteroid field). The game itself and the `sol` scenes run in Sol (`StarSystem.sol()`).
 
 The keystore in `keystore/` is a **development key**, committed so that test builds install over each other. Create a private key before publishing anywhere.
 

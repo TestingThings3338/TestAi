@@ -1,6 +1,7 @@
 package com.starwake.desktop
 
 import com.starwake.core.Game
+import com.starwake.core.game.StarSystem
 
 /** A named, runnable check. Add new ones to [Scenarios.registry]; "all" runs them in order. */
 class Scenario(val name: String, val description: String, val body: (ScenarioEnv) -> Unit)
@@ -13,11 +14,13 @@ fun gameScenario(
     name: String,
     description: String,
     insets: FloatArray? = null,
+    /** The world: the test range for the mechanics scenes written on it, Sol for the game's own. */
+    layout: StarSystem.Layout = StarSystem.Layout.RANGE,
     script: GameDriver.() -> Unit,
 ) = Scenario(name, description) { env ->
     GlSession(env).use { session ->
         val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
-        val game = Game(platform)
+        val game = Game(platform, layout)
         val driver = GameDriver(game, session.gl, session, platform, env.report, env.opts, insets ?: env.opts.insets)
         driver.start()
         driver.script()
@@ -303,6 +306,8 @@ object Scenarios {
             frames(2)
         },
 
+        "sol" to SolScenarios.sol,
+        "sol-entry" to SolScenarios.entry,
         "terrain" to Scenario(
             "terrain",
             "Seamless planet terrain: Earth, Luna, Mars from 20,000 km to 20 m (down and horizon, HIGH and LOW); impostor-to-terrain hand-over, ship and outposts on the ground through SceneRenderer; then real-time flight-speed descents",

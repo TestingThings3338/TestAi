@@ -254,7 +254,7 @@ object ShipsScenario {
     private fun inGame(env: ScenarioEnv) {
         GlSession(env).use { session ->
             val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
-            val game = Game(platform)
+            val game = Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE)
             val d = GameDriver(game, session.gl, session, platform, env.report, env.opts, env.opts.insets)
             d.start()
             d.frames(90)

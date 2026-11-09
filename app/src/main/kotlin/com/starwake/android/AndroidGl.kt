@@ -129,6 +129,9 @@ internal class AndroidGl : Gl {
     override fun texImage2D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, format: Int, type: Int, data: ByteBuffer?) =
         GLES30.glTexImage2D(target, level, internalFormat, w, h, 0, format, type, data)
 
+    override fun texImage3D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, d: Int, format: Int, type: Int, data: ByteBuffer?) =
+        GLES30.glTexImage3D(target, level, internalFormat, w, h, d, 0, format, type, data)
+
     override fun texParameteri(target: Int, pname: Int, param: Int) = GLES30.glTexParameteri(target, pname, param)
     override fun generateMipmap(target: Int) = GLES30.glGenerateMipmap(target)
     override fun pixelStorei(pname: Int, param: Int) = GLES30.glPixelStorei(pname, param)

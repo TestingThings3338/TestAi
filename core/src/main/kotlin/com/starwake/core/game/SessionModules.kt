@@ -106,6 +106,9 @@ class Voice(private val capacity: Int = 8) {
         const val WELCOME = "SHIP COMPUTER ONLINE."
         const val SYSTEMS_ONLINE = "ALL SYSTEMS ONLINE."
 
+        /** Entry heating near the skin's limit. */
+        const val HEAT = "HULL TEMPERATURE RISING.  REDUCE SPEED."
+
         /** Voice.WelcomeDelay: after the reveal (the port has no character to wait for), s. */
         const val WELCOME_DELAY = 5f
     }

@@ -6,13 +6,20 @@ import com.starwake.core.math.Vec3
 import kotlin.math.sqrt
 
 /**
- * The playable star system, in real units (metres, doubles). Data-driven so it can be replaced by
- * the Roblox world export (roblox/world.json) later. Names are placeholders until then.
+ * A star system in real units (metres, doubles): the star, its planets and moons, the stations.
  *
- * Layout: star at the origin. The home station orbits the ringed gas giant; the asteroid field
- * floats next to the station. Everything is static except planet spin (visual).
+ * Two layouts exist. [Layout.SOL] is the game's world: Sol from the Roblox data at S = 3000
+ * ([SolData]; Earth 6,360 km, Luna at 384,000 km, MERIDIAN STATION 19,800 km from Earth's centre),
+ * whose solid bodies carry the terrain data the seamless planet engine needs. [Layout.RANGE] is the
+ * small test range the engine was first built on (a ringed gas giant next to a home station and an
+ * asteroid field, smooth planets without terrain): unit tests and harness scenes that exercise
+ * mechanics rather than the world keep using it, so `StarSystem()` builds it.
+ *
+ * Everything is static (a fixed epoch, DECISIONS 6 and 7): bodies neither orbit nor spin.
  */
-class StarSystem {
+class StarSystem(val layout: Layout = Layout.RANGE) {
+    enum class Layout { RANGE, SOL }
+
     enum class BodyType { STAR, LAVA, TERRAN, GAS, ICE, ROCK }
 
     class Body(
@@ -32,7 +39,44 @@ class StarSystem {
         val atmoThickness: Float = 0.02f,
         /** Seed for procedural textures. */
         val seed: Int = 0,
-    )
+        /**
+         * The Roblox body class ("Terrestrial World", "Moon", ...) of a body with a solid, generated
+         * surface; null = a smooth sphere without terrain (the test range, stars, giants).
+         */
+        val bodyClass: String? = null,
+        /** Surface gravity in g (9.81 m/s² per g, DECISIONS 5). */
+        val gravityG: Double = 0.0,
+        /** Air density at the ground, kg/m³ (0 = airless): drag and entry heating. */
+        val airDensity: Double = 0.0,
+        /** Scale height of the air, m. */
+        val airScaleHeight: Double = 8_500.0,
+        /** Index of the body this one orbits (-1: the star itself). */
+        val parent: Int = 0,
+        /** Tint of the generated far look (giants: the bake's bands in this colour), or null. */
+        val tint: FloatArray? = null,
+        /** Cloud deck: the share of the sky it covers (0 = none), its height above the radius (m), its colour (linear RGB). */
+        val cloudCover: Float = 0f,
+        val cloudHeight: Double = 2500.0,
+        val cloudColor: FloatArray = floatArrayOf(1f, 1f, 1f),
+        /** How much of the sunlight a cloud keeps from the ground under it, 0..1. */
+        val cloudShadow: Float = 0.7f,
+    ) {
+        /** True when the seamless terrain engine can build this body's surface. */
+        val hasTerrain: Boolean get() = bodyClass != null
+
+        /** Gravity (m/s², towards the centre) at [distance] metres from the centre: inverse square above the surface. */
+        fun gravityAt(distance: Double): Double {
+            if (gravityG <= 0.0) return 0.0
+            val k = if (distance > radius) radius / distance else 1.0
+            return gravityG * G * k * k
+        }
+
+        /** Air density (kg/m³) at [altitude] metres above the reference sphere: exponential, none above 12 scale heights. */
+        fun airDensityAt(altitude: Double): Double {
+            if (airDensity <= 0.0 || altitude > airScaleHeight * 12.0) return 0.0
+            return airDensity * kotlin.math.exp(-maxOf(altitude, 0.0) / airScaleHeight)
+        }
+    }
 
     class Station(
         val name: String,
@@ -45,23 +89,43 @@ class StarSystem {
         val parent: Int,
     )
 
-    val name = "HOME SYSTEM"
+    var name = "HOME SYSTEM"
+        internal set
     val bodies = ArrayList<Body>()
     val stations = ArrayList<Station>()
 
-    /** Where the player starts (in front of the home station) and the asteroid field centre. */
-    val home: DVec3
-    val fieldOrigin: DVec3
+    /** Where the menu shows the ship and a free-flight start begins (in front of the home station). */
+    val home = DVec3()
+
+    /** The heading of a free-flight start at [home]. */
+    val homeRot = Quat()
+
+    /** Centre of the asteroid field ([hasField]). */
+    val fieldOrigin = DVec3()
+
+    /** The test range has an asteroid field beside the home station; Sol has none (DECISIONS 13). */
+    var hasField = true
+        internal set
+
+    /** Name of the station a new pilot starts docked at (DECISIONS 13). */
+    var homeStation = "HOME STATION"
+        internal set
 
     /** Systems end here: zone SYSTEM EDGE beyond. */
-    val edgeRadius = 2.6e9
+    var edgeRadius = 2.6e9
+        internal set
 
     init {
+        if (layout == Layout.SOL) SolData.build(this) else buildRange()
+    }
+
+    /** The test range: star at the origin, the home station by the ringed gas giant, four smooth planets. */
+    private fun buildRange() {
         val sunDirFromHome = Vec3(-0.846f, 0.451f, 0.282f).normalize()
         val giantDirFromHome = Vec3(0.24f, 0.13f, -1f).normalize()
         val homeDist = 1.1e9
-        home = DVec3(-sunDirFromHome.x * homeDist, -sunDirFromHome.y * homeDist, -sunDirFromHome.z * homeDist)
-        bodies += Body("PRIMARY", BodyType.STAR, 6.0e7, DVec3(), Quat(), 0f, false, atmo = floatArrayOf(1f, 0.85f, 0.6f), atmoThickness = 0.08f)
+        home.set(-sunDirFromHome.x * homeDist, -sunDirFromHome.y * homeDist, -sunDirFromHome.z * homeDist)
+        bodies += Body("PRIMARY", BodyType.STAR, 6.0e7, DVec3(), Quat(), 0f, false, atmo = floatArrayOf(1f, 0.85f, 0.6f), atmoThickness = 0.08f, parent = -1)
 
         // ringed gas giant next to the home station (same framing as the menu backdrop)
         val giantR = 4.0e7
@@ -92,7 +156,7 @@ class StarSystem {
         val p4 = bodies[4]
         stations += Station("OUTPOST IV", 1, offsetFrom(p4, 1.8), Quat().setAxisAngle(1f, 0f, 0f, 0.3f), 257.0, 4)
 
-        fieldOrigin = DVec3(home.x, home.y, home.z - 1500.0)
+        fieldOrigin.set(home.x, home.y, home.z - 1500.0)
     }
 
     private fun planet(
@@ -161,6 +225,9 @@ class StarSystem {
         var radialFraction = 0f
         var nearestStation = -1
         var stationDistance = 0.0
+
+        /** Distance from the system's origin (the star), m. */
+        var fromStar = 0.0
         var zone = Zone.OPEN_SPACE
         var speedLimit = 0f
     }
@@ -226,13 +293,24 @@ class StarSystem {
         out.nearestStation = st
         out.stationDistance = stD
 
+        out.fromStar = sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z)
+        return classify(out, localMax)
+    }
+
+    /**
+     * The zone and the speed limit of [out] from its distances ([locate] calls it; the session calls
+     * it again after replacing the altitude above the reference sphere by the height above the real
+     * ground of a terrain body).
+     */
+    fun classify(out: Locality, localMax: Float): Locality {
+        val b = bodies[out.nearestBody]
         val r = b.radius
-        val fromStar = sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z)
+        val bestDist = out.bodyDistance
         out.zone = when {
-            stD < STATION_ZONE_RADIUS -> Zone.STATION_ZONE
+            out.stationDistance < STATION_ZONE_RADIUS -> Zone.STATION_ZONE
             b.type != BodyType.STAR && out.altitude < LOW_ALTITUDE -> Zone.LOW_ALTITUDE
             bestDist < r * GRAVITY_WELL_RADII -> Zone.GRAVITY_WELL
-            fromStar > edgeRadius -> Zone.SYSTEM_EDGE
+            out.fromStar > edgeRadius -> Zone.SYSTEM_EDGE
             bestDist < r * APPROACH_RADII && out.radialSpeed < -localMax -> Zone.APPROACH
             bestDist < r * APPROACH_RADII && out.radialSpeed > localMax -> Zone.DEPARTURE
             else -> Zone.OPEN_SPACE
@@ -256,6 +334,12 @@ class StarSystem {
     }
 
     companion object {
+        /** The game's world: Sol at S = 3000 ([SolData]). */
+        fun sol() = StarSystem(Layout.SOL)
+
+        /** Standard gravity, m/s² per g. */
+        const val G = 9.81
+
         /** Home station position relative to [home] (metres). */
         const val HOME_STATION_X = -2600.0
         const val HOME_STATION_Y = 250.0

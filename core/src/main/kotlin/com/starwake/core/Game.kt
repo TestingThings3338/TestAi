@@ -15,6 +15,8 @@ import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
 import com.starwake.core.game.ShipView
 import com.starwake.core.game.StarSystem
+import com.starwake.core.game.WorldTerrain
+import com.starwake.core.gfx.TerrainGpu
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
@@ -60,7 +62,11 @@ import kotlin.math.sqrt
  * services are overlays the flight keeps running under. The per-frame path performs no heap
  * allocations.
  */
-class Game(private val platform: Platform) : GameActions, MapHost, PointerHandler, SessionHost {
+class Game(
+    private val platform: Platform,
+    /** The world: Sol (the game), or the small test range the harness' mechanics scenes were built on. */
+    layout: StarSystem.Layout = StarSystem.Layout.SOL,
+) : GameActions, MapHost, PointerHandler, SessionHost {
     /** Pointer events in render-surface pixels (push from any thread). */
     val input = InputQueue()
     val gamepad = GamepadState()
@@ -91,6 +97,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
             "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
             (session?.debugState() ?: "menu")
+
+    /** True when the terrain body has built every tile this view wants (harness: shots of the finished ground). */
+    val terrainIdle: Boolean
+        get() = terrain.idle() && (terrain.planet == null || terrain.looks.detailed(terrain.body)) && (content?.clouds?.ready ?: true)
+
+    /** One line of terrain statistics ("" without a terrain body; harness read-out, allocates). */
+    val terrainStats: String get() = terrain.planet?.stats() ?: ""
 
     /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
     val messageLine: String get() = session?.message ?: ""
@@ -153,7 +166,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val models = arrayOfNulls<ShipModel>(ShipCatalog.all.size)
     private var shipIndex = -1
     private val gearRig = GearRig()
-    private val system = StarSystem()
+    private val system = StarSystem(layout)
+
+    /** The seamless terrain of the solid bodies and their far looks (Sol; the test range has smooth spheres only). */
+    private val terrain = WorldTerrain(system, settings.quality)
+    private var terrainGpu: TerrainGpu? = null
+    private var terrainGeneration = -1
+    private var lastFrameMs = 0f
     private val menuShip = ShipState()
     private val orbit = OrbitCamera()
     private val touch = TouchFlightControls(settings, this)
@@ -205,7 +224,28 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         menuShip.rot.set(menuShipRot)
         menuShip.engineOutput = 0.15f
         orbit.yaw = 0.18f
+        if (layout == StarSystem.Layout.SOL) menuOverEarth()
         sceneFrame.gear = gearRig
+    }
+
+    /**
+     * The menu's opening view in Sol: the camera looks past the ship at the planet below the home
+     * station, its sunlit limb in the upper right of the picture, the ship's nose towards it.
+     */
+    private fun menuOverEarth() {
+        val st = system.stations.firstOrNull { it.name == system.homeStation } ?: return
+        val host = system.bodies[st.parent]
+        val e = host.pos.relativeTo(menuShip.pos, tmp).normalize()
+        // the orbit camera sits at (sin yaw cos pitch, sin pitch, cos yaw cos pitch) from its target
+        orbit.yaw = kotlin.math.atan2(-e.x, -e.z) + 0.34f
+        orbit.pitch = kotlin.math.asin((-e.y).coerceIn(-1f, 1f)) + 0.10f
+        orbit.restPitch = orbit.pitch
+        orbit.autoSpin = 0.012f // the planet stays in the picture for a long while
+        menuShipRot.lookRotation(e.x, e.y, e.z, 0f, 1f, 0f)
+        val turn = Quat().setAxisAngle(0f, 1f, 0f, -0.95f)
+        val roll = Quat().setAxisAngle(0f, 0f, 1f, 0.22f)
+        menuShipRot.mul(menuShipRot, turn).mul(menuShipRot, roll)
+        menuShip.rot.set(menuShipRot)
     }
 
     /**
@@ -234,6 +274,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // old GPU objects died with the previous context – just drop the references
         scene = null
         ui = null
+        dropTerrainGpu(false)
         val c = content ?: Content(
             String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8),
             platform.readAsset("font/ui.sdf"),
@@ -243,6 +284,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         c.field.setQuality(settings.quality)
         scene = SceneRenderer(gl, c, settings.quality)
         appliedQuality = settings.quality
+        terrain.setQuality(settings.quality)
+        terrain.looks.quality = settings.quality
+        terrain.looks.start(system.home)
+        uploadLooks(true)
         // the hull: loaded once, uploaded again with every new GL context
         if (shipIndex != settings.ship) selectShip(settings.ship) else scene?.setShipModel(model)
         ui = UiRenderer(gl, c.font, c.fontAtlas)
@@ -314,7 +359,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
      * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
-     * `near <body> [alt]`, `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
+     * `near <body> [alt]`, `over <body> <lat> <lon> [alt]` (degrees; metres above the real ground), `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
      * `behind-station [i]`, `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next
      * frame's step order into [frameTrace]), `branch deck|destroyed|flight`.
      */
@@ -342,11 +387,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             val q = settings.quality
             c.field.setQuality(q)
             val sc = scene
+            // the terrain's tiles belong to the old renderer and to the old quality's tile budget
+            dropTerrainGpu(true)
+            terrain.setQuality(q)
             if (sc != null && !sc.needsRebake(q)) {
                 sc.setQuality(q)
             } else {
                 sc?.dispose()
                 scene = SceneRenderer(gl, c, q).also { it.setShipModel(model) }
+                uploadLooks(true)
             }
             appliedQuality = q
         }
@@ -364,6 +413,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         }
         render(gl)
         lastFrameCpuNanos = System.nanoTime() - cpuStart
+        lastFrameMs = dt * 1000f
         updateFps(dt)
     }
 
@@ -597,7 +647,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      */
     private fun buildSession(space: Boolean): Session {
         val c = content
-        val s = Session(system, c?.field, settings, this, gearRig)
+        val s = Session(system, if (system.hasField) c?.field else null, settings, this, gearRig, terrain)
         s.setShip(ShipCatalog.get(shipIndex.coerceAtLeast(0)), spec, model)
         if (space) s.startInSpace() else s.startDocked()
         session = s
@@ -619,6 +669,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         revealTimedOut = false
     }
 
+    /**
+     * The world can be shown: the terrain body (if the ship starts near one) has its own far look
+     * and covers its sphere, so the curtain does not lift on a planet that then changes its face.
+     */
+    private fun worldReady(): Boolean {
+        val p = terrain.planet ?: return true
+        return terrain.looks.ready(terrain.body) && p.surfaceReady()
+    }
+
     /** REVEAL: the curtain lifts over 0.6 s (sine out) while the cockpit comes alive (Roblox `reveal` + `afterReveal`). */
     private fun startReveal() {
         setPhase(PHASE_REVEAL)
@@ -638,6 +697,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     private fun enterMenu() {
         session = null
+        terrain.clear()
         buildFrame = -1L
         setPhase(PHASE_MENU)
         menuTime = 0f
@@ -675,7 +735,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 fade = 1f
                 // two frames rendered after the build frame, then the reveal; 12 s safety net
                 val timedOut = phaseTime > REVEAL_TIMEOUT
-                if (frameCount - buildFrame >= REVEAL_AFTER_FRAMES || timedOut) {
+                if ((frameCount - buildFrame >= REVEAL_AFTER_FRAMES && worldReady()) || timedOut) {
                     if (timedOut) revealTimedOut = true
                     startReveal()
                     // the tween's first step shows in this frame already, as Roblox's reveal tween
@@ -789,7 +849,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         sceneFrame.dustVelocity.zero()
         sceneFrame.dustIntensity = 0.35f
         sceneFrame.dustOrigin.set(cam.pos)
-        sceneFrame.drawField = true
+        sceneFrame.drawField = system.hasField
         sceneFrame.ship = menuShip
         sceneFrame.shipView = ShipModel.VIEW_EXTERIOR
         sceneFrame.shipReach = orbit.distance + (m?.radius ?: 0f)
@@ -904,6 +964,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 }
             }
             "near" -> nearTarget(words, system)?.let { (i, alt) -> s.near(i, alt) }
+            "over" -> {
+                val i = system.bodies.indexOfFirst { it.name.equals((arg ?: "").replace('-', ' '), ignoreCase = true) }
+                if (i >= 0) s.over(i, num(2) ?: 0.0, num(3) ?: 0.0, num(4) ?: NEAR_ALTITUDE)
+            }
             "teleport-low" -> s.debugTeleportLow()
             "teleport-surface" -> {
                 s.debugTeleportLow()
@@ -932,10 +996,20 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             s!!.writeScene(f)
             f.gear = gearRig
             updateLighting(s.ship.pos)
+            val glowOf = terrain.profile(s.nearBody)?.entry?.glow
+            if (glowOf != null) {
+                // the profile's glow colour (sRGB), saturated: the tonemap whitens the bright core by itself
+                f.entryColor[0] = (glowOf.r * glowOf.r).toFloat()
+                f.entryColor[1] = (glowOf.g * glowOf.g * 0.85).toFloat()
+                f.entryColor[2] = (glowOf.b * glowOf.b * 0.6).toFloat()
+            }
         } else {
             menuScene()
+            f.entryGlow = 0f
         }
+        updateCloudFog(f)
         f.camera.update(surfaceW, surfaceH)
+        syncTerrain(scene, if (world) s else null)
         scene.render(f)
 
         ui.begin(surfaceW, surfaceH)
@@ -955,6 +1029,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // the message line over an overlay that leaves room for it (the services: the welcome lines
         // of a docked start show there, D31); with no overlay the HUD draws it
         if (world && overlay != Overlay.NONE && overlay.showsMessages) hud.drawMessage(ui, s!!, 1f)
+        // the ship is lost: the scene goes dark under the message, and comes back at the recovery
+        if (world && s!!.blackout > 0.003f) {
+            ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(Theme.BLACK, s.blackout * 0.92f))
+            if (s.mode.branch == Branch.DESTROYED) hud.drawMessage(ui, s, 1f)
+        }
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
             ui.text(buf, frame.w - frame.sr - 14f * u, frame.st + 66f * u, 10f * u, withAlpha(Theme.OK, 0.9f), UiRenderer.RIGHT, shadow = 0.7f)
@@ -969,6 +1048,106 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         }
         ui.end()
         gl.invalidateDepth()
+    }
+
+    /**
+     * The terrain between the game and the renderer, once per frame before the scene is drawn: a
+     * new terrain body is attached to the renderer (the old one's tiles are freed), finished far
+     * looks are uploaded, and the terrain body selects and requests its tiles for this frame's
+     * camera. GL thread.
+     */
+    private fun syncTerrain(scene: SceneRenderer, s: Session?) {
+        val f = sceneFrame
+        if (terrain.generation != terrainGeneration) {
+            terrainGeneration = terrain.generation
+            terrainGpu?.dispose()
+            terrainGpu = null
+            val p = terrain.planet
+            if (p != null) {
+                terrainGpu = scene.attachTerrain(p)
+                f.terrainLight.setAir(p.profile, p.radius)
+                p.frameBudgetMs = 1000f / targetFps()
+            }
+            f.terrain = terrainGpu
+            f.terrainBody = terrain.body
+        }
+        uploadLooks(false)
+        if (s != null && !overlay.pauses) {
+            terrain.update(f.camera.pos, 1.0 / 60.0, s.ship.pos, s.ship.vel, lastFrameMs)
+        } else if (s != null) {
+            terrain.update(f.camera.pos, 0.0, null, null, 0f)
+        }
+    }
+
+    /**
+     * The cloud around the camera: inside a body's cloud deck (within [CLOUD_FOG_REACH] of its
+     * height) the same field the shaders draw is sampled at the camera, and where it is cloud the
+     * view fogs in, most at the deck's own height.
+     */
+    private fun updateCloudFog(f: SceneFrame) {
+        f.fogBody = -1
+        f.fogAmount = 0f
+        val field = content?.clouds ?: return
+        if (!field.ready) return
+        val cam = f.camera.pos
+        val bodies = system.bodies
+        for (i in bodies.indices) {
+            val b = bodies[i]
+            if (b.cloudCover <= 0f) continue
+            val dx = cam.x - b.pos.x
+            val dy = cam.y - b.pos.y
+            val dz = cam.z - b.pos.z
+            val r = sqrt(dx * dx + dy * dy + dz * dz)
+            val off = kotlin.math.abs(r - b.radius - b.cloudHeight)
+            if (off >= CLOUD_FOG_REACH) continue
+            // the camera in the deck's frame: the body's axes, turned by the deck's drift
+            b.rot.rotateInverse(dx.toFloat(), dy.toFloat(), dz.toFloat(), tmp)
+            val a = com.starwake.core.gfx.CloudField.DRIFT * f.time
+            val c = cos(a)
+            val sn = sin(a)
+            val qx = c * tmp.x + sn * tmp.z
+            val qz = -sn * tmp.x + c * tmp.z
+            val qy = tmp.y.toDouble()
+            val v = field.value(qx / r, qy / r, qz / r, qx, qy, qz)
+            val alpha = com.starwake.core.gfx.CloudField.alpha(v, com.starwake.core.gfx.CloudField.threshold(b.cloudCover))
+            val k = (1.0 - off / CLOUD_FOG_REACH).toFloat()
+            f.fogBody = i
+            f.fogAmount = alpha * k * k * (3f - 2f * k) * 0.96f
+            return
+        }
+    }
+
+    /** The frame rate the game aims for (the FPS limit setting; MAX counts as 120). */
+    private fun targetFps(): Float = when (settings.fpsLimit) {
+        30 -> 30f
+        60 -> 60f
+        else -> 120f
+    }
+
+    /** Uploads the far looks that finished baking ([all]: every image again, into a rebuilt renderer). */
+    private fun uploadLooks(all: Boolean) {
+        val sc = scene ?: return
+        val looks = terrain.looks
+        if (all) {
+            for (img in looks.images) if (img != null) sc.setBodySurfaceTexture(img.body, img.pixels, img.width, img.height)
+        }
+        // at most one per frame: an upload of a detailed image takes a few milliseconds
+        val img = looks.poll() ?: return
+        sc.setBodySurfaceTexture(img.body, img.pixels, img.width, img.height)
+    }
+
+    /**
+     * The terrain's GPU side is gone or about to go: with the GL context ([dispose] false: the
+     * names died with it) or with the renderer on the same context ([dispose] true). The planet
+     * drops its tiles and is attached again by [syncTerrain].
+     */
+    private fun dropTerrainGpu(dispose: Boolean) {
+        if (dispose) terrainGpu?.dispose()
+        terrainGpu = null
+        terrain.planet?.onGpuLost()
+        sceneFrame.terrain = null
+        sceneFrame.terrainBody = -1
+        terrainGeneration = -1
     }
 
     /** Sun direction/visibility (eclipses) and the fill light bounced off the nearest planet. */
@@ -1051,6 +1230,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             val i = key.toIntOrNull() ?: system.bodies.indexOfFirst { it.name.equals(key.replace('-', ' '), ignoreCase = true) }
             return if (i in system.bodies.indices) i to (alt ?: NEAR_ALTITUDE) else null
         }
+
+        /** The cloud deck fogs the view within this distance (m) of its height. */
+        const val CLOUD_FOG_REACH = 420.0
 
         /** Altitude of "near <body>" without one, m. */
         const val NEAR_ALTITUDE = 20_000.0

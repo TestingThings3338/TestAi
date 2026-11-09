@@ -52,6 +52,9 @@ class TerrainLight {
     /** Minimum sine of the slant (curvature limit, sqrt(2H/(πR))), set by [setAir]. */
     var muMin = 0.03f
 
+    /** The body's cloud deck this frame ([BodyRenderer.fillTerrainLight]); off without one. */
+    val clouds = CloudDeckState()
+
     fun setSun(x: Float, y: Float, z: Float) {
         val l = sqrt(x * x + y * y + z * z)
         sunDir[0] = x / l; sunDir[1] = y / l; sunDir[2] = z / l
@@ -202,7 +205,13 @@ class TerrainGpu internal constructor(private val gl: Gl, private val ibo: Int, 
  * One draw call per tile (VAO per slot, the per-tile data in one uniform array); nothing allocated
  * per frame.
  */
-class TerrainRenderer(private val gl: Gl, val quality: Int) {
+class TerrainRenderer(
+    private val gl: Gl, val quality: Int,
+    /** The cloud decks' textures (the scene's); null: a set of its own that never shows a deck. */
+    sharedClouds: CloudTextures? = null,
+) {
+    private val ownClouds = if (sharedClouds == null) CloudTextures(gl, CloudField()) else null
+    private val clouds: CloudTextures = sharedClouds ?: ownClouds!!
     private val prog = ShaderProgram(gl, "terrain", TerrainShaders.VS, TerrainShaders.fs(BodyRenderer.atmoSteps(quality)))
     private val uViewProj = prog.u("u_viewProj")
     private val uFarDist = prog.u("u_farDist")
@@ -228,6 +237,15 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
     private val uDetailParams = prog.u("u_detailParams")
     private val uDebug = prog.u("u_debug")
     private val uWater = prog.u("u_water")
+    private val uCloudMap = prog.u("u_cloudMap")
+    private val uCloudNoise = prog.u("u_cloudNoise")
+    private val uToCloud = prog.u("u_toCloud")
+    private val uCloud = prog.u("u_cloud")
+    private val uCloudCol = prog.u("u_cloudCol")
+    private val uCloudCam = prog.u("u_cloudCam")
+    private val uCloudCamB = prog.u("u_cloudCamB")
+    private val uCloudGeo = prog.u("u_cloudGeo")
+    private val toCloud = FloatArray(16).also { it[15] = 1f }
 
     /** Debug view: 0 normal, 1 albedo, 2 water share, 3 normals, 4 morph factor, 5 transmittance, 6 far-look weight. */
     var debugView = 0
@@ -275,6 +293,9 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
 
     init {
         ibo = gl.genBuffer()
+        // the element buffer binding belongs to the bound vertex array: without this the index
+        // data would replace that of whatever was drawn last (the UI's quad stream)
+        gl.bindVertexArray(0)
         gl.bindBuffer(GL.ELEMENT_ARRAY_BUFFER, ibo)
         gl.bufferData(GL.ELEMENT_ARRAY_BUFFER, TileFormat.INDICES * 2, Buffers.of(TileFormat.indices()), GL.STATIC_DRAW)
         detailTex = gl.genTexture()
@@ -450,6 +471,7 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         gl.uniform4f(uWater, light.airRadiance[0] * sky + 0.01f, light.airRadiance[1] * sky + 0.01f, light.airRadiance[2] * sky + 0.015f,
             (look?.reflectance ?: 0.0).toFloat())
         gl.uniform1f(uFade, fade)
+        setClouds(planet, camera, light.clouds)
         val farTex = light.farTexture
         val farEnd = farLookEnd(planet, light)
         if (farEnd > 0f) {
@@ -469,6 +491,55 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
             gl.uniform2f(uFarDist, 0f, 0f)
         }
     }
+
+    /**
+     * The cloud deck's uniforms: the world → deck rotation (the body's axes turned by the deck's
+     * drift), the camera in that frame wrapped to the noise period (in double, so the detail holds
+     * still at any distance from the centre) and its height over the deck. The samplers always get
+     * units of their own, deck or not.
+     */
+    private fun setClouds(planet: TerrainPlanet, camera: Camera, deck: CloudDeckState) {
+        gl.activeTexture(GL.TEXTURE0 + 2)
+        gl.bindTexture(GL.TEXTURE_2D, clouds.map)
+        gl.activeTexture(GL.TEXTURE0 + 3)
+        gl.bindTexture(GL.TEXTURE_3D, clouds.noise)
+        gl.activeTexture(GL.TEXTURE0)
+        gl.uniform1i(uCloudMap, 2)
+        gl.uniform1i(uCloudNoise, 3)
+        if (!deck.on) {
+            gl.uniform4f(uCloud, 2f, 0f, 1f, 1f)
+            gl.uniform4f(uCloudGeo, 0f, 0f, 0f, 0f)
+            return
+        }
+        val r = planet.surface.rotation()
+        val c = kotlin.math.cos(deck.angle)
+        val s = kotlin.math.sin(deck.angle)
+        val m = toCloud
+        // world → body is the transpose of the body → world rows r; then the turn about the body's Y
+        m[0] = (c * r[0] + s * r[2]).toFloat(); m[4] = (c * r[3] + s * r[5]).toFloat(); m[8] = (c * r[6] + s * r[8]).toFloat()
+        m[1] = r[1].toFloat(); m[5] = r[4].toFloat(); m[9] = r[7].toFloat()
+        m[2] = (-s * r[0] + c * r[2]).toFloat(); m[6] = (-s * r[3] + c * r[5]).toFloat(); m[10] = (-s * r[6] + c * r[8]).toFloat()
+        gl.uniformMatrix4fv(uToCloud, m, 0)
+        gl.uniform4f(uCloud, deck.threshold, deck.shadow, deck.radius.toFloat(), (CloudField.MAP_HEIGHT / (Math.PI * deck.radius)).toFloat())
+        gl.uniform4f(uCloudCol, deck.colour[0], deck.colour[1], deck.colour[2], deck.fade)
+        val cb = planet.camBody
+        val qx = c * cb[0] + s * cb[2]
+        val qz = -s * cb[0] + c * cb[2]
+        val period = CloudField.BILLOW_PERIOD
+        gl.uniform3f(uCloudCam, wrap(qx, period), wrap(cb[1], period), wrap(qz, period))
+        val k = CloudField.BANK
+        val bp = CloudField.BANK_PERIOD
+        gl.uniform3f(
+            uCloudCamB,
+            wrap((k[0] * qx + k[1] * cb[1] + k[2] * qz) / bp, 1.0),
+            wrap((k[3] * qx + k[4] * cb[1] + k[5] * qz) / bp, 1.0),
+            wrap((k[6] * qx + k[7] * cb[1] + k[8] * qz) / bp, 1.0),
+        )
+        val rc = sqrt(cb[0] * cb[0] + cb[1] * cb[1] + cb[2] * cb[2])
+        gl.uniform4f(uCloudGeo, (rc - deck.radius).toFloat(), deck.fog, 2f * camera.tanHalfY / max(camera.height, 1), 0f)
+    }
+
+    private fun wrap(v: Double, period: Double): Float = (v - period * kotlin.math.floor(v / period)).toFloat()
 
     /**
      * The visible tiles in [near, far] with [vp]: once when opaque. While the terrain fades in
@@ -654,6 +725,7 @@ class TerrainRenderer(private val gl: Gl, val quality: Int) {
         prog.dispose()
         gl.deleteBuffer(ibo)
         gl.deleteTexture(detailTex)
+        ownClouds?.dispose()
     }
 
     private fun smooth01(x: Double): Double {

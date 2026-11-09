@@ -135,9 +135,9 @@ void main() {
 """
 
     /** The fragment shader with the impostor's step count for the air of the far look ([BodyRenderer.atmoSteps]). */
-    fun fs(atmoSteps: Int) = HEADER + "#define ATMO_STEPS $atmoSteps\n" + FS_BODY
+    fun fs(atmoSteps: Int) = HEADER + "#define ATMO_STEPS $atmoSteps\n" + FS_HEAD + CloudShaders.UNIFORMS + CloudShaders.FUNCTIONS + FS_BODY
 
-    private const val FS_BODY = """
+    private const val FS_HEAD = """
 precision highp float;
 precision highp int;
 in vec3 v_col;
@@ -173,7 +173,15 @@ uniform int u_farType;         // BodyShaders type code: 1 lava, 2 terran (water
 uniform vec4 u_farAtmo;        // its air: rgb scattering colour, a = shell thickness (radii; 0 = none)
 uniform vec2 u_farAtmoK;       // vertical optical depth at the ground, brightness
 uniform vec4 u_farCam;         // camera - body centre (world axes, radii), w = 1 / radius (1/m)
+uniform vec3 u_camCentre;      // camera - body centre (world, m)
+uniform vec3 u_airL;           // in-scattered radiance of a thick air column in daylight (linear)
+uniform vec3 u_cloudCam;       // the camera in the cloud deck's frame (m, wrapped to the billow period)
+uniform vec3 u_cloudCamB;      // the same in the bank octave's tile coordinates (wrapped to 1)
+uniform vec4 u_cloudGeo;       // x = camera radius - deck radius (m), y = fog around the camera 0..1, z = radians per pixel
 out vec4 o_color;
+"""
+
+    private const val FS_BODY = """
 
 /** The impostor's (BodyShaders.ATMOSPHERE) airmass and single scattering, with the far uniforms. */
 float airmassI(float mu, float muH) {
@@ -211,7 +219,7 @@ vec3 atmosphereI(vec3 d, vec3 pca, float h2, float x0, float x1, out vec3 trans)
  * sun (the mesh normal [N] for the diffuse term, so relief keeps its shading), its glints, then
  * its air between the camera and the ground. Linear radiance, before the tonemap.
  */
-vec3 farLook(vec3 N, vec3 nB, float fp) {
+vec3 farLook(vec3 N, vec3 nB, float fp, float cshadow, vec4 cl) {
     float lon = abs(nB.x) + abs(nB.z) < 1e-7 ? 0.0 : atan(nB.z, nB.x);
     vec2 uv = vec2(lon * 0.15915494 + 0.5, asin(clamp(nB.y, -1.0, 1.0)) * 0.31830989 + 0.5);
     vec4 tx = textureLod(u_farTex, uv, log2(max(fp * u_farTexScale, 1.0)));
@@ -223,7 +231,7 @@ vec3 farLook(vec3 N, vec3 nB, float fp) {
     vec3 Ns = normalize(P);
     float ndlS = dot(Ns, u_sunDir);
     float diff = smoothstep(-0.07, 1.0, dot(N, u_sunDir));
-    vec3 sun = u_sunColor * diff;
+    vec3 sun = u_sunColor * (diff * cshadow);
     if (u_farAtmo.a > 0.0) sun *= exp(-u_farAtmo.rgb * (u_farAtmoK.x * airmassI(ndlS, 0.0)));
     vec3 col = alb * (sun + vec3(0.004));
     float night = 1.0 - smoothstep(-0.06, 0.14, ndlS);
@@ -238,6 +246,8 @@ vec3 farLook(vec3 N, vec3 nB, float fp) {
     } else if (u_farType == 4) {
         col += sun * pow(ndh, 24.0) * 0.12;
     }
+    // the cloud deck in front of the ground, under the air
+    col = mix(col, cl.rgb, cl.a);
     if (u_farAtmo.a > 0.0) {
         // the ray from the camera (x = -b) to the ground (x = t - b), measured from its closest
         // approach to the centre, entering the shell at -xa
@@ -314,9 +324,53 @@ void main() {
         }
         alb *= mix(1.0, lum, detailW);
     }
+    // the cloud deck: where the sight line crosses it (cl) and its shadow on this ground (cshadow)
+    vec4 cl = vec4(0.0);
+    float cshadow = 1.0;
+    if (u_cloud.x < 1.5) {
+        mat3 M = mat3(u_toCloud);
+        vec3 dv = v_view / max(v_dist, 1e-3);
+        float rc = length(u_camCentre);
+        float bq = dot(u_camCentre, dv);
+        float cq = u_cloudGeo.x * (rc + u_cloud.z);     // rc^2 - Rc^2: > 0 above the deck
+        float dq = bq * bq - cq;
+        if (dq > 0.0) {
+            float sq = sqrt(dq);
+            // above: the near root (looking down); below: the one ahead; both without cancellation
+            float t = cq > 0.0 ? (bq < 0.0 ? cq / (sq - bq) : -1.0) : (bq <= 0.0 ? sq - bq : -cq / (bq + sq));
+            if (t > 0.0 && t < v_dist) {
+                vec3 nw = normalize(u_camCentre + dv * t);
+                float fpC = t * u_cloudGeo.z / max(abs(dot(nw, dv)), 0.06);
+                float mu = dot(nw, u_sunDir);
+                // lit as the impostor lights its deck far away, by the terrain's own air close by
+                vec3 sunFar = u_sunColor;
+                vec3 ambFar = vec3(0.004);
+                if (u_farAtmo.a > 0.0) {
+                    sunFar *= exp(-u_farAtmo.rgb * (u_farAtmoK.x * 0.75 * airmassI(mu, 0.0)));
+                    ambFar += u_sunColor * u_farAtmo.rgb * (0.10 * smoothstep(-0.12, 0.25, mu));
+                }
+                vec3 ambNear = mix(u_ambientNight, u_ambientDay, v_day) * 2.2 + u_airL * (0.22 * v_day);
+                vec3 qd = (M * dv) * t;
+                cl = cloudShade(M * nw, u_cloudCam + qd, u_cloudCamB + cloudBank(qd), fpC, M * u_sunDir,
+                    mix(u_sunColor * v_sunT, sunFar, v_farW), mix(ambNear, ambFar, v_farW), cq > 0.0 ? 0.0 : 1.0);
+                // seen edge-on from inside the deck the sheet has no depth: it fades out there, into the fog
+                cl.a *= smoothstep(0.0, 250.0, abs(u_cloudGeo.x));
+            }
+        }
+        vec3 pf = u_camCentre + v_view;
+        float rf = length(pf);
+        float mus = dot(pf, u_sunDir) / rf;
+        float gap = u_cloud.z - rf;
+        if (mus > 0.02 && gap > 0.0) {
+            float ts = gap / max(mus, 0.12);
+            vec3 qs = M * (v_view + u_sunDir * ts);
+            cshadow = cloudShadow(M * normalize(pf + u_sunDir * ts), u_cloudCam + qs, u_cloudCamB + cloudBank(qs),
+                v_dist * u_cloudGeo.z, 1.0 - v_farW);
+        }
+    }
     float ndl = dot(N, u_sunDir);
     float diff = smoothstep(-0.07, 1.0, ndl);
-    vec3 sun = u_sunColor * v_sunT * diff;
+    vec3 sun = u_sunColor * v_sunT * (diff * cshadow);
     vec3 amb = mix(u_ambientNight, u_ambientDay, v_day);
     vec3 col = alb * (sun + amb);
     if (v_water > 0.01) {
@@ -325,12 +379,18 @@ void main() {
         float ndh = max(dot(N, Hh), 0.0);
         float schlick = pow(1.0 - max(dot(N, V), 0.0), 5.0);
         float fres = u_water.a * 0.35 + (1.0 - u_water.a * 0.35) * schlick;
-        vec3 glint = u_sunColor * v_sunT * (pow(ndh, 160.0) * 3.0 + pow(ndh, 18.0) * 0.06) * step(0.0, ndl);
+        vec3 glint = u_sunColor * v_sunT * ((pow(ndh, 160.0) * 3.0 + pow(ndh, 18.0) * 0.06) * step(0.0, ndl) * cshadow);
         col = mix(col, u_water.rgb * (0.25 + 0.75 * v_day), fres * v_water) + glint * v_water;
     }
+    col = mix(col, cl.rgb, cl.a);
     col = col * v_trans + v_inscatter;
     // the far look: what the impostor draws here (from orbit all of it: the hand-over is invisible)
-    if (v_farW > 0.001) col = mix(col, farLook(N, dirB, farFp), v_farW);
+    if (v_farW > 0.001) col = mix(col, farLook(N, dirB, farFp, cshadow, cl), v_farW);
+    if (u_cloudGeo.y > 0.0) {
+        // inside the deck: the cloud around the camera hides what is more than a few hundred metres away
+        vec3 fog = u_cloudCol.rgb * u_sunColor * (0.10 + 0.42 * v_day);
+        col = mix(col, fog, u_cloudGeo.y * (1.0 - exp(-v_dist * (1.0 / 160.0))));
+    }
     o_color = vec4(dither(tonemap(col)), u_fade);
     if (u_debug == 1) o_color = vec4(v_col, 1.0);
     else if (u_debug == 2) o_color = vec4(vec3(v_water), 1.0);

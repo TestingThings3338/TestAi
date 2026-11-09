@@ -232,6 +232,9 @@ class OrbitCamera {
     var pitch = 0.28f
     var distance = 25f
     var autoSpin = 0.06f
+
+    /** The pitch the idle camera drifts back to. */
+    var restPitch = 0.28f
     var idle = 10f
     private var yawVel = 0f
     private var pitchVel = 0f
@@ -259,7 +262,7 @@ class OrbitCamera {
         if (idle > 2.5f) {
             val k = clamp((idle - 2.5f) / 3f, 0f, 1f)
             yaw += autoSpin * dt * k
-            pitch += (0.28f - pitch) * expApproach(0.4f, dt) * k
+            pitch += (restPitch - pitch) * expApproach(0.4f, dt) * k
         }
     }
 

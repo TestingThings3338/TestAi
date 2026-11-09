@@ -69,6 +69,9 @@ interface Gl {
     fun bindTexture(target: Int, id: Int)
     fun activeTexture(unit: Int)
     fun texImage2D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, format: Int, type: Int, data: ByteBuffer?)
+
+    /** glTexImage3D (border 0): the tiling detail noise of the cloud deck. */
+    fun texImage3D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, d: Int, format: Int, type: Int, data: ByteBuffer?)
     fun texParameteri(target: Int, pname: Int, param: Int)
     fun generateMipmap(target: Int)
     fun pixelStorei(pname: Int, param: Int)
@@ -127,6 +130,7 @@ object GL {
     const val LINK_STATUS = 0x8B82
 
     const val TEXTURE_2D = 0x0DE1
+    const val TEXTURE_3D = 0x806F
     const val TEXTURE_CUBE_MAP = 0x8513
     const val TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515
     const val TEXTURE0 = 0x84C0
@@ -144,6 +148,8 @@ object GL {
     const val RED = 0x1903
     const val RGBA = 0x1908
     const val R8 = 0x8229
+    const val RG = 0x8227
+    const val RG8 = 0x822B
     const val RGBA8 = 0x8058
     const val UNPACK_ALIGNMENT = 0x0CF5
 

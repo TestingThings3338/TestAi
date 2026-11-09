@@ -151,6 +151,10 @@ class HeadlessGl(override val screenFramebuffer: Int, private val debug: Boolean
         GLES20.nglTexImage2D(target, level, internalFormat, w, h, 0, format, type, MemoryUtil.memAddressSafe(data))
         chk("glTexImage2D", internalFormat)
     }
+    override fun texImage3D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, d: Int, format: Int, type: Int, data: ByteBuffer?) {
+        org.lwjgl.opengles.GLES30.nglTexImage3D(target, level, internalFormat, w, h, d, 0, format, type, MemoryUtil.memAddressSafe(data))
+        chk("glTexImage3D", internalFormat)
+    }
     override fun texParameteri(target: Int, pname: Int, param: Int) { GLES20.glTexParameteri(target, pname, param); chk("glTexParameteri", pname) }
     override fun generateMipmap(target: Int) { GLES20.glGenerateMipmap(target); chk("glGenerateMipmap", target) }
     override fun pixelStorei(pname: Int, param: Int) { GLES20.glPixelStorei(pname, param); chk("glPixelStorei", pname) }

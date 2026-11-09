@@ -82,6 +82,7 @@ class NoopGl : Gl {
     override fun bindTexture(target: Int, id: Int) = c()
     override fun activeTexture(unit: Int) = c()
     override fun texImage2D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, format: Int, type: Int, data: ByteBuffer?) = c()
+    override fun texImage3D(target: Int, level: Int, internalFormat: Int, w: Int, h: Int, d: Int, format: Int, type: Int, data: ByteBuffer?) = c()
     override fun texParameteri(target: Int, pname: Int, param: Int) = c()
     override fun generateMipmap(target: Int) = c()
     override fun pixelStorei(pname: Int, param: Int) = c()
