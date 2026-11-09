@@ -310,10 +310,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * Flight: `fa [on|off]`, `boost`, `throttle v`, `stick x y` / `stick off` (held cursor, radius
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
-     * `undock`, `gear down|up|auto`, `ship [id]`. Places: `teleport x y z [lx ly lz]`, `near <body> [alt]`,
-     * `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`, `behind-station [i]`,
-     * `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next frame's step order into
-     * [frameTrace]), `branch deck|destroyed|flight`.
+     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
+     * `near <body> [alt]`, `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
+     * `behind-station [i]`, `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next
+     * frame's step order into [frameTrace]), `branch deck|destroyed|flight`.
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
@@ -841,6 +841,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "fov" -> num(1)?.let {
                 settings.fovDeg = it.toFloat()
                 settingsDirty = true
+            }
+            "quality" -> num(1)?.let {
+                settings.quality = it.toInt().coerceIn(0, 2)
+                settingsChanged(display = true, renderer = true)
             }
             "branch" -> if (s != null) when (arg) {
                 "deck" -> s.decks.begin()
