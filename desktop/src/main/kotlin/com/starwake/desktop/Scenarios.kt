@@ -51,6 +51,11 @@ object Scenarios {
             "Every StationMesh model through the lit shader + light glows, from several angles (no Game)",
         ) { StationsScenario.run(it) },
 
+        "station-collision" to Scenario(
+            "station-collision",
+            "Station collision proxies (CPU-traced, overlaid on the mesh) and routed auto-dock paths around both station models (no Game)",
+        ) { CollisionScenario.run(it) },
+
         "menu" to gameScenario("menu", "Main menu after 2 s") {
             frames(120)
             shot("menu")
