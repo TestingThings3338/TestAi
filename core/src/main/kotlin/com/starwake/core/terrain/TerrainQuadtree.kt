@@ -7,9 +7,10 @@ import kotlin.math.sqrt
 
 /**
  * The cube-sphere quadtree (§9.3): six roots, child blocks of four from a fixed node pool, split
- * when the camera is closer than ρ·edge to a tile and its four children are resident, merge beyond
- * 1.15·ρ·edge (hysteresis), horizon culling, residency in all directions (the frustum only matters
- * for drawing), children requested only for resident parents so the cover is always complete.
+ * when the camera is closer than ρ·edge to a tile and its four children can be drawn (resident, or
+ * evicted ancestors over resident children), merge beyond 1.15·ρ·edge (hysteresis), horizon
+ * culling, residency in all directions (the frustum only matters for drawing), children requested
+ * only for resident parents so the cover is always complete.
  *
  * Game thread only (the job system reads [jobState] under its own lock). [update] allocates nothing.
  *
@@ -242,22 +243,37 @@ class TerrainQuadtree(
             val n = stack[--sp]
             visited[n] = frame
             visitedCount++
-            if (slot[n] >= 0) inUse++
+            val resident = slot[n] >= 0
+            if (resident) inUse++
+            val c = child[n]
             if (beyondHorizon(n)) {
                 // nothing behind the planet is drawn or refined; a non-resident root is still wanted
-                if (slot[n] < 0 && level[n] == 0) want(n, 1e6f)
+                if (!resident) {
+                    if (level[n] == 0) {
+                        want(n, 1e6f)
+                    } else if (c >= 0 && sp + 4 <= stack.size) {
+                        // an evicted ancestor (its parent only descends into it while its children
+                        // cover it): those children are the cover and must stay resident, so they
+                        // are visited too; it comes back last, after everything in view
+                        stack[sp++] = c + 3
+                        stack[sp++] = c + 2
+                        stack[sp++] = c + 1
+                        stack[sp++] = c
+                        want(n, 1e6f)
+                    }
+                }
                 continue
             }
             val e = edge(level[n])
             val d = distance(n)
             val split = rho * e
             need[n] = (d / split).toFloat()
-            val c = child[n]
-            val childrenResident = c >= 0 && slot[c] >= 0 && slot[c + 1] >= 0 && slot[c + 2] >= 0 && slot[c + 3] >= 0
-            val resident = slot[n] >= 0
+            // the children can be drawn: each is resident, or an evicted ancestor whose own children are
+            val childrenCovered = c >= 0 && covered(c, COVER_DEPTH) && covered(c + 1, COVER_DEPTH) &&
+                covered(c + 2, COVER_DEPTH) && covered(c + 3, COVER_DEPTH)
             val wantSplit = level[n] < maxLevel && d < split
-            val keepSplit = childrenResident && d <= split * mergeFactor && level[n] < maxLevel
-            if (childrenResident && (wantSplit || keepSplit || !resident)) {
+            val keepSplit = childrenCovered && d <= split * mergeFactor && level[n] < maxLevel
+            if (childrenCovered && (wantSplit || keepSplit || !resident)) {
                 if (sp + 4 > stack.size) continue
                 stack[sp++] = c + 3
                 stack[sp++] = c + 2
@@ -268,7 +284,8 @@ class TerrainQuadtree(
                 continue
             }
             if (!resident) {
-                // not drawable: ask for it (a parent always covers it meanwhile, except the roots)
+                // not drawable: ask for it (only a root gets here: a parent descends into a child
+                // only while it is covered)
                 want(n, priority(n, d, e) * 0.5f)
                 continue
             }
@@ -295,6 +312,18 @@ class TerrainQuadtree(
             if (drawCount < drawList.size) drawList[drawCount++] = n
         }
         reclaimPending()
+    }
+
+    /**
+     * True when [n] can be drawn: it is resident, or (down to [depth] more levels) all four of its
+     * children can. An ancestor evicted under memory pressure ([evictForReserve]) is covered by its
+     * children, so its parent keeps descending through it and the cut below stays drawn.
+     */
+    private fun covered(n: Int, depth: Int): Boolean {
+        if (slot[n] >= 0) return true
+        if (depth <= 0) return false
+        val c = child[n]
+        return c >= 0 && covered(c, depth - 1) && covered(c + 1, depth - 1) && covered(c + 2, depth - 1) && covered(c + 3, depth - 1)
     }
 
     /** Horizon culling (§9.3) with the lowest possible surface as the occluder. */
@@ -459,9 +488,11 @@ class TerrainQuadtree(
     /**
      * Keeps [slotReserve] slots free (or pending): first by evicting the least recently visited
      * cached tiles (not part of this frame's tree), then, under memory pressure, ancestors of the
-     * cut whose merge is least imminent (their children stay drawn; a merge waits until the
-     * ancestor is rebuilt). Never a leaf of the cut, never a child waiting for its siblings.
-     * Returns the number evicted.
+     * cut whose merge is least imminent (their children stay drawn: [update] descends through an
+     * evicted ancestor while its children are resident; a merge waits until the ancestor is
+     * rebuilt). Never a leaf of the cut, never a child waiting for its siblings, never the child of
+     * an evicted ancestor (no chains: every evicted ancestor keeps a resident parent and four
+     * resident children). Returns the number evicted.
      */
     fun evictForReserve(): Int {
         var evicted = 0
@@ -508,17 +539,27 @@ class TerrainQuadtree(
     private val evictCand = IntArray(64)
     private val evictKey = LongArray(64)
 
-    /** The resident interior node of the current tree (all four children drawn or deeper) deepest inside its split range. */
+    /**
+     * The resident interior node of the current tree deepest inside its split range (ties: the
+     * finest, whose loss matters least): descended into this frame (its children were visited, so
+     * not a node behind the horizon, whose children are not drawn), all four children resident,
+     * its parent resident (so the next call cannot take the level below it as well), level ≥ 3.
+     */
     private fun interiorToEvict(): Int {
         var best = -1
         var bestNeed = Float.MAX_VALUE
+        var bestLevel = -1
         for (n in 0 until nodeCapacity) {
             if (!alive[n] || slot[n] < 0 || visited[n] != frame || cutFrame[n] == frame || level[n] < 3) continue
+            val p = parent[n]
+            if (p < 0 || slot[p] < 0) continue
             val c = child[n]
-            if (c < 0) continue
+            if (c < 0 || visited[c] != frame) continue
             if (slot[c] < 0 || slot[c + 1] < 0 || slot[c + 2] < 0 || slot[c + 3] < 0) continue
-            if (need[n] < bestNeed) {
-                bestNeed = need[n]
+            val nd = need[n]
+            if (nd < bestNeed || (nd == bestNeed && level[n] > bestLevel)) {
+                bestNeed = nd
+                bestLevel = level[n]
                 best = n
             }
         }
@@ -634,6 +675,13 @@ class TerrainQuadtree(
     companion object {
         const val WANTED_CAPACITY = 4096
         const val SLOT_REUSE_FRAMES = 3
+
+        /**
+         * Levels [covered] looks below a non-resident child. Evictions keep every evicted ancestor
+         * over four resident children, so one level suffices; the margin costs nothing when tiles
+         * are resident (the test stops at the first resident node).
+         */
+        const val COVER_DEPTH = 3
         const val PATH_HEIGHT = 1500.0
         const val PATH_SECONDS = 2.5
         const val NEAR_RADIUS = 640.0
