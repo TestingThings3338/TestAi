@@ -158,12 +158,13 @@ class BodyRenderer(private val gl: Gl, system: StarSystem, quality: Int, fullscr
     init {
         val disc = if (star >= 0) bodies[star].colour else 0xFFFFFF
         val corona = if (star >= 0) bodies[star].corona else 0xFFBE6E
-        discR = ((disc shr 16) and 0xFF) / 255f
-        discG = ((disc shr 8) and 0xFF) / 255f
-        discB = (disc and 0xFF) / 255f
-        coronaR = ((corona shr 16) and 0xFF) / 255f
-        coronaG = ((corona shr 8) and 0xFF) / 255f
-        coronaB = (corona and 0xFF) / 255f
+        // the data colours are sRGB; the shaders light in linear and gamma-encode in the tonemap
+        discR = srgbToLinear((disc shr 16) and 0xFF)
+        discG = srgbToLinear((disc shr 8) and 0xFF)
+        discB = srgbToLinear(disc and 0xFF)
+        coronaR = srgbToLinear((corona shr 16) and 0xFF)
+        coronaG = srgbToLinear((corona shr 8) and 0xFF)
+        coronaB = srgbToLinear(corona and 0xFF)
         if (star >= 0) {
             refDistance = system.lightReferenceDistance.coerceAtLeast(bodies[star].radius * 2.0)
             refStarAngle = asin(bodies[star].radius / refDistance)
