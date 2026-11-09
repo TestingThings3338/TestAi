@@ -120,9 +120,11 @@ class FlightModel(var spec: ShipSpec) {
      */
     fun step(s: ShipState, c: ControlInput, dt: Float, limit: Float = spec.maxSpeed): Boolean {
         val sp = spec
-        val vmax = maxOf(limit, sp.maxSpeed)
+        // a limit below the hull's normal top speed (landing mode) is a hard cap, boost included
+        val capped = limit < sp.maxSpeed
+        val vmax = limit
         // boost: the usual 400 m/s locally, +25 % on top of the dynamic limit in deep space
-        val boostTop = maxOf(sp.boostSpeed, vmax * 1.25f)
+        val boostTop = if (capped) vmax else maxOf(sp.boostSpeed, vmax * 1.25f)
         var boostStarted = false
         if (c.boost && s.boostTime <= 0f && s.capacitor >= sp.boostCost) {
             s.boostTime = sp.boostDuration
@@ -159,7 +161,7 @@ class FlightModel(var spec: ShipSpec) {
                 else -> -throttle * sp.maxReverse
             }
             // engines scale with the regime: ~4 s to reach any limit, braking proportional to speed
-            val fwdAccel = maxOf(sp.accelForward, vmax * 0.25f) * if (boosting) sp.boostAccelMultiplier else 1f
+            val fwdAccel = maxOf(sp.accelForward, vmax * 0.25f) * if (boosting && !capped) sp.boostAccelMultiplier else 1f
             // above manoeuvring speeds braking becomes proportional to speed (exponential slow-down)
             val fast = maxOf(0f, abs(local.z) - sp.boostSpeed)
             val brake = maxOf(sp.accelReverse, fast * 0.9f)
@@ -202,23 +204,33 @@ class FlightModel(var spec: ShipSpec) {
         return boostStarted
     }
 
-    /** Pushes the ship out of a sphere and bounces it. Returns the impact speed (0 = no contact). */
-    fun collideSphere(s: ShipState, cx: Double, cy: Double, cz: Double, radius: Float): Float {
-        val dx = (s.pos.x - cx).toFloat()
-        val dy = (s.pos.y - cy).toFloat()
-        val dz = (s.pos.z - cz).toFloat()
+    /**
+     * Pushes the ship out of a sphere and bounces it. Returns the impact speed (0 = no contact).
+     * Double precision throughout: planet radii are millions of metres.
+     */
+    fun collideSphere(s: ShipState, cx: Double, cy: Double, cz: Double, radius: Double): Float {
+        val dx = s.pos.x - cx
+        val dy = s.pos.y - cy
+        val dz = s.pos.z - cz
         val minDist = radius + spec.collisionRadius
         val d2 = dx * dx + dy * dy + dz * dz
         if (d2 >= minDist * minDist) return 0f
         val d = sqrt(d2)
         // exactly at the centre there is no direction to push along: pick "up"
-        val nx = if (d > 1e-4f) dx / d else 0f
-        val ny = if (d > 1e-4f) dy / d else 1f
-        val nz = if (d > 1e-4f) dz / d else 0f
-        val push = (minDist - d).toDouble()
-        s.pos.x += nx * push
-        s.pos.y += ny * push
-        s.pos.z += nz * push
+        if (d <= 1e-4) return resolveContact(s, 0f, 1f, 0f, minDist - d)
+        return resolveContact(s, (dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat(), minDist - d)
+    }
+
+    /**
+     * Resolves a contact: moves the ship [push] metres along the unit normal (nx, ny, nz) that
+     * points out of the obstacle, then bounces it. Returns the impact speed (0 if separating).
+     */
+    fun resolveContact(s: ShipState, nx: Float, ny: Float, nz: Float, push: Double): Float {
+        if (push > 0.0) {
+            s.pos.x += nx * push
+            s.pos.y += ny * push
+            s.pos.z += nz * push
+        }
         val vn = s.vel.dot(nx, ny, nz)
         if (vn >= 0f) return 0f
         // reflect the normal component with restitution, keep some tangential speed

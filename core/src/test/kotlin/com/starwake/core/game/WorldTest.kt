@@ -119,7 +119,7 @@ class AsteroidFieldTest {
             model.step(s, c, 1f / 60f)
             for (i in 0 until field.total) {
                 val hit = model.collideSphere(
-                    s, field.px[i] + field.origin.x, field.py[i] + field.origin.y, field.pz[i] + field.origin.z, field.radius[i],
+                    s, field.px[i] + field.origin.x, field.py[i] + field.origin.y, field.pz[i] + field.origin.z, field.radius[i].toDouble(),
                 )
                 assertEquals(0f, hit, "collided with asteroid $i at z=${s.pos.z}")
             }

@@ -766,7 +766,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             val d = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.collisionRadius
             if (d < nearest) nearest = d
             if (d < 0f) {
-                val impact = flight.collideSphere(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r)
+                val impact = flight.collideSphere(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r.toDouble())
                 if (impact > 2f && bumpCooldown <= 0f) {
                     bumpCooldown = 0.25f
                     haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)
@@ -1472,7 +1472,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 }
             }
         }
-        val impact = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius.toFloat())
+        val impact = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius)
         if (impact > 2f && bumpCooldown <= 0f) {
             bumpCooldown = 0.25f
             haptic(if (impact > 40f) Haptics.HEAVY else Haptics.BUMP)

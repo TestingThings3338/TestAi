@@ -430,11 +430,11 @@ class FlightModelTest {
     fun collideSphereIgnoresDistantSpheres() {
         val s = ship()
         s.vel.set(0f, 0f, -100f)
-        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -100.0, 50f))
+        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -100.0, 50.0))
         assertVec(0f, 0f, -100f, s.vel, 0f)
         assertEquals(0.0, s.pos.z)
         // exactly touching is not a contact
-        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -(50.0 + spec.collisionRadius), 50f))
+        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -(50.0 + spec.collisionRadius), 50.0))
     }
 
     @Test
@@ -442,7 +442,7 @@ class FlightModelTest {
         val s = ship()
         s.pos.set(0.0, 0.0, -5.0)
         s.vel.set(10f, 0f, -50f) // sliding forward into a rock ahead
-        val impact = model.collideSphere(s, 0.0, 0.0, -20.0, 10f)
+        val impact = model.collideSphere(s, 0.0, 0.0, -20.0, 10.0)
         assertNear(50f, impact, 1e-4f, "impact speed is the inward normal speed")
         val minDist = 10f + spec.collisionRadius
         assertNear(-20f + minDist, s.pos.z.toFloat(), 1e-4f, "pushed out to the surface")
@@ -450,7 +450,7 @@ class FlightModelTest {
         assertTrue(s.vel.z >= 0f, "no velocity into the rock may remain: ${s.vel}")
         assertNear(10f * 0.8f, s.vel.x, 1e-4f, "tangential speed is damped, not removed")
         // a second call at the surface is no longer a contact
-        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -20.0, 10f))
+        assertEquals(0f, model.collideSphere(s, 0.0, 0.0, -20.0, 10.0))
     }
 
     @Test
@@ -458,7 +458,7 @@ class FlightModelTest {
         val s = ship()
         s.pos.set(3.0, 4.0, 0.0)
         s.vel.set(1f, 0f, 0f)
-        val impact = model.collideSphere(s, 0.0, 0.0, 0.0, 5f)
+        val impact = model.collideSphere(s, 0.0, 0.0, 0.0, 5.0)
         assertEquals(0f, impact, "moving away is not an impact")
         val d = kotlin.math.sqrt(s.pos.x * s.pos.x + s.pos.y * s.pos.y + s.pos.z * s.pos.z)
         assertNear(5f + spec.collisionRadius, d.toFloat(), 1e-4f, "still pushed out along the contact normal")
@@ -470,7 +470,7 @@ class FlightModelTest {
         val s = ship()
         s.pos.set(100.0, 0.5, -0.25) // almost at the centre of a 60 m rock
         s.vel.set(0f, -30f, 0f)
-        model.collideSphere(s, 100.0, 0.0, 0.0, 60f)
+        model.collideSphere(s, 100.0, 0.0, 0.0, 60.0)
         val dx = s.pos.x - 100.0
         val d = kotlin.math.sqrt(dx * dx + s.pos.y * s.pos.y + s.pos.z * s.pos.z)
         assertNear(60f + spec.collisionRadius, d.toFloat(), 1e-3f)
@@ -481,7 +481,7 @@ class FlightModelTest {
     fun collideSphereResolvesTheExactCentre() {
         val s = ship()
         s.pos.set(10.0, 20.0, 30.0)
-        model.collideSphere(s, 10.0, 20.0, 30.0, 20f)
+        model.collideSphere(s, 10.0, 20.0, 30.0, 20.0)
         val dx = s.pos.x - 10.0
         val dy = s.pos.y - 20.0
         val dz = s.pos.z - 30.0
@@ -496,7 +496,7 @@ class FlightModelTest {
             s.rot.set(r)
             r.rotate(0f, -50f, 0f, s.vel) // falling onto a rock below the ship (in ship space)
             val c = r.rotate(0f, -15f, 0f, Vec3()) // 15 m < 10 m rock + 6.2 m ship
-            model.collideSphere(s, c.x.toDouble(), c.y.toDouble(), c.z.toDouble(), 10f)
+            model.collideSphere(s, c.x.toDouble(), c.y.toDouble(), c.z.toDouble(), 10.0)
             return Vec3().set(s.angVel)
         }
         val a = knock(Quat())
@@ -541,5 +541,30 @@ class FlightModelTest {
         c.clearAxes()
         assertEquals(0.7f, c.throttle)
         assertTrue(c.pitch == 0f && c.yaw == 0f && c.roll == 0f && c.strafeX == 0f && c.strafeY == 0f && !c.boost)
+    }
+
+    @Test
+    fun aLimitBelowTopSpeedIsAHardCapEvenWhileBoosting() {
+        val s = ShipState()
+        val c = ControlInput().also { it.throttle = 1f }
+        repeat(60 * 6) { model.step(s, c, 1f / 60f, 200f) }
+        assertTrue(s.speed <= 200.01f, "throttle ${s.speed}")
+        c.boost = true
+        repeat(60 * 3) {
+            model.step(s, c, 1f / 60f, 200f)
+            c.boost = false
+            assertTrue(s.speed <= 200.01f, "boost ${s.speed}")
+        }
+    }
+
+    @Test
+    fun planetSizedSpheresHoldThePilotAtExactlyTheCollisionRadius() {
+        // 6000 km radius: Float maths would be off by metres here
+        val r = 6.0e6
+        val s = ShipState()
+        s.pos.set(0.0, r + 3.0, 0.0)
+        s.vel.set(0f, -20f, 0f)
+        model.collideSphere(s, 0.0, 0.0, 0.0, r)
+        assertEquals(r + spec.collisionRadius, s.pos.y, 1e-6)
     }
 }

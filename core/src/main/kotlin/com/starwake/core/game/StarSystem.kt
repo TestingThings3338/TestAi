@@ -157,6 +157,8 @@ class StarSystem {
         var bodyDistance = 0.0 // to centre
         var altitude = 0.0 // to surface
         var radialSpeed = 0f // + moving away from the nearest body
+        /** radialSpeed / speed: -1 straight down, 0 level, +1 straight up. */
+        var radialFraction = 0f
         var nearestStation = -1
         var stationDistance = 0.0
         var zone = Zone.OPEN_SPACE
@@ -206,6 +208,8 @@ class StarSystem {
         } else {
             out.radialSpeed = 0f
         }
+        val spd = vel.length()
+        out.radialFraction = if (spd > 1f) (out.radialSpeed / spd).coerceIn(-1f, 1f) else 0f
         var st = -1
         var stD = Double.MAX_VALUE
         for (i in stations.indices) {
@@ -239,12 +243,15 @@ class StarSystem {
 
     /**
      * Dynamic speed: the limit grows with distance from the nearest surface (or station), faster
-     * when departing than when approaching, from [localMax] up to [MAX_SPEED] (3 Mm/s).
+     * when departing than when approaching, from [localMax] up to [MAX_SPEED] (3 Mm/s). The rate
+     * blends smoothly with the heading (level flight gets the mean), so a small pitch change
+     * never makes the limit jump.
      */
     fun speedLimit(l: Locality, localMax: Float): Float {
         val clearance = minOf(l.altitude, l.stationDistance - STATION_CLEARANCE)
         if (clearance <= 0.0) return localMax
-        val k = if (l.radialSpeed >= 0f) DEPART_RATE else APPROACH_RATE
+        val t = ((l.radialFraction + RATE_BLEND) / (2f * RATE_BLEND)).coerceIn(0f, 1f)
+        val k = APPROACH_RATE + (DEPART_RATE - APPROACH_RATE) * (t * t * (3f - 2f * t))
         return (clearance * k).toFloat().coerceIn(localMax, MAX_SPEED)
     }
 
@@ -256,6 +263,8 @@ class StarSystem {
         const val MAX_SPEED = 3.0e6f
         const val DEPART_RATE = 0.6
         const val APPROACH_RATE = 0.32
+        /** Heading (radial fraction) over which the rate blends from approach to depart: ±~17°. */
+        const val RATE_BLEND = 0.3f
         const val STATION_ZONE_RADIUS = 8000.0
         const val STATION_CLEARANCE = 4000.0
         const val LOW_ALTITUDE = 60_000.0

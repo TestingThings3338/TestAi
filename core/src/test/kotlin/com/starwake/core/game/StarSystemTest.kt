@@ -105,4 +105,21 @@ class StarSystemTest {
         assertTrue(t < 12f, "took $t s to slow from 3 Mm/s")
         assertTrue(s.speed <= local * 1.01f)
     }
+
+    @Test
+    fun aSmallHeadingChangeNeverMakesTheLimitJump() {
+        val giant = system.bodies[1]
+        val p = at(giant.pos.x, giant.pos.y + giant.radius + 2e6, giant.pos.z)
+        var last = -1f
+        // sweep the heading from 6 deg up to 6 deg down at 1.2 Mm/s, in 0.5 deg steps
+        var deg = 6.0
+        while (deg >= -6.0) {
+            val a = Math.toRadians(deg)
+            val v = Vec3((kotlin.math.cos(a) * 1.2e6).toFloat(), (kotlin.math.sin(a) * 1.2e6).toFloat(), 0f)
+            val lim = system.locate(p, v, local, StarSystem.Locality()).speedLimit
+            if (last > 0f) assertTrue(kotlin.math.abs(lim - last) / last < 0.05f, "jump at $deg deg: $last -> $lim")
+            last = lim
+            deg -= 0.5
+        }
+    }
 }
