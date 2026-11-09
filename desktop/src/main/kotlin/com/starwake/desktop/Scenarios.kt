@@ -118,6 +118,56 @@ object Scenarios {
             shot("sys-docked")
         },
 
+        "gameplay" to gameScenario("gameplay", "Checks: land, touch down, take off; Back twice while docked; boost during auto-dock; off-screen lock arrow") {
+            fun info() = game.debugInfo.also { log(it) }
+            fun field(name: String) = Regex("$name=([^ ]+)").find(game.debugInfo)!!.groupValues[1]
+            cmd("launch")
+            frames(30)
+            // off-screen lock: OUTPOST II is far away and not in view at spawn -> edge arrow
+            cmd("lock-outpost")
+            frames(10)
+            shot("gp-lock-arrow")
+            cmd("lock-outpost")
+            // --- landing: 60 m above PLANET II, LAND, hold the down thruster until touchdown
+            cmd("teleport-surface")
+            frames(2)
+            cmd("action")
+            frames(140) // gear legs + doors
+            check(field("landing") == "true") { "landing mode not engaged: ${info()}" }
+            val down = touchLayout.downBtn
+            val p = pointer(3).down(down.cx, down.y + down.h * 0.5f)
+            var n = 0
+            while (field("landed") != "true" && n < 60 * 20) { frame(); n++ }
+            p.up()
+            info()
+            check(field("landed") == "true") { "never touched down: ${info()}" }
+            frames(30)
+            shot("gp-landed")
+            // --- take off with the action button: must leave the ground and stay up
+            cmd("action")
+            frames(90)
+            info()
+            check(field("landed") == "false") { "re-landed right after take-off: ${info()}" }
+            check(field("alt").toFloat() > 20f) { "take-off did not climb: ${info()}" }
+            shot("gp-liftoff")
+            // --- docked: Back twice (pause, then resume) must return to the docked screen
+            cmd("menu"); frames(5); cmd("launch"); frames(5)
+            cmd("docked")
+            frames(30)
+            cmd("boost") // pressed during the slide-in: must not latch
+            frames(400)
+            check(game.stateName == "docked") { "not docked: ${info()}" }
+            back(); frames(5)
+            check(game.stateName == "paused") { "back did not pause: ${info()}" }
+            back(); frames(5)
+            check(game.stateName == "docked") { "resume left the docked screen: ${info()}" }
+            game.launchFromStation()
+            frames(10)
+            info()
+            check(field("boosting") == "false") { "latched boost fired on launch: ${info()}" }
+            shot("gp-launched")
+        },
+
         "boost" to gameScenario("boost", "Flight with throttle up, then boost") {
             cmd("launch")
             frames(60)

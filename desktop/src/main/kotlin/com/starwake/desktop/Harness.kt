@@ -157,7 +157,7 @@ class GameDriver(
      * settings and this surface, so scripted touches can be checked against the button rects
      * (VIEW, LOCK, pause, up/down thrusters, BOOST, FA) instead of trusting hard-coded fractions.
      */
-    private val touchLayout = TouchFlightControls(
+    val touchLayout = TouchFlightControls(
         game.settings,
         object : UiHost {
             override fun haptic(type: Int) {}

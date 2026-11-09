@@ -71,6 +71,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     override val deviceInfo: String get() = platform.deviceInfo
 
+    /** Harness/test read-out of the flight state (allocates; never called per frame by the game). */
+    val debugInfo: String
+        get() = "state=$stateName landed=$landed landing=$landing docking=$docking docked=$docked " +
+            "alt=${"%.1f".format(here.altitude - spec.collisionRadius)} speed=${"%.1f".format(ship.speed)} " +
+            "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex"
+
     // ------------------------------------------------------------------ state
     private var state = STATE_MENU
     private var overlay = OVERLAY_NONE
@@ -130,6 +136,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private var landing = false
     private var landed = false
     private var landedBody = -1
+    /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
+    private var liftTime = 0f
     private var gear = 0f
     private var message: String? = null
     private var messageTime = 0f
@@ -140,6 +148,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     // docking (K): automatic approach into the slot, then the docked screen
     private var docking = false
+    /** Parked in a slot: pause/resume returns to the docked screen, not free flight. */
+    private var docked = false
     private var dockStation = -1
     private var dockPhase = 0 // 0 approach point, 1 slide into the slot
     private val dockPos = com.starwake.core.math.DVec3()
@@ -244,16 +254,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     /** First run only: weak GPUs start on LOW (resolution scale, fewer effects, smaller bakes). */
     private fun pickDefaultQuality(renderer: String) {
         val r = renderer.lowercase()
-        val adreno = Regex("adreno[^0-9]*([0-9]{3})").find(r)?.groupValues?.get(1)?.toIntOrNull()
-        val weak = when {
-            adreno != null -> adreno < 610
-            r.contains("mali-t") || r.contains("mali-4") -> true
-            Regex("mali-g(3[0-9]|5[0-9]|6[0-9])").containsMatchIn(r) -> true
-            r.contains("powervr") -> true
-            else -> false
-        }
-        val mid = adreno != null && adreno < 700 || Regex("mali-g(7[0-9])").containsMatchIn(r)
-        settings.quality = if (weak) 0 else if (mid) 1 else 2
+        settings.quality = defaultQuality(renderer)
         settingsDirty = true
     }
 
@@ -336,6 +337,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 "lock" -> if (state == STATE_FLIGHT) toggleLock()
                 "action" -> if (state == STATE_FLIGHT) doAction()
                 "teleport-low" -> if (state == STATE_FLIGHT) debugTeleportLow()
+                "teleport-surface" -> if (state == STATE_FLIGHT) {
+                    debugTeleportLow()
+                    debugDrop(60.0)
+                }
+                "lock-outpost" -> if (state == STATE_FLIGHT) lockFromMap(LOCK_STATION, 1)
                 "dock" -> if (state == STATE_FLIGHT) requestDocking(0)
                 "docked" -> if (state == STATE_FLIGHT) {
                     requestDocking(0)
@@ -358,6 +364,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             onBack()
         }
         // gamepad buttons that act like system navigation
+        if (overlay == OVERLAY_DOCKED &&
+            (gamepad.consumePress(GamepadState.A) || gamepad.consumePress(GamepadState.START))
+        ) launchFromStation()
         if (gamepad.consumePress(GamepadState.START)) {
             if (state == STATE_FLIGHT) {
                 if (overlay == OVERLAY_PAUSE) resume() else if (overlay == OVERLAY_NONE) openPause()
@@ -460,7 +469,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     override fun resume() {
         if (state == STATE_FLIGHT) {
-            overlay = OVERLAY_NONE
+            overlay = if (docked) OVERLAY_DOCKED else OVERLAY_NONE
             screenChanged()
         }
     }
@@ -552,6 +561,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         landing = false
         landed = false
         docking = false
+        docked = false
+        liftTime = 0f
         gear = 0f
         message = null
         screenChanged()
@@ -564,6 +575,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         controls.clearAxes()
         orbit.idle = 10f
         lockKind = LOCK_NONE
+        docked = false
         screenChanged()
     }
 
@@ -627,6 +639,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
             updateGear(dt)
             if (landed) holdLanded(dt)
+            // landing mode: the vertical thrusters give a gentle, safe descent rate
+            if (landing && !landed) controls.strafeY *= LANDING_VERTICAL
+            if (liftTime > 0f) {
+                liftTime -= dt
+                controls.strafeY = maxOf(controls.strafeY, 1f)
+            }
             if (docking) {
                 updateDocking(dt)
                 if (docking && (abs(touch.pitch) > 0.5f || abs(touch.roll) > 0.5f || abs(touch.yaw) > 0.5f)) {
@@ -648,6 +666,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 collide(h)
                 collideBodies(h)
             }
+            // a press while landed, docking or as an overlay opens is dropped, not latched
+            controls.boost = false
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
             if (landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
                 landing = false
@@ -958,6 +978,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun takeOff() {
         if (!landed) return
         landed = false
+        // leave landing mode: otherwise the touchdown test re-lands the ship on the next substep
+        landing = false
+        liftTime = LIFT_TIME
         val b = system.bodies[landedBody]
         upV.set(
             (ship.pos.x - b.pos.x).toFloat(), (ship.pos.y - b.pos.y).toFloat(), (ship.pos.z - b.pos.z).toFloat(),
@@ -985,6 +1008,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
         ship.vel.zero()
         ship.angVel.zero()
+        ship.speed = 0f
+        ship.forwardSpeed = 0f
         // settle level: keep the heading, align the ship's up with the surface normal
         ship.rot.rotate(0f, 0f, -1f, fwdV)
         fwdV.addScaled(upV, -fwdV.dot(upV))
@@ -1016,6 +1041,27 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ship.rot.lookRotation(fwdV.x - upV.x * 0.25f, fwdV.y - upV.y * 0.25f, fwdV.z - upV.z * 0.25f, upV.x, upV.y, upV.z)
         ship.vel.zero()
         touch.throttle = 0.2f
+        chase.snapTo(ship)
+        dustOrigin.set(ship.pos)
+    }
+
+    /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
+    private fun debugDrop(alt: Double) {
+        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        val b = system.bodies[here.nearestBody]
+        val dx = ship.pos.x - b.pos.x
+        val dy = ship.pos.y - b.pos.y
+        val dz = ship.pos.z - b.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        val r = b.radius + spec.collisionRadius + alt
+        ship.pos.set(b.pos.x + dx / d * r, b.pos.y + dy / d * r, b.pos.z + dz / d * r)
+        upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
+        ship.rot.rotate(0f, 0f, -1f, fwdV)
+        fwdV.addScaled(upV, -fwdV.dot(upV)).normalize()
+        ship.rot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
+        ship.vel.zero()
+        ship.angVel.zero()
+        touch.throttle = 0f
         chase.snapTo(ship)
         dustOrigin.set(ship.pos)
     }
@@ -1106,10 +1152,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 ui.text(unit, x + bw * 0.5f - 6f * u + tw * 0.5f + 3f * u, cy + 4f * u, 8f * u, col)
             }
         }
-        // vertical speed under the ALT box
+        // vertical speed under the ALT box, total speed under the PITCH box (touchdown limits)
         val vs = ship.vel.dot(upV)
         buf.clear().append(vs, 1).append(" M/S")
-        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs < -TOUCHDOWN_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
+        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs <= -TOUCHDOWN_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
+        buf.clear().append(ship.speed, 0).append(" M/S")
+        ui.text(buf, lx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (ship.speed >= TOUCHDOWN_MAX_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
         drawGear(ui, a)
     }
 
@@ -1195,8 +1243,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             showMessage("ENTERING SLOT")
         } else if (dockPhase == 1 && d < 2.0) {
             docking = false
+            docked = true
             ship.vel.zero()
             touch.throttle = 0f
+            controls.clearAxes()
             overlay = OVERLAY_DOCKED
             touch.releaseAll()
             screenChanged()
@@ -1214,7 +1264,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
         ship.vel.set(dockDir).scale(60f)
         touch.throttle = 0.3f
+        controls.clearAxes()
         chase.snapTo(ship)
+        docked = false
         overlay = OVERLAY_NONE
         screenChanged()
         showMessage("LAUNCHED  ·  " + system.stations[dockStation].name)
@@ -1227,7 +1279,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * Writes [aimKind]/[aimIndex]; the score is the angle off the nose minus the target's
      * angular radius, so big bodies are easy to pick.
      */
-    private fun findAimed(maxAngleCos: Float) {
+    private fun findAimed(maxAngleCos: Float, maxAngleSin: Float) {
         aimKind = LOCK_NONE
         aimIndex = -1
         ship.rot.rotate(0f, 0f, -1f, tmp)
@@ -1239,7 +1291,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 val dx = field.origin.x + field.px[i] - ship.pos.x
                 val dy = field.origin.y + field.py[i] - ship.pos.y
                 val dz = field.origin.z + field.pz[i] - ship.pos.z
-                val score = aimScore(dx, dy, dz, field.radius[i].toDouble(), maxAngleCos, LOCK_RANGE.toDouble())
+                val score = aimScore(dx, dy, dz, field.radius[i].toDouble(), maxAngleCos, maxAngleSin, LOCK_RANGE.toDouble())
                 if (score < bestScore) {
                     bestScore = score; aimKind = LOCK_ASTEROID; aimIndex = i
                 }
@@ -1247,14 +1299,14 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         }
         for (i in system.stations.indices) {
             val st = system.stations[i]
-            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, Double.MAX_VALUE)
+            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
             if (score < bestScore) {
                 bestScore = score; aimKind = LOCK_STATION; aimIndex = i
             }
         }
         for (i in system.bodies.indices) {
             val b = system.bodies[i]
-            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, Double.MAX_VALUE)
+            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
             if (score < bestScore) {
                 bestScore = score; aimKind = LOCK_BODY; aimIndex = i
             }
@@ -1262,10 +1314,21 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     /** Angle (radians) between the nose ([tmp]) and the target's edge; MAX_VALUE if not eligible. */
-    private fun aimScore(dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, range: Double): Float {
+    private fun aimScore(
+        dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, maxAngleSin: Float, range: Double,
+    ): Float {
+        if (range < Double.MAX_VALUE) {
+            // cheap box reject before the square root (asteroids: most are out of range)
+            val reach = range + radius
+            if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) return Float.MAX_VALUE
+        }
         val d = sqrt(dx * dx + dy * dy + dz * dz)
         if (d < 1.0 || d - radius > range) return Float.MAX_VALUE
         val cos = ((dx * tmp.x + dy * tmp.y + dz * tmp.z) / d).toFloat()
+        // exact trig-free test for "angle - angular radius > cone": cos(angle) < cos(cone + angRadius)
+        // (valid because cone + angRadius < 180°)
+        val sr = minOf(1.0, radius / d).toFloat()
+        if (cos < maxAngleCos * sqrt(1f - sr * sr) - maxAngleSin * sr) return Float.MAX_VALUE
         val angle = kotlin.math.acos(clamp(cos, -1f, 1f))
         val angRadius = kotlin.math.asin(minOf(1.0, radius / d)).toFloat()
         val off = maxOf(0f, angle - angRadius)
@@ -1280,7 +1343,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             haptic(Haptics.TICK)
             return
         }
-        findAimed(LOCK_CONE_COS)
+        findAimed(LOCK_CONE_COS, LOCK_CONE_SIN)
         lockKind = aimKind
         lockIndex = aimIndex
         haptic(if (lockKind != LOCK_NONE) Haptics.TICK else Haptics.BUMP)
@@ -1348,7 +1411,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * shown only for the locked target, or the one the nose is aimed at when nothing is locked.
      */
     private fun drawTargets(ui: UiRenderer, a: Float) {
-        findAimed(AIM_CONE_COS)
+        // toggleLock runs its own wider search, so nothing needs the aim while a target is locked
+        if (lockKind == LOCK_NONE) findAimed(AIM_CONE_COS, AIM_CONE_SIN) else { aimKind = LOCK_NONE; aimIndex = -1 }
         val showKind = if (lockKind != LOCK_NONE) lockKind else aimKind
         val showIndex = if (lockKind != LOCK_NONE) lockIndex else aimIndex
         for (i in system.stations.indices) drawMarker(ui, a, LOCK_STATION, i, showKind, showIndex)
@@ -1359,12 +1423,17 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun drawMarker(ui: UiRenderer, a: Float, kind: Int, i: Int, showKind: Int, showIndex: Int) {
         val cam = sceneFrame.camera
         targetRel(kind, i, cam.pos, tmp)
-        if (!cam.project(tmp.x, tmp.y, tmp.z, screenPt)) return
+        val locked = kind == lockKind && i == lockIndex
+        val onScreen = cam.project(tmp.x, tmp.y, tmp.z, screenPt)
         val u = frame.u
         val x = screenPt.x
         val y = screenPt.y
-        if (x < -50f || y < -50f || x > frame.w + 50f || y > frame.h + 50f) return
-        val locked = kind == lockKind && i == lockIndex
+        val inside = onScreen && x >= 0f && y >= 0f && x <= frame.w && y <= frame.h
+        if (!inside) {
+            // the locked target always shows where it is: an arrow on the screen edge
+            if (locked) drawLockArrow(ui, a, kind, i)
+            return
+        }
         val shown = kind == showKind && i == showIndex
         // hidden behind a planet: no marker (the lock brackets still show where it is)
         if (!locked && hiddenBehindBody(kind, i)) return
@@ -1374,7 +1443,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // a body filling the view needs no marker (the zone label names it)
         if (screenR > frame.h * 0.35f && !locked) return
         if (locked) {
-            val half = maxOf(screenR * 1.05f, 16f * u)
+            // big bodies: keep the brackets and the distance readable on screen
+            val half = minOf(maxOf(screenR * 1.05f, 16f * u), 0.42f * min(frame.w, frame.h))
             val arm = maxOf(half * 0.3f, 8f * u)
             val col = withAlpha(Theme.LOCK, a)
             val w = 2f * u
@@ -1386,13 +1456,59 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 ui.line(px, py, px - sxv * arm, py, w, col)
                 ui.line(px, py, px, py - syv * arm, w, col)
             }
-            labelAndDistance(ui, a, kind, i, x, y + half + 16f * u, col, true, dist)
+            val ly = minOf(y + half + 16f * u, frame.h - frame.sb - 64f * u)
+            labelAndDistance(ui, a, kind, i, x, ly, col, true, dist)
         } else if (kind != LOCK_ASTEROID) {
             val col = withAlpha(if (kind == LOCK_STATION) Theme.ACCENT else Theme.TEXT, a * 0.85f)
             val r = maxOf(screenR, 5f * u)
             ui.circle(x, y, r, col, 1.2f * u)
             labelAndDistance(ui, a, kind, i, x, y + r + 13f * u, col, shown, dist)
         }
+    }
+
+    /**
+     * Amber chevron on an ellipse near the screen edge, pointing towards the locked target ([tmp]
+     * = target relative to the camera), with its name and distance just inside it.
+     */
+    private fun drawLockArrow(ui: UiRenderer, a: Float, kind: Int, i: Int) {
+        val cam = sceneFrame.camera
+        val u = frame.u
+        // view-space direction (camera looks down -Z, +Y up); screen y grows downwards
+        cam.rot.rotateInverse(tmp, tmp2)
+        var dx = tmp2.x
+        var dy = -tmp2.y
+        val len = sqrt(dx * dx + dy * dy)
+        if (len < 1e-6f * (abs(tmp2.z) + 1f)) {
+            dx = 0f; dy = 1f // dead astern: point down
+        } else {
+            dx /= len; dy /= len
+        }
+        // a ring around the crosshair, clear of the control columns at the screen edges
+        val cx = frame.w * 0.5f
+        val cy = frame.h * 0.5f
+        val ex = cx + dx * frame.w * 0.27f
+        val ey = cy + dy * frame.h * 0.36f
+        val col = withAlpha(Theme.LOCK, a)
+        // chevron: tip at (ex, ey), arms swept back ±40°
+        val hl = 16f * u
+        val bx = -dx
+        val by = -dy
+        val c = 0.766f
+        val sn = 0.643f
+        ui.line(ex, ey, ex + (bx * c - by * sn) * hl, ey + (bx * sn + by * c) * hl, 3f * u, col)
+        ui.line(ex, ey, ex + (bx * c + by * sn) * hl, ey + (-bx * sn + by * c) * hl, 3f * u, col)
+        // name + distance: inward beside a side arrow, to the right of a top/bottom one (the
+        // message line sits under the top of the ring)
+        val lx: Float
+        val ly: Float
+        if (abs(dx) > 0.6f) {
+            lx = ex - dx * 64f * u
+            ly = ey - 4f * u
+        } else {
+            lx = ex + 58f * u
+            ly = ey - 2f * u
+        }
+        labelAndDistance(ui, a, kind, i, lx, ly, col, true, targetDistance(kind, i))
     }
 
     private fun labelAndDistance(ui: UiRenderer, a: Float, kind: Int, i: Int, x: Float, y: Float, col: Int, withDistance: Boolean, dist: Double) {
@@ -1458,17 +1574,28 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 val radial = ship.vel.dot(upV)
                 ship.rot.rotate(0f, 1f, 0f, tmp)
                 val level = tmp.dot(upV)
-                if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > 0.8f && ship.speed < 40f) {
-                    landed = true
-                    landedBody = i
-                    ship.vel.zero()
-                    ship.angVel.zero()
-                    touch.throttle = 0f
-                    haptic(Haptics.BUMP)
-                    showMessage("TOUCHDOWN  ·  " + b.name)
-                    return
-                } else if (radial < -TOUCHDOWN_SPEED || gear < 1f) {
-                    showMessage(if (gear < 1f) "GEAR NOT DOWN" else "HARD LANDING")
+                if (radial < 0.5f) {
+                    if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
+                        landed = true
+                        landedBody = i
+                        ship.vel.zero()
+                        ship.angVel.zero()
+                        touch.throttle = 0f
+                        // a thumb still on the throttle lever must not lift off by accident
+                        touch.releaseAll()
+                        controls.clearAxes()
+                        haptic(Haptics.BUMP)
+                        showMessage("TOUCHDOWN  ·  " + b.name)
+                        return
+                    }
+                    showMessage(
+                        when {
+                            gear < 1f -> "GEAR NOT DOWN"
+                            radial <= -TOUCHDOWN_SPEED -> "HARD LANDING"
+                            ship.speed >= TOUCHDOWN_MAX_SPEED -> "TOO FAST  ·  TOUCH DOWN BELOW 40 M/S"
+                            else -> "LEVEL OUT TO TOUCH DOWN"
+                        },
+                    )
                 }
             }
         }
@@ -1555,6 +1682,33 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     companion object {
+        /**
+         * First-run quality from the GL_RENDERER string: 0 LOW for weak GPUs, 1 MEDIUM, 2 HIGH.
+         * Model numbers are compared as numbers (a prefix match would put a Mali-G610 with the
+         * old G61).
+         */
+        internal fun defaultQuality(renderer: String): Int {
+            val r = renderer.lowercase()
+            val adreno = Regex("adreno[^0-9]*([0-9]{3})(?![0-9])").find(r)?.groupValues?.get(1)?.toIntOrNull()
+            // Mali/Immortalis: two digits (G31..G78) or three (G310..G925)
+            val mali = Regex("(?:mali|immortalis)-g([0-9]{2,3})(?![0-9])").find(r)?.groupValues?.get(1)?.toIntOrNull()
+            val weak = when {
+                // Adreno 5xx and the entry 6xx parts (605..613)
+                adreno != null -> adreno < 615
+                r.contains("mali-t") || r.contains("mali-4") -> true
+                mali != null -> if (mali < 100) mali < 70 else mali < 600 // G31..G68, G310, G510
+                r.contains("powervr") -> true
+                else -> false
+            }
+            val mid = when {
+                // 6xx, and the lower tiers of later generations (710, 720, 810)
+                adreno != null -> adreno < 700 || adreno % 100 < 25
+                mali != null -> if (mali < 100) mali < 80 else mali < 700 // G71..G78, G610..G625
+                else -> false
+            }
+            return if (weak) 0 else if (mid) 1 else 2
+        }
+
         private const val STATE_MENU = 0
         private const val STATE_FLIGHT = 1
         private const val OVERLAY_NONE = 0
@@ -1569,7 +1723,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val ORBIT_PX_PER_RAD = 260f
         private const val LOCK_RANGE = 8000f
         private const val LOCK_CONE_COS = 0.951f // 18°
+        private const val LOCK_CONE_SIN = 0.30920f // sqrt(1 - LOCK_CONE_COS²)
         private const val AIM_CONE_COS = 0.9986f // 3°
+        private const val AIM_CONE_SIN = 0.052896f
         private const val LOCK_NONE = 0
         private const val LOCK_ASTEROID = 1
         private const val LOCK_STATION = 2
@@ -1578,6 +1734,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val DUST_VISUAL_SPEED = 400f
         private const val LANDING_SPEED = 200f
         private const val TOUCHDOWN_SPEED = 8f
+        private const val TOUCHDOWN_MAX_SPEED = 40f
+        /** cos of the largest tilt from level that still touches down (~37°). */
+        private const val TOUCHDOWN_LEVEL = 0.8f
+        private const val LIFT_TIME = 1.2f
+        /** Vertical thruster authority in landing mode: 0.1 x 70 m/s = a 7 m/s descent, under the touchdown limit. */
+        private const val LANDING_VERTICAL = 0.1f
         private const val GEAR_LEGS = 1.6f
         private const val GEAR_TIME = 2.2f
         private const val DOCK_STANDOFF = 300.0
