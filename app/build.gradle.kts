@@ -13,8 +13,8 @@ android {
         applicationId = "com.afloiddev.spaceexploration"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 7
+        versionName = "0.7"
     }
 
     // One committed dev key for both variants, so debug and release builds install over each other.
