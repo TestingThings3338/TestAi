@@ -11,11 +11,14 @@ revisited.
    world builder; `SolData` stays in Roblox studs verbatim). Earth is 6,360 km, Luna orbits at
    384,000 km, and every sky angle stays as in Roblox (03-world.md, Appendix B.6 for what scales
    and what stays absolute).
-2. **One speed law, scale-free:** `limit = MaxSpeed + gap / T(cos)` all the way down, with
-   T = 2.5 s approaching and 1.0 s departing (blended by the radial fraction as today), and a
-   **cap of 0.5 c (150 Mm/s)**. The Roblox inner mass-shadow law, `MassShadowFloor` and the
-   2.2·Rc approach zone are replaced by it. Target: planet-to-planet trips of about 1 minute
-   (03-world.md B.3: 52-89 s).
+2. **Speed law: 02-flight.md's S-classified law.** Split `Thrust.MaxSpeed` into an absolute
+   1000 m/s (throttle map, limit tracking, brake threshold, HUD, audio) and a scaled shadow
+   ceiling (1000·S). Far-field distances, speeds and accelerations scale ×S (shadow ceiling,
+   MassShadowFloor, StarShadowMinSpeed, the ApproachBrake inside the far law); ship-local and
+   near-ground values stay absolute; times and ratios are unchanged. **Cruise cap 0.5 c
+   (150 Mm/s).** At S = 1 the code must reproduce Roblox exactly (parity tests against the
+   Roblox formulas); at S = 3000 planet-to-planet trips take about 1 minute (52-72 s to the
+   target's mass-shadow edge). The flight velocity is relative to the dominant body's frame.
 3. **Near-ground band** (absolute, not scaled): below 11.4 km above the terrain the limit is
    `clamp(0.35·h, 260, 4000)` m/s with the unscaled approach brake (70 m/s²), as 02-flight.md
    proposes. The far law applies above the band; the effective limit is the minimum of all laws.
@@ -50,8 +53,24 @@ revisited.
 15. **Attitude indicator** (pitch ladder, ALT, climb rate) shows inside a body's atmosphere, below
     50 km above the terrain on airless bodies, and whenever the landing assist or gear is active.
 16. **Impact warnings** against terrain are on (time-to-impact based, as ShipWarnings).
-17. Terrain heights keep their metre size (they do not scale with S); continents, seas and biome
-    layout scale with the planet. Details in 04-planet-surface.md.
+17. Terrain: the Roblox styles (relief + paint, metres, 11 styles chosen as in Roblox) give the
+    ground detail and keep their metre size. **A planet-scale layer is added underneath**
+    (continents, seas, mountain ranges of a few km on rocky bodies) so a huge planet shows relief
+    and coastlines from orbit. Terrain is planet-fixed (the same place always looks the same).
+    Water is a solid floor you can set down on (Roblox behaviour).
+17a. **Planet looks are generated on the device** from the same terrain functions (the Roblox
+    planet images were made offline by its VisualGen generator and are not in the export), so the
+    orbit view and the ground always match. Clouds are a separate procedural layer.
+17b. **Absolute atmosphere heights** (05 Q4): air ends at the profile thickness (Earth 26 km),
+    visible limb at 3× (78 km), scale height = thickness/3; cloud decks keep their Roblox metres
+    (Earth 2,100-2,900 m). Titan gets a visible orange limb from space.
+17c. **Clearer air than Roblox:** ground haze e-fold about 10× Roblox's (Earth about 35 km) so
+    the huge planet is visible to the horizon, in the Roblox haze colours.
+17d. **Entry glow** only inside the air at high airspeed, for assisted and manual entry alike.
+    Ascent is free flight with an optional ORBIT assist; the landing assist can be cancelled.
+    Impact warnings count only above 28.5 m/s predicted impact (normal landings never warn);
+    crash debris inherit at most 120 m/s. Sun disc sizes as in Roblox.
+17e. Phobos and Deimos stay at Roblox proportions (450 km radius at S = 3000).
 
 ## Ships, HUD and controls
 
@@ -63,7 +82,22 @@ revisited.
 20. Remove the nose reticle, the velocity marker and the GEAR HUD bar; use the Roblox flight
     arrow.
 21. **Maps:** the flight keeps running while a map is open (Roblox behaviour). Stations are not
-    lockable from the system map (Roblox behaviour).
+    lockable from the system map (Roblox behaviour). Only PAUSE and SETTINGS freeze the
+    simulation.
+21a. **Views:** cockpit (default) and external as in Roblox; the current lagging chase camera
+    stays as an optional third view behind a setting. Look-around: one-finger drag in a strip at
+    the top of the screen. 60 fps default, 120 Hz selectable.
+21b. **Cockpit on phones:** a minimal flat readout (speed, limit/zone, throttle, target
+    distance/ETA) also in the cockpit view, behind the setting "FLAT HUD IN COCKPIT" (on). The 3D
+    cockpit buttons are visual only (they press when the matching touch button is used). LIGHTS
+    and MUSIC go into the pause menu. Tap a marker to lock it, tap LOCK to cycle, long-press LOCK
+    to clear. The off-screen lock arrow stays as a phone aid behind a setting (on).
+21c. **UI scale:** 1 Roblox design pixel = 0.6 u, text never below 9 u, for every flat UI.
+21d. **Game.kt becomes a platform shell plus a Session** that runs the Roblox frame order
+    (01-core-loop.md). Flight input is blocked during the crash fade-in; a failed system build
+    during a jump falls back to Sol in front of MERIDIAN. After the app is killed the ship is
+    restored at rest. Hardware keyboard/mouse support comes later. Automatic quality drops stay
+    silent.
 
 ## Stations, economy and saves
 

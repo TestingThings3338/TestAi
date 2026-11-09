@@ -22,7 +22,7 @@ Port reference for **Untitled Space Exploration** (Roblox game by AFloidDEV) →
 
 All fifteen files were read completely. The `ShipConfig` sections Hud (`ShipCore/ShipConfig.lua:1732`), Cockpit (`:1948`), Interior (`:2856`), Markers (`:1542`), Hull (`:2614`), SpeedLines (`:1054`), Dust (`:1318`), SpeedStreaks (`:1386`), DistanceLines (`:1447`), Exhaust (`:1510`) and Ui (`:2017`) were read in full, plus the values these modules take from Physics, Warnings, Thrust, Camera, Keys, Performance and ShipSettings. `ShipClient.lua` was searched for every construction and call of these modules (section 2). The cockpit models were decoded by stream-parsing `Assets.rbxmx` (all eight ships: `Assets/Ships/<Ship>/Cockpit`); section 6.4 describes every screen from that data.
 
-Sibling port docs: `02-flight.md` (flight model, flight arrow, attitude indicator, blackout physics, units, the scale S), `03-world.md` (Sol, bodies, attribute contract), `07-menu-maps-warp.md` (menu, maps, warp, menu icons), `08-stations-economy.md` (docking, survey and mining that write into the flight notices). Ships import (task 7), atmosphere/landing, audio/voice and warnings have their own work items; this file names what it needs from them.
+Sibling port docs: `02-flight.md` (flight model, flight arrow, attitude indicator, blackout physics, units, the scale S), `03-world.md` (Sol, bodies, attribute contract), `07-menu-maps-warp.md` (menu, maps, warp, menu icons), `08-stations-economy.md` (docking, survey and mining that write into the flight notices). Ships import (task 7), atmosphere/landing, audio/voice and warnings have their own work items; this file names what it needs from them. `DECISIONS.md` (the lead's answers to open questions) overrides proposals here; 11.1 lists what it settles for this area (0.5 c cap and Mm units, vector icons, Michroma, MASS SHADOW / AUTO-DOCK renames, impact warnings on, sound stand-ins).
 
 The player is always **PILOT**. Several Roblox comments refer to a reference clip from "the big space flight simulator" (speed streaks, distance lines); the port keeps AFloidDEV's own numbers and looks and uses no names, terms or designs from other games.
 
@@ -37,8 +37,8 @@ The player is always **PILOT**. Several Roblox comments refer to a reference cli
 - **Speed effects** are 3D beams around the camera: **dust** (90 motes, 1.5 m/s to 600–2000 m/s), **speed streaks** (60 beams, fade in 240–650 m/s, denser, longer and faster up to 1 Mm/s), **air streaks** in an atmosphere. Colour by situation: white, blue (inside a body's influence), red (impact < 10 s or heat ≥ 80 %), cross-faded in 0.45 s. Distance lines exist but are **off**; the screen-space speed lines are built but **never shown**.
 - **Exhaust:** two particle layers per nozzle (white-hot core, wider veil); length 0.4 → 3.4 nozzle diameters with throttle, ×1.6 and brighter when boosting.
 - **Notices:** comms (6 s), toast (4 s), docking aid and survey bar, all in a Studio-built GUI that is **not in the export** (positions proposed in 6.9).
-- **Missing from the export:** `StarterGui.CockpitInteract`, `StarterGui.FlightNotices`, `StarterGui.AttitudeHud`, the uploaded icon PNGs and the sounds. Everything the scripts look up is specified; the looks of those GUIs are proposals.
-- **Phone reality check (section 9.2):** at Roblox's 80° vertical FOV on a 20:9 phone the cockpit screens' 30 px labels come out about 1 mm tall and the buttons 2–3 mm wide: the screens read as atmosphere, not as instruments. The plan keeps the 3D cockpit 1:1 and adds a minimal flat readout in the cockpit view (a user decision, Q1).
+- **Missing from the export:** `StarterGui.CockpitInteract`, `StarterGui.FlightNotices`, `StarterGui.AttitudeHud`, the uploaded icon PNGs and the sounds. Everything the scripts look up is specified; the looks of those GUIs are proposals; icons become vector shapes and sounds stand-ins (`DECISIONS.md` D31, D33).
+- **Phone reality check (section 9.2):** at Roblox's 80° vertical FOV on a 20:9 phone the cockpit screens' 30 px labels come out about 1 mm tall and the buttons 2–3 mm wide: the screens read as atmosphere, not as instruments. The plan keeps the 3D cockpit 1:1 and adds a minimal flat readout in the cockpit view (11.1 decision 13, open as Q1).
 
 ---
 
@@ -68,7 +68,7 @@ noise(x, y, z)             = Roblox math.noise: Perlin gradient noise, 0 at inte
 
 ## 1. Overview: what the player experiences
 
-**Start.** The menu fades out over the cockpit. The cabin is dark; the four instrument screens show a dark boot frame. Then (2.6 s) the roof strips flicker twice and come up, all eight warning lamps test in amber, both gauge needles sweep to full and back, the two big screens count through POWER BUS → SENSOR ARRAY → FLIGHT CONTROL → NAV COMPUTER → ALL SYSTEMS GO with a progress bar, the button faces light up, the two holo panels flicker on, and the projection glass (flight arrow) comes on with them. A control hint shows for 12 s. After a crash the same sequence runs again (without the hint).
+**Start.** The menu fades out over the cockpit. The cabin is dark; the instrument screens show their boot frame ("NAV // ONLINE", "SHIP // ONLINE", empty progress bar). Then (2.6 s) the roof strips flicker twice and come up, all eight warning lamps test in amber, both gauge needles sweep to full and back, the two big screens count through POWER BUS → SENSOR ARRAY → FLIGHT CONTROL → NAV COMPUTER → ALL SYSTEMS GO with a progress bar, the button faces light up, the two holo panels flicker on, and the projection glass (flight arrow) comes on with them. A control hint shows for 12 s. After a crash the same sequence runs again (without the hint).
 
 **The cockpit (looking forward).** A wide canopy without a visible frame (the canopy cage is hidden from inside; the cockpit's own struts with LED strips frame the view). Low in the centre sits a tilted radar disc with a cyan ship symbol, sweeping amber; above it on the glare shield a row of eight square warning lamps (FA, GEAR, MASS LOCK, SCOOP, AUTOPILOT, FUEL, HEAT, WARNING). Left of the radar the round THR gauge, right the SPD gauge (logarithmic up to the cruise cap). Lower left the NAVIGATION screen (system name, locked target with class, distance and ETA, the three nearest bodies, autopilot footer); lower right the SHIP screen (big speed number with unit, allowed speed with its zone in colour, throttle bar with a zero mark, fuel and heat bars, drive mode, G, five status chips). Beside each screen two columns of three physical buttons with an LED and a printed label: TARGET, CLEAR TARGET, AUTOPILOT, SYSTEM MAP, STAR MAP, HYPERSPACE JUMP on the left; FLIGHT ASSIST, BOOST, LANDING, EXTERNAL VIEW, COCKPIT LIGHTS, MUSIC on the right. Higher up at the sides float two cyan holo panels: BODY / ALTITUDE / GRAVITY / PITCH and MASS / AGILITY / BOOST / STATUS. The pilot's legs, arms and hands are visible; the left hand holds the throttle lever, the right hand the stick, and both move with the controls (lever back at −25 %, forward at 100 %; the stick tilts with the steering arrow and twists with yaw).
 
@@ -99,7 +99,7 @@ The flight frame is the render-step callback `ShipUpdate` bound at `Enum.RenderP
 | 1 | 2790-2802 | `speed`, `speedFraction = clamp(speed / Thrust.MaxSpeed 1000, 0, 1)`, `getPitchAngle`, cursor hidden while looking/docked/on foot | |
 | 2 | 2806-2878 | `interior:setPointer(pointer)`; fill `interiorState` (2.2); `interior:update(dt, s)` | **before** `hull:update`: levers, caps and blips change part offsets that the hull then moves in one batch |
 | 3 | 2880 | `hull:update(shipCFrame, thrust.throttle, thrust.boosting)` | moves all visible parts, steps the gear, updates plumes |
-| 4 | 2882-2884 | `hull:setGearDown(landing scene and altitude < 60) or docking:wantsGear(cf))` | |
+| 4 | 2882-2884 | `hull:setGearDown((landing scene active and scene altitude < Hull.GearDownAltitude 60) or docking:wantsGear(cf))` | |
 | 5 | 2885 | `cockpit:update(dt, thrust:getLocalAcceleration(cf), rotation:getAngularVelocity(), speedFraction)` | felt acceleration in ship axes (m/s²), angular velocity in deg/s (X pitch, Y yaw, Z roll) |
 | 6 | 2889-2897 | `shipCamera:setShakeOffset(cockpit:getCameraShake() * entryFx:getShake())`, `setHead(cockpit:getHeadOffset(), input:getLook())`, `update(shipCFrame)` | on foot aboard: `aboard:frame` instead |
 | 7 | 2960 | `markers:update(dt, shipCFrame.Position, thrust.velocity)` | throttles itself to 10 Hz |
@@ -141,7 +141,7 @@ Stick axes: when the mouse rolls and the autopilot steers in yaw axes, the stick
 | Start | 268-354 | `ShipCockpit.new`, `ShipMarkers.new`, `ShipDust.new(camera)`, `ShipSpeedLines.new`, `ShipHud.new` (+ `hud.attitude`), `hull:build(workspace)`, `hull:setInterior(true)`, `ShipInterior.new`; if `interior.active`: `cockpit:setImageEnabled(false)`, `hud:setCockpitMode(true)`, `markers:setPanelVisible(false)`; `input:setLookEnabled(interior.active)`; `ShipNotices.new`, `notices:setVoice(voice)` |
 | Menu revealed | 3249-3263, 3208-3209 | `interior:boot()`; `notices:setEnabled(true)` |
 | V (external view) | 937-960 | `hull:setInterior(not external)`, `cockpit:setVisible(not external)`, look limits 180/60/60 outside and 140/80/70 inside, `interior:setExternal`, `hud:setCockpitMode(not external)`, `markers:setPanelVisible(external)` |
-| Cockpit button pressed | 1076-1103 | `onInteriorAction(action)` → same functions as the keys (table in 3.4.6) |
+| Cockpit button pressed | 1076-1103 | `onInteriorAction(action)` → same functions as the keys (table in 3.4.5) |
 | Ship switched at a shipyard | 1108-1150 | `interior:destroy()`, `hull:build`, `hull:setInterior(not external)`, new `ShipInterior`, `interior:boot()`; toast "WALKABLE INTERIOR" for walkable ships |
 | Landing scene in / out | 496-523 | `markers:setVisible(false)` going down, `true` coming up |
 | Crash cinematic / respawn | 1370-1412, 1419-1460 | `setFlightUiHidden(true)` hides markers, cursor, speed lines, dust and every enabled ScreenGui except warnings; respawn: `interior:reboot()`, `setFlightUiHidden(false)`, `markers:setVisible(true)` |
@@ -204,7 +204,7 @@ The flat HUD (`ShipHud`) uses `px`/`text`; the target panel, the marker billboar
 | 12 | HelpView (menu set) | 127682334803415 | 0.74 | EXTERNAL VIEW button |
 | 8 | Audio (menu set) | 127100075442348 | 0.74 | MUSIC button |
 
-The menu icons 1–11 are documented in `07-menu-maps-warp.md` 5.6. The PNGs themselves are **not in the export** (question Q3).
+The menu icons 1–11 are documented in `07-menu-maps-warp.md` 5.6. The PNGs themselves are **not in the export**; the port draws vector icons in code (`DECISIONS.md` D33, 6.7).
 
 ### 3.2 ShipHud: the flat flight HUD (`ShipClient/ShipHud.lua`)
 
@@ -349,7 +349,7 @@ rz = rad(vibration(clock * 1.4, 622.9) * 0.30 * s * 0.5)
 cameraShake = CFrame.fromEulerAnglesYXZ(rx, ry, rz)        (Scale <= 0 → identity)
 ```
 
-Magnitudes: 35 m/s² forward thrust → `swayY` target 31.5 px → head 6.3 cm up and 12 cm back (surge clamps at 0.14 → 0.12); a 30°/s yaw → 10.5 px lag (2.1 cm); vibration at full speed and thrust ≈ ±12 px (2.4 cm), tilt ±0.6°; camera shake ≤ ±0.5°.
+Magnitudes: 35 m/s² forward thrust → `swayY` target 31.5 px → head 6.3 cm up and 12 cm back (surge clamps at 0.14 → 0.12); a 30°/s yaw → 10.5 px lag (2.1 cm); vibration at full speed and thrust typically ±6 px (1.2 cm), at most ±12 px (`noise` rarely leaves ±0.5), tilt up to ±0.6°; camera shake typically ±0.25°, at most ±0.5°.
 
 **Camera composition** (`ShipCamera.lua:89-115`): `look` = look-around angles in degrees (X right, Y up, from `ShipInput`), `turn = RotY(-rad(look.x)) * RotX(rad(look.y))`, `neck = Translate(Interior.NeckOffset (0, -0.35, 0.3))`.
 
@@ -378,8 +378,8 @@ All paths are under `<Ship>.Cockpit` (dots = children). Section 6.4 gives geomet
 
 | Path | Use |
 |---|---|
-| `Screens.NavScreen.Display.Main.{System, Target.Icon, Target.Name, Target.Class, Target.Distance, Target.Eta, List.Row1..3.{Name,Value}, Footer, Footer.Icon, Footer.Text}` | navigation screen (3.4.10) |
-| `Screens.ShipScreen.Display.Main.{Name, Speed, SpeedUnit, SpeedC, Throttle.Fill, Throttle.Mark, ThrottleValue, Fuel.Fill, FuelValue, FuelIcon, Heat.Fill, Heat.Mark, HeatValue, HeatIcon, Drive, GForce, Chips.{FA,Boost,Gear,Scoop,MassLock}.{UIStroke,Icon,Text}}` | ship screen (3.4.11). `Name.Text = ShipConfig.Ships[model.ShipClass].DisplayName` (all ships share the cockpit, `:246-253`); `SpeedC.RichText = true`; fixed marks: throttle zero mark at x = `-MinThrottle/(1-MinThrottle)` = 0.25/1.25 = **0.2**, heat 100 % mark at x = 1/FatalHeat = **0.5** (`:287-294`) |
+| `Screens.NavScreen.Display.Main.{System, Target.Icon, Target.Name, Target.Class, Target.Distance, Target.Eta, List.Row1..3.{Name,Value}, Footer, Footer.Icon, Footer.Text}` | navigation screen (3.4.9) |
+| `Screens.ShipScreen.Display.Main.{Name, Speed, SpeedUnit, SpeedC, Throttle.Fill, Throttle.Mark, ThrottleValue, Fuel.Fill, FuelValue, FuelIcon, Heat.Fill, Heat.Mark, HeatValue, HeatIcon, Drive, GForce, Chips.{FA,Boost,Gear,Scoop,MassLock}.{UIStroke,Icon,Text}}` | ship screen (3.4.10). `Name.Text = ShipConfig.Ships[model.ShipClass].DisplayName` (all ships share the cockpit, `:246-253`); `SpeedC.RichText = true`; fixed marks: throttle zero mark at x = `-MinThrottle/(1-MinThrottle)` = 0.25/1.25 = **0.2**, heat 100 % mark at x = 1/FatalHeat = **0.5** (`:287-294`) |
 | `Screens.{ThrottleGauge,SpeedGauge}.Display.Face.{Needle,Value}` | round gauges; `angle` memo starts at ∞ |
 | `Screens.<any>.Display.Boot` (+ `Status`, `Progress.Fill`, all TextLabels and Frames below it) | boot frames of the four screens |
 | `Buttons.<Model>` with attribute `Action` and child `Cap` (+ `Led`, `Cap.Display.Icon` or `Cap.Display.Text`, attributes `Label`, `Key`, `Led.OnColor`) | buttons; the caps are the only raycastable parts (`hull`: `CanQuery = Action ~= nil`) |
@@ -577,7 +577,7 @@ gauge values (3.4.7)
 | | BOOST | cooldown > 0 ? `"%.1f S"` : "READY" |
 | | STATUS | `statusLine` text and colour |
 
-`statusLine` priority: crashing → "HULL FAILURE" danger · heat ≥ 1 → "OVERHEATING" danger · timeToImpact < 10 s → "IMPACT WARNING" danger · travelling → "HYPERSPACE" cyan · atmosphere ENTRY → "ATMOS ENTRY" amber · EXIT → "ASCENDING" amber · landing scene → "SURFACE" good · heat ≥ 0.8 → "HEAT HIGH" amber · mass locked → "MASS LOCKED" amber · else "NOMINAL" holoText (210,245,255).
+`statusLine` priority: crashing → "HULL FAILURE" danger · heat ≥ 1 → "OVERHEATING" danger · timeToImpact < 10 s → "IMPACT WARNING" danger · travelling → "HYPERSPACE" cyan · atmosphere ENTRY → "ATMOS ENTRY" amber · EXIT → "ASCENDING" amber · landing scene → "SURFACE" good · heat ≥ 0.8 → "HEAT HIGH" amber · mass locked → "MASS LOCKED" amber (port "MASS SHADOW", D30) · else "NOMINAL" holoText (210,245,255).
 
 #### 3.4.12 Lamps and chips (`setLamp :557-564`, `setChip :566-575`, `updateLamps :1193-1208`, 10 Hz)
 
@@ -930,7 +930,7 @@ Numbers: 240 m/s → invisible; 445 m/s → 50 % layer (smoothstep), 24 streaks,
 
 ### 3.12 ShipDistanceLines: distance lines (`ShipClient/ShipDistanceLines.lua`) · **switched off**
 
-`DistanceLines.Enabled = false` since 2026-11-06 (AFloidDEV: "can you remove the side speedlines ... the ones that are straight. I think they dont really look good"); `ShipDust` does not even create them. Port: keep the config section and this description; implement only if the user turns them back on (question Q9).
+`DistanceLines.Enabled = false` since 2026-11-06 (AFloidDEV: "can you remove the side speedlines ... the ones that are straight. I think they dont really look good"); `ShipDust` does not even create them. Port: keep the config section and this description; implement only if the user turns them back on (11.1 decision 3).
 
 **What they were.** Fine vertical dashes in a band in the ship's horizontal plane **through the eye**, standing along ship-up, appearing at the sides and gliding outwards; the flight direction keeps a free corridor. All dash centres lie on one straight line in the image and each dash looks equally tall (8°); depth shows only through motion. Spacing of the imagined dashes is `BaseSpacing 10 · TierFactor 20^tier` m (tier 1 = 200 m, 2 = 4 km, 3 = 80 km …, max 5); the tier changes when more than `RateUp 12` or fewer than `RateDown 0.45` spacings per second pass, with a 0.8 s cross-fade in which each dash dips at its own moment.
 
@@ -1025,7 +1025,7 @@ Column **S** marks how a value behaves under the world scale: **abs** = absolute
 | `ReachDistance` | 7 m | abs | button raycast length |
 | `PressDepth` / `PressTime` | 0.03 m / 0.14 s | abs | button cap travel |
 | `RadarRangeMin` | 300 m | abs | inner ring of the log scale |
-| `RadarRangeMax` | 1,000,000 m | **×S?** | rim; nothing farther is shown (Q8) |
+| `RadarRangeMax` | 1,000,000 m | **×S** | rim; nothing farther is shown (11.1 decision 12) |
 | `RadarSweepSpeed` | 120 °/s | | sweep (writes capped at 30/s) |
 | `ScreenInterval` | 0.1 s | | screens, holos, lamps, lights refresh |
 | `BootTime` | 2.6 s | | power-up |
@@ -1182,7 +1182,7 @@ DARK ──boot()──▶ BOOTING (0..2.6 s, timeline in 3.4.2) ──t ≥ 2.6
 ```
 
 - `boot()` is called once the menu fade starts (`ShipClient.lua:3249-3263`), after a ship switch (`:1133`) and via `reboot()` after every crash (`:1434`). A second `boot()` while booting does nothing (`bootStart ~= nil`).
-- DARK: pointer, presses, levers and button LEDs/faces still update every frame (LEDs off and faces `iconOff`, because `on` requires `powered`); screens show the boot frame with an empty status; holos and the projection glass are off; lamps off; needles at −135°; lights at 0.
+- DARK: pointer, presses, levers and button LEDs/faces still update every frame (LEDs off and faces `iconOff`, because `on` requires `powered`); screens show the boot frame (title visible, status empty, progress 0); holos and the projection glass are off; lamps off; needles at −135°; lights at 0.
 - BOOTING: no 10 Hz screen updates, no gauge needles from data (the sweep animates them), radar sweep hidden (`Sweep.Visible = powered`), no blips; the projection glass and the attitude indicator follow `hudOn` (flicker with the holos).
 - POWERED: everything; the 12 s hint runs once per session (`hintShown`).
 
@@ -1282,7 +1282,7 @@ Comms 6 s (some callers pass other durations), toast 4 s (crash 7 s, landing arr
 - `ShipDust`/`ShipSpeedStreaks`/`ShipDistanceLines` skip frames with NaN/∞ input instead of propagating NaN into persistent state.
 - Dust `direction` keeps the last value below 1 mm/s so a fading layer does not snap.
 - Streak `up` is carried over continuously; when it becomes parallel to the flight direction (|up⊥| < 0.3) it is re-seeded from world Y (or X when flying vertically).
-- Dust `layer` rises by `dt/0.3` only after the visibility test; at extreme frame rates (≥ 830 fps) a pre-test cap would never pass the 0.004 threshold (`ShipDistanceLines.lua:50-53`).
+- Streaks and distance lines test `fade <= 0.004` on the **uncapped** fade and only then apply the 0.3 s fade-in cap: at ≥ 830 fps a capped value would never pass the threshold and the layer would never switch on (`ShipDistanceLines.lua:50-53`, `ShipSpeedStreaks.lua:324-328`).
 - Hull: a gear command reversing mid-animation continues from the current pose; seated in the cockpit the gear jumps to the end pose.
 - Exhaust is disabled and cleared for hidden parts (external ↔ cockpit switch), or the flame would stay at the old place.
 - Ship switch: `interior:destroy()` returns the button Highlight to the GUI so the next cockpit finds it.
@@ -1310,7 +1310,7 @@ The current Kotlin `Theme.ACCENT` is cyan (0xFF4CD6FF); this area uses the Roblo
 | Titillium Web SemiBold / Bold | captions, marker names, holo labels, chip texts, button tags, list names | `FontData.UI` (SemiBold) |
 | Sarpanch SemiBold / Bold | prompt, autopilot, screen titles, drive mode, holo values, footer | `FontData.TITLE` (Bold only) |
 | Roboto Mono Medium | readout, values, distances, target panel, gauge values | `FontData.MONO` |
-| **Michroma** Regular | big cockpit numbers: target name and distance (nav), speed (ship), decorative "B-2" | **missing**: add to `tools/gen_font.py` (SIL OFL) or substitute Sarpanch for the RTT screens |
+| **Michroma** Regular | big cockpit numbers: target name and distance (nav), speed (ship), decorative "B-2" | **missing**: add it as a fourth face to `tools/gen_font.py` (SIL OFL, `DECISIONS.md` D32) |
 
 Text sizes inside SurfaceGuis are canvas px (6.4); on the flat HUD design px × `ShipUi` scale.
 
@@ -1413,9 +1413,9 @@ All TextLabels truncate at the end (`TextTruncate AtEnd`), backgrounds transpare
 | `HeatValue` | x 572–704, y 300–340 | Roboto Mono 30, text, right | "64%", "200%" |
 | `Drive` | x 28–394, y 352–396 | Sarpanch Bold 34, colour per mode, left | THRUST / CRUISE / BOOST / REVERSE / AUTOPILOT / HYPERSPACE |
 | `GForce` | x 366–704, y 352–396 | Roboto Mono 32, text, right | "1.2 G" |
-| `Chips` | x 16–716, y 408–528 | five chips, each x = 20 + 140 k, 132 × 120, corner 12, stroke 2 px | FA, BOOST, GEAR, SCOOP, M-LOCK |
+| `Chips` | x 16–716, y 408–528 | five chips, each x = 20 + 140 k, 132 × 120, corner 12, stroke 2 px | FA, BOOST, GEAR, SCOOP, M-LOCK (port: M-SHADOW) |
 | chip `Icon` | centre (86 + 140 k, 448), drawing ≈44 px | tint per chip mode | FlightAssist, Boost, LandingGear, FuelScoop, MassLock |
-| chip `Text` | x chip, y 480–520, centred | Titillium SemiBold 24 | "F-ASSIST" (runtime "FA OFF"), "BOOST", "GEAR", "SCOOP", "M-LOCK" |
+| chip `Text` | x chip, y 480–520, centred | Titillium SemiBold 24 | "F-ASSIST" (runtime "FA OFF"), "BOOST", "GEAR", "SCOOP", "M-LOCK" (port "M-SHADOW", D30) |
 
 #### 6.4.4 Round gauges (`ThrottleGauge` / `SpeedGauge`, canvas 168 × 168)
 
@@ -1474,7 +1474,7 @@ Cap face (100 × 80 px, Brightness 1.2): icon drawing 52 px, amber, centred (Tar
 | `FootGlow` | (0, −3.10, −2.40) | PointLight (90,190,255), 0.6, 4 m | panel |
 | `ConsoleGlow` ×2 | (±2.60, −1.20, −0.60) | PointLight (255,170,110), 0.45, 3.5 m | panel |
 | `StrutLed` ×6 | along the canopy struts | strip (112,132,150) | switched |
-| `RoofSlot` ×2 | (±0.575, 3.10, 0.15) | strip (58,104,140) + SurfaceLight up (110,160,255), 0.55, 3.5 m | switched |
+| `RoofSlot` ×2 | (±0.575, 3.10, 0.15) | strip (58,104,140); the right one carries a SurfaceLight up (110,160,255), 0.55, 3.5 m, 120° | switched |
 | `PodEdge` ×2, `PedestalLed`, `HoloLens` | seat pods, pedestal | strip (36,146,176), `Switched false` | panel |
 | `PodGlow` ×2 | (±1.337, −2.075, −1.917) | strip (124,91,55) + PointLight (255,158,88), 0.55, 2.4 m, `Switched false` | panel |
 | `SillTube` ×2 | (±3.595, −0.905, −0.30) | strip (150,172,190) | switched |
@@ -1494,7 +1494,7 @@ Contract (3.9): `Canvas` (UIScale, colour attributes) with `Comms.{Sender, Body}
 
 ### 6.7 Icons
 
-The 16 icons of 3.1 are white PNGs tinted at runtime; in the cockpit they appear at drawing sizes 80 (nav target), ≈43 (nav footer), 52 (button caps), 48 (lamps), ≈44 (chips) and 40 px (fuel/heat rows) on their canvases. None are in the export. Port options (Q3): the user exports the PNGs (preferred: 1:1), or the port draws vector stand-ins of AFloidDEV's motifs with the same names and sizes (the menu icons already have vector fallbacks, `07-menu-maps-warp.md` 5.6).
+The 16 icons of 3.1 are white PNGs tinted at runtime; in the cockpit they appear at drawing sizes 80 (nav target), ≈43 (nav footer), 52 (button caps), 48 (lamps), ≈44 (chips) and 40 px (fuel/heat rows) on their canvases. None are in the export. Port (`DECISIONS.md` D33): vector icons drawn in code, one per name, at these drawing sizes, tinted like the PNGs (the menu icons already have vector versions, `07-menu-maps-warp.md` 5.6); if the PNGs are ever exported they can replace them 1:1.
 
 ### 6.8 Flight effects, look summary
 
@@ -1515,10 +1515,10 @@ Reference: Xiaomi 15 landscape 2670 × 1200 px at 2.875 px/dp ≈ **929 × 417 u
 | Prompt | centre x, **bottom** at 0.64 H (cockpit and external) | Sarpanch Bold 12, plate (6,10,16) 70 %, 1 u stroke, padding 12/4 u | keeps Roblox's cockpit placement; external view uses the same height so it never meets the survey bar |
 | Survey bar | x W/2 ± 170, y H−sb−100 .. −50 | `08` 5.4 | while surveying/mining |
 | Docking aid | x sl+140..sl+350, y st+120..st+218 | `08` 5.4 | above the usual left-thumb rest, clear of ▲▼ |
-| Flat stack (external view) | x sl+140..sl+360, y st+60.. | bars 150 × 5 u, readout Roboto Mono 9.5 u, 11 lines | hidden while the docking aid shows (both are flight data; the aid is more urgent) |
+| Flat stack (external view) | x sl+135..sl+395, y st+56..st+232 (right of ▲▼, above the usual thumb rest) | bars 160 × 5 u, readout Roboto Mono 8.5 u, 11 lines at 15 u | drawn under the transient toast/comms (which have plates); hidden while the docking aid shows (both are flight data; the aid is more urgent) |
 | Target panel (external view) | right-aligned at W−sr−14, y st+206..st+270 | Roboto Mono 9.5, 5 lines | under BOOST, above the stick rest |
-| Cockpit minimal readout (Q1) | beside the lever, x gauge.right+26 | as today: speed 28 u mono + unit 10 u; add the limit/zone line (SpeedC) 9 u and the throttle % (exists) | cockpit view only |
-| Markers | anywhere | ring 22 design px → **≥ 10 u** Ø; name Titillium **9 u**; distance Mono **10 u** | Roblox sizes are 1080-line pixels (a 22 px ring would be 3 mm) |
+| Cockpit minimal readout (decision 13) | beside the lever, x gauge.right+26 | as today: speed 28 u mono + unit 10 u; add the limit/zone line (SpeedC) 9 u and the throttle % (exists) | cockpit view only |
+| Markers | anywhere | ring 22 design px → **16 u** Ø (≈ 2.5 mm), stroke 1.5 u; name Titillium **9 u**; distance Mono **10 u**; label offset 14 px → 7 u, gap 8 px → 4 u; brackets 8 px arms → 5 u | the Roblox billboards are fixed 1080-line pixels (a 22 px ring is 1.2 mm on this phone, 6 mm on a desktop monitor) |
 | Blackout | full screen | | over HUD and markers, under the touch controls and warnings |
 
 ```text
@@ -1571,7 +1571,7 @@ Reference: Xiaomi 15 landscape 2670 × 1200 px at 2.875 px/dp ≈ **929 × 417 u
 
 | Roblox | Kotlin today (file, function) | Difference | Action |
 |---|---|---|---|
-| Flat HUD stack, readout (`ShipHud`) | `Game.drawHud` (`Game.kt:860-941`): speed number (mono 28 u) + unit beside the lever, boost capacitor bar, zone label top centre, blinking HEAT / FLIGHT ASSIST OFF / PROXIMITY texts, `message` line at 0.30 H | no fuel/heat bars, no 11-line readout, no prompt plate, no autopilot label; zone shown as a separate label instead of `"(zone · max limit)"`; the top-centre warnings are not Roblox's (FA OFF shows on the FA lamp/chip and in the readout; heat/impact belong to ShipWarnings) | new `hud/FlightHud.kt`; keep the lever-side speed as the phone's cockpit readout (Q1); move warnings to the warnings port |
+| Flat HUD stack, readout (`ShipHud`) | `Game.drawHud` (`Game.kt:860-941`): speed number (mono 28 u) + unit beside the lever, boost capacitor bar, zone label top centre, blinking HEAT / FLIGHT ASSIST OFF / PROXIMITY texts, `message` line at 0.30 H | no fuel/heat bars, no 11-line readout, no prompt plate, no autopilot label; zone shown as a separate label instead of `"(zone · max limit)"`; the top-centre warnings are not Roblox's (FA OFF shows on the FA lamp/chip and in the readout; heat/impact belong to ShipWarnings) | new `hud/FlightHud.kt`; keep the lever-side speed as the phone's cockpit readout (11.1 decision 13); move warnings to the warnings port |
 | Blackout | none | missing | `FlightHud` (physics in `02`) |
 | Units (`ShipUnits`) | `Game.formatSpeed/formatDistance` (`:1757-1781`) | "MM", "MM/S"; different thresholds; no grouping | `hud/Units.kt` writing into `TextBuf` (shared with `02`) |
 | UI scale (`ShipUi`) | `frame.u` (dp based) | Roblox sizes are 1080-line px | conversion table in 6.9 / 9.2 |
@@ -1580,16 +1580,295 @@ Reference: Xiaomi 15 landscape 2670 × 1200 px at 2.875 px/dp ≈ **929 × 417 u
 | Visible hull (`ShipHull`) | `content/KiteShip.kt` procedural mesh, one draw with palette (`SceneRenderer.drawShip`), nav lights and strobes as billboards | real models, visibility rules (HideInside, HideSeated, CockpitOnly, gear), engine glow discs and lights missing; KiteShip nav lights/strobes are not Roblox's | ships import + `game/ShipVisual.kt` |
 | Exhaust (`ShipExhaust`) | `SceneRenderer.drawShipGlows` (`:420-458`): one plume quad per nozzle (length 2.2 + 7.5·output m, blue/white), a halo billboard | no particles, no core/veil, lengths not in nozzle diameters, boost colour change instead of length ×1.6 | `fx/Exhaust.kt` + renderer (particles in ship space) |
 | Markers (`ShipMarkers`) | `Game.drawTargets/drawMarker/labelAndDistance/claimLabel` (`:1473-1628`): ring sized to the body's screen radius (≥ 5 u), stations in Theme.ACCENT, name 9 u, distance for the locked or the nose-aimed target (3° cone); label claim order locked/aimed → stations → bodies; markers hidden behind planets (`hiddenBehindBody`) and for bodies filling the view; asteroids lockable | Roblox: fixed 22 px rings, one colour, focus = nearest to the screen centre within 0.14 H, declutter by priority (size, stations last) with an 8 px gap, moons/stations unnamed beyond 2,000 km, markers always drawn (on top of everything), no asteroid targets | rewrite as `hud/TargetMarkers.kt` |
-| Lock (`cycleTarget`, Y) | `Game.toggleLock/findAimed/aimScore` (`:1342-1418`): LOCK toggles the lock on the target nearest the nose within 18° | Roblox cycles by centre distance and clears with Y | LOCK tap = cycle, long-press = clear, tap a marker = lock (Q5) |
+| Lock (`cycleTarget`, Y) | `Game.toggleLock/findAimed/aimScore` (`:1342-1418`): LOCK toggles the lock on the target nearest the nose within 18° | Roblox cycles by centre distance and clears with Y | LOCK tap = cycle, long-press = clear, tap a marker = lock (decision 9) |
 | Lock brackets | amber L-brackets sized to the body, label under them | Roblox: fixed 38 px brackets with a 0.22 s snap-in | port Roblox's |
 | Off-screen lock arrow | `Game.drawLockArrow` (`:1564-1603`): chevron on an ellipse | not in Roblox (the radar shows the locked blip first) | keep as a phone aid or drop (Q4) |
-| Target panel | none (distance under the brackets) | missing | `TargetMarkers` (external view; cockpit per Q1) |
+| Target panel | none (distance under the brackets) | missing | `TargetMarkers` (external view; compact in the cockpit view, decision 13) |
 | Notices (`ShipNotices`) | `Game.showMessage` (one line at 0.30 H for 3 s) | no comms, toast title/body, docking aid, survey bar | `hud/Notices.kt` |
 | Prompt line | touch action button label (LAND / DOCK / TAKE OFF) | no prompt plate, no BLOCKED colouring | add the plate; keep the action button for touch |
 | Dust (`ShipDust`) | `SceneRenderer.drawDust` + `Shaders.dustVs/Fs`: GPU box `DustField.BOX`, origin moves at a capped visual speed (400 m/s), streak = velocity × 0.045 × (1 + 0.6 log10) , intensity 0.6 constant, colour by zone with τ 0.25 s | no speed fades (1.5–5.5, 600–2000 m/s), no head/tail profile, no near clip 7 m, no edge fade, no air mode, different mood rules (Kotlin danger = proximity < 80 m or close to the star; Roblox danger = impact < 10 s or heat ≥ 80 %, approach = inside the influence) | rewrite shader + `fx/SpeedDust.kt` with Roblox formulas |
 | Speed streaks | none | missing | `fx/SpeedStreaks.kt` + shader |
 | Distance lines, speed lines | none | off/unused in Roblox | none |
-| Icons | text labels on touch buttons | no icon set | icon atlas (Q3) |
+| Icons | text labels on touch buttons | no icon set | vector icons in code (D33) |
 | Cockpit FOV | chase 52° (+3° with speed, +9° boost), cockpit 60° vertical | Roblox 80° vertical, setting 60–100, no FOV kick | settings FOV (`02` 10.3) |
 | Settings | no camera shake | CAMERA SHAKE 0–1 | add |
 
+---
+
+## 9. Phone adaptation
+
+### 9.1 Input mapping (every keyboard/mouse input of this area)
+
+| Roblox input | Action | Touch | Gamepad |
+|---|---|---|---|
+| T | cycle target (nearest first, by centre distance) | **LOCK** button tap | D-pad up |
+| Y | clear target | **LOCK** long-press (0.5 s, haptic tick) | D-pad up held 0.5 s |
+| system map click | lock that body | tap in the map (`07`) | map cursor + A |
+| — (new) | lock the marker under the finger | short tap (< 0.25 s, < 8 u movement) within 22 u of a marker's ring centre; arbitration below (Q2) | — |
+| V | cockpit ↔ external view | **CAM** button (Roblox has two views; the Kotlin far-chase becomes optional) | Y |
+| Right mouse held + mouse | look around (140/80/70°, external 180/60/60°), centre reticle, button hover | two-finger drag anywhere, or one finger in a top-centre look strip (`02-flight.md` 9.1); release returns in 0.12 s | L3 held + right stick |
+| Left click on a cockpit button (look-around or free mouse) | press it | **not by default**: caps are ~2 mm on a phone (9.2). Every touch/gamepad action instead calls `interior.pressAction(action)` so the matching 3D cap dips and its LED lights. Optional "console mode" (Q3): while looking around, a tap within 32 u of a cap's projected centre presses it | — |
+| Mouse hover (tooltip "[T] TARGET") | show the button name and key | console mode only: show the label without a key | — |
+| Left Alt (free the mouse) | pointer mode "mouse" | not needed | — |
+| COCKPIT LIGHTS (3D button only) | toggle roof lights | pause menu toggle (+ console mode) | pause menu |
+| J / MUSIC button | music on/off | pause menu / settings | pause menu |
+| P, Z, B, L/K, N/M, ENTER | autopilot, FA, boost, land/dock, maps, jump | existing/planned buttons (`02`, `07`, `08`); each also calls `pressAction` | as `02` 9.2 |
+
+**Tap arbitration.** The floating lever and stick own the whole screen. A pointer-down that lands on a marker (or, in console mode, on a cap) starts a *pending tap* **and** the lever/stick touch. If the finger moves more than 8 u or stays longer than 0.25 s, the pending tap is dropped and the control keeps the touch; if it lifts earlier, the tap fires and the control touch is cancelled without effect — and it must not count towards the lever's double-tap (all stop).
+
+**Texts with key names.** `ShipKeys.label(action)` becomes `InputLabels.label(action, device)`: keyboard → the key ("T"), touch → the button caption ("LOCK", "AUTO", "DOCK", "LAND", "MAP"), gamepad → the button name ("D-PAD UP"). Examples: nav class line "PRESS TARGET OR T" → touch "TAP LOCK"; prompt "PRESS L TO LAND" → "TAP LAND TO LAND"; "K   REQUEST DOCKING   ·   MERIDIAN STATION" → "DOCK   REQUEST DOCKING   ·   MERIDIAN STATION". Cockpit hint (6.5) on touch: "DRAG WITH TWO FINGERS TO LOOK AROUND".
+
+**Haptics.** Tick on lock/cycle and on clear; tap on a cockpit-button press in console mode.
+
+### 9.2 Readability, FOV and the thumbs
+
+Reference phone: Xiaomi 15, 2670 × 1200 px, ≈ 460 ppi (18 px per mm). Roblox's reference is a 1080p desktop monitor (~3.6 px per mm).
+
+| Item | Roblox desktop (1080p, FOV 80°) | Phone, same FOV |
+|---|---|---|
+| Nav/ship screen on screen | ≈ 350 × 315 px ≈ 97 × 87 mm | ≈ 395 × 350 px ≈ 22 × 19 mm |
+| 30 px screen label (most texts) | ≈ 17 px ≈ 4.7 mm | ≈ 19 px ≈ 1.1 mm (unreadable) |
+| Ship screen speed (80 px Michroma) | ≈ 46 px ≈ 13 mm | ≈ 52 px ≈ 2.9 mm (readable) |
+| Holo value (≤ 52 px) | ≈ 24 px ≈ 6.7 mm | ≈ 27 px ≈ 1.5 mm (marginal) |
+| Button cap | ≈ 35 × 28 px ≈ 10 × 8 mm | ≈ 40 × 32 px ≈ 2.2 × 1.8 mm (not tappable; 44 dp ≈ 7 mm needed) |
+| Marker ring (22 px, not scaled) | 6 mm | 1.2 mm → draw it 16 u (≈ 2.5 mm; 1 u = 1 dp ≈ 0.16 mm) |
+
+Consequences (11.1 decisions 13 and 14):
+- Keep the 3D cockpit exactly as in Roblox (same geometry, same screens, same 10 Hz contents) — it carries the look and the big numbers.
+- In the cockpit view on phones show a **minimal flat readout** that Roblox hides: the lever-side speed (exists), the limit/zone line, throttle %, and the target name + distance + ETA in a compact panel. Everything else stays on the 3D screens. A settings toggle "FLAT HUD IN COCKPIT" (default on for phones) keeps both camps happy.
+- Optional later: **glance** — tap and hold a 3D screen to swing the head towards it and narrow the FOV to ~35° while held (makes the 30 px labels ~3 mm).
+- **FOV.** Roblox's default vertical 80° gives 124° horizontal on 20:9 (wide but every cockpit element stays in view; the screens' bottom edge is at the image edge). Below ~76° vertical the lower screen rows (chips, footer) leave the image. Proposal: default 80° vertical on phones (settings 60–100 as Roblox); if a narrower view is preferred, add a lens shift (`Camera.shiftY`, exists; it adds to NDC y, `Mat4.perspective`) so the dashboard stays visible: e.g. 70° with `shiftY = +0.22` keeps the screens at y 65–100 % and puts the flight direction 11 % above the image centre; the flight arrow, the focus test and the prompt then use the projected nose instead of the screen centre. Default: no shift (decision 14).
+- **Thumbs.** At 80° the nav screen sits at x 24–38 %, y 72–100 % and the ship screen at x 62–76 % — inside the lever and stick zones but inward of the usual thumb rest (x 10–25 % and 75–90 %). Draw the touch controls translucent over the cockpit (they already are) and keep the lever gauge at the left edge.
+
+### 9.3 Performance (60 fps on a Xiaomi 15, playable mid-range; zero allocation per frame)
+
+| Item | Budget and approach |
+|---|---|
+| Cockpit geometry | ~400 cockpit parts + ~250 CockpitPlus parts → merge static parts per material into ≤ 4 meshes (opaque, emissive/neon, glass, decorative screens); dynamic: throttle rig (6 parts + followers), stick rig (7 + followers), 12 caps, 12 LEDs, 12 blips, 12 stems → one instanced draw with per-instance matrices; ≈ 8 draw calls |
+| Cockpit depth | own pass after the world: clear depth, near 0.05 m, far 30 m (the world pass uses near 0.5 m and depth slices; the canopy struts come within 0.3 m of the eye when looking around) |
+| Screens | render-to-texture atlas (one 2048 × 1024 RGBA8 or 1024 × 1024 at ~0.7 scale on mid-range), mipmapped (screens appear at ~0.6×); redraw at 10 Hz round-robin, ≤ 2 canvases per frame (nav, ship, 2 gauges, 2 holos, 8 lamps, 12 caps; boot frames during boot); the radar sweep is a rotating 3D quad over a static disc texture (no RTT at 30 Hz); decorative panels baked once |
+| Lighting | baked into vertex colours in two layers (switched roof set, panel set) blended by the two levels; Neon parts emissive; no dynamic lights, no shadows |
+| Markers | ≤ 64 entries (Sol: ~18 bodies + stations); projection per frame; ordering, labels and declutter at 10 Hz (O(n²) with n ≤ 30); text through `TextBuf` |
+| Dust / streaks | one instanced draw each (90 + 60 quads), vertex shader does wrap, fades and widths; streak `z` and `on` arrays updated on the CPU (60 floats) and streamed |
+| Exhaust | ≤ 8 nozzles × (24 core + 16 veil) particles in ship space, one additive draw; performance mode halves rates and drops the veil |
+| Blackout | one full-screen quad, only when darkness > 0.002 |
+| Mid-range preset | `Performance.Low` values (Dust 45/35, Streaks 30, Exhaust 50/15/0) + screen atlas at half resolution + decorative panels as plain colours |
+
+Allocation: preallocated arrays for markers, labels and boxes; `TextBuf` for every string; no lambdas or `String.format` per frame; colours as packed ints; NumberSequence tables become shader maths.
+
+### 9.4 Roblox-only workarounds that become unnecessary or different
+
+- **ShipOverlay** (billboards on an anchor 1 m in front of the eye with log-depth staggering, because AlwaysOnTop did not render): markers are 2D overlay after the 3D pass; draw far → near.
+- **BillboardGui per marker, TextBounds measuring, RichText font tags**: `UiRenderer.text`/`textWidth` with two styled runs.
+- **Write-on-change caches** (`set` with a property memo, `lastGlow`, `lastX/lastY`, 0.4° needle and 0.15° lever thresholds, 15 % width tolerance, 0.012 colour threshold, `steps(…, 20/50/200)` quantisation, 30 Hz sweep cap, `TiltWriteThreshold`): immediate-mode drawing and uniforms; keep only the 10 Hz text cadence (readability).
+- **Beam tricks**: per-segment-corner transparency (`SEGMENTS`, `END_FADE` rounding, 33 × 21 × 2 pre-built clip sequences, `LEVELS`): the shader computes the exact gradient per fragment, including the near cut.
+- **`RECENTER 4096`** (32-bit attachment precision) and the floating-origin notes (`RebaseDistance 1`): camera-relative doubles.
+- **BulkMoveTo of every part every frame, `rebuildMoveList`, `extras` hiding** (signs floating in front of the canopy after rebases): one model matrix per ship and per-node visibility flags; only animated parts get their own matrices.
+- **LocalTransparencyModifier / CastShadow juggling**: visibility flags; no shadows.
+- **The painted cockpit image** (`ShipCockpit` image path, margins, overscale): not ported.
+- **CollectionService tags and attribute reads per update**: typed body/station records.
+- **StarterGui GUIs waiting for the character** (`CockpitInteract`, `FlightNotices`, queued notices): code-built UI from the start.
+- **ParticleEmitter + `LockedToPart`, `glow.png`**: own ship-space particles with a procedural soft sprite.
+- **`rbxassetid` icons and sounds**: vector icons in code and the audio port's stand-ins (D31, D33).
+- **`os.clock` timers** (notices, gear): game time that stops while paused.
+- **Landing scene** (`setAir(surface:isActive() …)`, radar hidden on the scene, `getShownSpeed/Altitude` blending, re-anchored velocity): seamless world; `air` = inside an atmosphere, `surface` = near-ground band (9.5).
+- **QWERTZ key naming** (`ShipKeys` via `GetStringForKeyCode`): `InputLabels` per device.
+- **Multiplayer pilot markers** (`ShipPilot` tag, friends colour, name range): dropped for singleplayer (keep the priority hook).
+- **Server round trips:** none in this area's own logic; the only server-fed inputs were the pilot beacons (server relay, dropped) and the toasts/comms that other areas raise after server replies (docking grants, trade, survey sales) — those become local calls in their own ports and reach `Notices` unchanged.
+- **Studio-only status** (`getStatus`, `getStats`, ShipDebug): `Game.debugInfo` fields and debug commands.
+
+### 9.5 The scale S in this area
+
+| Value | Rule |
+|---|---|
+| Cockpit geometry, head motion, dust, streak cylinder, exhaust, button reach | absolute (ship-local) |
+| `Thrust.MaxSpeed 1000` as the speed-fraction reference (vibration, dust length/brightness, dust cruise fade) | absolute (`02-flight.md` 9.4 keeps it for HUD/audio references) |
+| Streak `FadeInSpeed 240`, `FullSpeed 650` | absolute (combat band) |
+| Streak `TopSpeed 1e6` | `min(cruise cap, 1e6·S)` = 150 Mm/s with the 0.5 c cap: the densest streaks at the practical in-system top speed |
+| Speed gauge maximum (`CruiseMaxSpeed`) | the cruise cap 150 Mm/s (260 m/s → 23 %, 1 km/s → 31 %, 1 Mm/s → 71 %) |
+| Marker `TextRange 2,000 km` | ×S (6 Gm) so moons appear in a planet's neighbourhood as before |
+| Radar `RadarRangeMax 1,000 km`, giant blip threshold `radius ≥ 2500` | ×S (3 Gm; 7.5 Mm); `RadarRangeMin 300 m` stays (stations) |
+| Body radii in ETA/distance texts | real (already scaled by the world) |
+| `ShipUnits` | unchanged: m, km, Mm, Mm/s with grouping; the 0.5 c cap (150 Mm/s) needs no larger unit (D2, D4) |
+
+---
+
+## 10. Kotlin port plan
+
+### 10.1 Files and classes (`core/src/main/kotlin/com/starwake/core/`)
+
+| File | Contents |
+|---|---|
+| `hud/HudConfig.kt` | `object`s Hud, Ui, Cockpit (motion), Interior, Markers, Dust, SpeedStreaks, DistanceLines (kept, off), Exhaust with every value of section 4; `Performance.Low` overrides |
+| `hud/HudPalette.kt` | packed colours of 6.1, `LAMP`, `CHIP`, moods |
+| `hud/Units.kt` | `distance(buf, m)`, `speedParts(numBuf, unitBuf, v)`, `speed`, `upper` (Mm rule), `acceleration`, `duration` (`formatDuration`), `grouped`; shared with `02` (`FlightArrow`, `AttitudeHud`) |
+| `hud/InputLabels.kt` | key/button names per device (9.1) |
+| `hud/FlightHud.kt` | `ShipHud`: `HudState` record, blackout, 10 Hz readout lines (pre-built `TextBuf`s with colour spans), bars, prompt plate with per-line colours, autopilot label; `cockpitMode`; phone layout from `HudLayout` |
+| `hud/HudLayout.kt` | 6.9 rects from `frame` and the touch layout (mirrored for left-handed) |
+| `hud/TargetMarkers.kt` | `ShipMarkers`: `MarkerEntry` pool (body/station index, name, class, radius, named-always flag), `ordered`, `focus`, `locked`, `cycle()`, `clear()`, `setLocked()`, `update(dt, shipPos, relVel, camera)` (10 Hz), `declutter`, `draw(ui, camera)` (rings, labels, brackets with the 0.22 s tween, target panel), `hitTest(x, y)` |
+| `hud/Notices.kt` | `ShipNotices`: comms, toast, docking, survey, timers on game time, draw |
+| `cockpit/CockpitLayout.kt` (generated) | eye-space transforms, sizes and faces of every carrier part; button/lamp/light tables with attributes; canvas sizes; produced by the tool in 10.6 |
+| `cockpit/CockpitScreens.kt` | draws each canvas (nav, ship, gauges, holos, lamps, caps, boot frames) with `UiRenderer` into the atlas FBO (canvas px), 10 Hz round-robin; Michroma as a fourth atlas face (D32) |
+| `cockpit/CockpitInterior.kt` | `ShipInterior` logic: power/boot timeline, pointer/press (console mode), LEDs and faces, levers (with followers), needles, radar blips, lamps, chips, holos, status line, lights levels, hint, `hudOn`; writes dynamic part transforms and screen view-models |
+| `cockpit/CockpitMotion.kt` | `ShipCockpit`: sway, tilt, surge, vibration, head offset (translation + roll), camera shake |
+| `math/Noise.kt` | 3D gradient (Perlin) noise with Roblox-like behaviour (0 at lattice points) |
+| `game/ShipVisual.kt` | `ShipHull` port on top of the imported ship model: node flags (hideInside, hideSeated, cockpitOnly, gear, gearClosed, forced), `viewMode` (SEATED / EXTERNAL / ABOARD), visibility per node, engine glows (disc emissive, light), gear pose from `02`'s `GearRig`, clear glass |
+| `fx/Exhaust.kt` | particle pools per nozzle (core, veil) in ship space with `set(glow, boost)` |
+| `fx/SpeedDust.kt`, `fx/SpeedStreaks.kt` | CPU state (layer, mix, scroll, mood, streak z/on/opens) + uniforms for the shaders |
+| `gfx/CockpitRenderer.kt` | cockpit meshes, dynamic instances, screen quads sampling the atlas (emissive × Brightness), baked light layers; own depth pass |
+| `gfx/FlightFxRenderer.kt` | dust and streak shaders (instanced camera-facing segments, Roblox fades and widths), exhaust particles; replaces `SceneRenderer.drawDust` and the plume part of `drawShipGlows` |
+| `ui/Icons.kt` | icon atlas lookup (or vector icons) with `Fill` sizing |
+
+Retire: `Game.drawTargets/drawMarker/labelAndDistance/claimLabel/hiddenBehindBody/findAimed/aimScore/toggleLock` (marker part), `Game.showMessage` (→ toasts), the zone label and FA/HEAT/PROXIMITY texts in `drawHud` (→ readout, warnings port), `SceneRenderer.drawDust` + `Shaders.dust*`, the plume quads in `drawShipGlows`, KiteShip nav lights/strobes (with the ships import), `ChaseCamera` mode 2 (→ cockpit camera with `CockpitMotion`). Keep `drawLockArrow` behind a flag until Q4 is answered.
+
+### 10.2 Hooking into `Game.kt`
+
+In `Game.updateFlight` (`Game.kt:638`), after the flight step of `02` 10.2 (step 11):
+
+1. Build `HudState` / `CockpitState` (two preallocated records, the fields of 2.2 and 2.3) from the flight, gravity, systems, autopilot, docking, atmosphere and warp results.
+2. `cockpitMotion.update(dt, feltAccelShip, angularVelocityDeg, speed / 1000)`.
+3. `interior.update(dt, cockpitState)` (pointer/console mode from the touch layer; power/boot; 10 Hz screens) — before the ship visual update.
+4. `shipVisual.update(shipPose, throttle, boosting)` (gear command from `02`/docking).
+5. Camera: cockpit = `ship ∘ T(0, 0.5, 0) ∘ headOffset ∘ neck ∘ look ∘ neck⁻¹ ∘ shake`; external = per-ship offset (3.3).
+6. `markers.update(dt, shipPos, relVel, camera)` (10 Hz inside).
+7. `dust.setAir(inAtmosphere)`, `dust.update(dt, cameraPos, relVel, view)`, `dust.setMood(...)` (rule of 2.1 #10, with `inInfluence`).
+8. `hud.update(dt, hudState)`; `notices.update(dt)`.
+
+`Game.render`: world (`SceneRenderer`) → flight FX (dust, streaks, exhaust) → cockpit pass (seated view) → UI: markers → flat HUD (stack, prompt, autopilot) → blackout → flight arrow and attitude (`02`) → notices → touch controls. Screens' RTT update happens before the world pass (bind FBO, draw ≤ 2 canvases, unbind).
+
+`Game.debugCommand` additions: `lock <body|station|next|clear>`, `view cockpit|external`, `look <yaw> <pitch>`, `boot`, `reboot`, `lights on|off`, `press <action>`, `mood neutral|approach|danger`, `setspeed <m/s>` (debug velocity along the nose), `notice toast|comms|dock|survey ...`, `strain <g> <redout>`; `debugInfo` adds `powered`, `booting`, `hudOn`, `lights`, `throttleAngle`, `speedNeedle`, `blips`, `locked`, `focus`, `labels`, `dust`, `streaks`, `density`, `darkness`.
+
+### 10.3 Order of work
+
+1. `HudConfig`, `HudPalette`, `Units`, `InputLabels` + tests.
+2. `TargetMarkers` (replace the Kotlin markers and lock) + target panel + tap arbitration; harness `markers`.
+3. `FlightHud` (readout, bars, prompt, autopilot label, blackout) + `HudLayout`; `Notices`; harness `hud-external`, `notices`.
+4. `SpeedDust` + `SpeedStreaks` + shaders (replace the dust); mood and air rules; harness `fx-speed`.
+5. `Exhaust` (needs the nozzle list from the ships import, or KiteShip nozzles meanwhile); engine glow; harness `exhaust`.
+6. `CockpitMotion` + cockpit camera (works with KiteShip already); camera-shake setting.
+7. `tools/roblox/cockpit_layout.py` → `CockpitLayout.kt`; with the ships import: `ShipVisual` visibility rules, `CockpitRenderer` geometry and own depth pass.
+8. `CockpitScreens` (atlas, canvases, Michroma) + `CockpitInterior` (boot, levers, needles, radar, lamps, chips, holos, lights, hint, `pressAction` from touch actions); harness `cockpit-*`.
+9. Phone adaptations: cockpit minimal readout and its settings toggle, FOV setting, console mode (Q3) and glance (Q6) only if wanted.
+10. Allocation and performance pass on device; performance preset.
+
+### 10.4 Unit tests (`core/src/test/kotlin/com/starwake/core/hud/`, `.../cockpit/`)
+
+- **Units:** every example of 3.1 (316 m … 1,240 Mm; ("260","M/S") … ("150.0","Mm/s"); `upper` keeps "Mm"/"Mm/s"; NaN → "--"); `duration` 0, 83, 3599, 356,400, 356,401, −1, ∞.
+- **FlightHud readout:** the example of 3.2 line by line (padding of `%-9s`, `%3d%%`, `%6.2f`, `%+5.1f`), BOOST/CRUISE/OVERLOADED/"boost 3.2s"/"boost ready", `best turn` at 0.9, gravity "--" / "0.00 g  (surface …)", limit text with and without zone, colour spans (G thresholds 3.9 / 6.5 on strain).
+- **Bars:** fuel red below 0.2; heat fill colours at 0.99 / 1.0 / 1.49 / 1.5; mark at 0.5; values "%3.0f%%".
+- **Blackout:** target at strain 6.5 / 8.75 / 11 / 20 = 0 / 0.41 / 0.82 / 0.82; smoothing τ 0.35 s; redout colour mix.
+- **Prompt:** two lines, one BLOCKED → per-line colours and stroke danger; escaping of `&<>`.
+- **CockpitMotion** (noise off via `userShake = 0` and Idle 0): sway target and τ, tilt clamp ±3°, surge clamp 0.12, head offset signs (image right → head left; forward thrust → head up and back), camera shake 0 when Scale 0.
+- **Noise:** 0 at integer lattice points, |n| ≤ 1, continuity.
+- **Interior boot:** the timeline of 3.4.2 at t = 0.1, 0.2, 0.5, 1.0, 1.2, 1.5, 1.6, 2.1, 2.6 (lights level, lamp modes, needle fraction, boot line, fade, facesLit, holoOn, hudOn, powered); reboot returns to dark; hint alpha at 0.3 / 6 / 11.5 s.
+- **Levers:** throttle −0.25 / 0 / 1 → +14° / +4.8° / −32°; stick aim (0, 1) → −16° X; roll 1 → +14° Y; aim (1, 0) → −16° Z; smoothing τ 0.07 s; followers move by `shift ⊙ mask · follow`.
+- **Gauges:** needle −135° + 270°·f; speed gauge 260 m/s → 0.298, 1 km/s → 0.399, 250 km/s → 0.813, 1 Mm/s → 0.917 (cap 3 Mm/s).
+- **Ship screen:** throttle fill geometry at −0.25, 0, 0.5, 1 (pos/width/colour); SpeedC strings and zone colours; drive priority; chips table; FA chip text.
+- **Nav screen:** locked texts (name, class upper, distance upper, ETA, "--:--:--" when receding), unlocked texts, list skipping the locked entry, footer variants.
+- **Holos/status:** status priority order (each condition alone and combined).
+- **Lamps:** blink phase (`clock % 0.8` = 0.4 → lit, 0.6 → dark), fuel 0.09/0.2/0.3, heat 0.7/0.9/1.1, warning on crash / heat 1.2 / impact.
+- **Radar:** log mapping (300 m → 0.14 R, 1,000 km → 0.94 R, 2,000 km → hidden), height clamp, stem visibility at 0.012, sizes, colours, locked first, max 12, nothing while unpowered or near the surface.
+- **Markers:** ordering by centre distance, cycle wraps, clear, lock lost when the target disappears, focus within 0.14 H, label rules (TextRange, alwaysNamed, focused/locked show distance), declutter (priority, ties by distance, 8 px gap, solid boxes first, off-screen never hidden), ETA with closing speed, panel text format `%-9s%12s`.
+- **Dust:** layer targets at 0 / 1.5 / 3.5 / 5.5 / 600 / 1000 / 2000 m/s (space and air), the 0.3 s rate limit, length and baseVisible at 300 m/s (10.3 m, 0.52), near/edge fades, wrap, active count in air.
+- **Streaks:** fade at 240 / 445 / 650, density/stream/length/active at 650 / 1 k / 100 k / 1 M (3.11), wrap jump, `on` only at wrap, transparency profile T(u) incl. cut stages.
+- **Exhaust:** length, speeds, rates, brightness, veil threshold for glow 0 / 0.04 / 0.5 / 1 × boost; `setEnabled(false)` clears.
+- **ShipVisual:** visibility truth table over {seated, external, aboard} × {hideInside, hideSeated, cockpitOnly, gear stowed/out, gearClosed, forced} and "no cockpit" fallback.
+- **Notices:** timers (game time, paused), replacement, survey 2 % steps, docking warn colour.
+- **No allocation:** 10,000 frames of HUD + markers + FX + cockpit logic under the existing allocation counter.
+
+### 10.5 Desktop harness scenarios (`desktop/.../Scenarios.kt`, 2400 × 1080 and `--cutout`)
+
+| Name | Script | Proves |
+|---|---|---|
+| `cockpit-boot` | launch, shots at 0.1, 0.5, 1.2, 1.6, 2.2, 3.0 s after the reveal | dark → flicker → lamp test → needles → holos → powered (compare with the timeline) |
+| `cockpit-screens` | fixed state: Luna locked, 53 km/s APPROACH limit 85 km/s, throttle 60 %, fuel 18 %, heat 1.1, FA off, boost cooldown 2.4 s, gear up; shot + PNG dump of the screen atlas | every screen text, colour and bar against 6.4 (the atlas dump is the 1:1 check) |
+| `cockpit-look` | `look 140 0`, `look −140 0`, `look 0 −70`, `look 0 80` | levers and hands, holos, overhead, no clipping at the near plane |
+| `cockpit-controls` | throttle −25 / 0 / 100 %, stick 8 directions, yaw | lever and stick angles in `debugInfo` + shots |
+| `cockpit-lights` | `lights off/on` | roof set vs panel set, decorative screens off below level 0.4 |
+| `hud-external` | external view near Earth with a target | flat stack, target panel, prompt position, no overlap with touch controls (20:9, 16:9, cutout) |
+| `markers` | Earth orbit with Luna and a station in view; lock next ×3, clear; point the nose at a moon | focus distance, declutter (Luna over the station), brackets tween, TextRange |
+| `fx-speed` | `setspeed` 0, 5, 100, 300, 650, 2 k, 100 k, 1 M; `mood` × 3 | dust and streak counts (`getStats` equivalent) and looks |
+| `fx-air` | inside an atmosphere at 200 / 1500 m/s | air streaks, streaks gone |
+| `exhaust` | external view, throttle 0 / 0.5 / 1, boost | flame length and brightness |
+| `blackout` | `strain 8 0`, `strain 12 1` | darkness and redout colour, arrow above it |
+| `notices` | toast + comms + docking aid + survey together | layout of 6.9 without overlaps |
+| `hud-alloc` | 10 s with cockpit, markers, FX, HUD and notices active | zero allocations, CPU ms |
+
+### 10.6 Data extraction tool
+
+`tools/roblox/cockpit_layout.py` (stream-parse `Assets.rbxmx` with `iterparse`, never load it whole; decode `AttributesSerialize` including CFrame rotation ids): for `Assets/Ships/Varrow/Cockpit` (layout identical in all ships) export every carrier part (path, eye-space CFrame, size, colour, material, transparency, attributes), every SurfaceGui (face, px/stud, brightness, z-offset) with its GuiObject tree (class, name, position/size UDim2, anchor, rotation, colours, transparencies, font, text size, text, alignment, image → icon name via the `Icon` attribute, UICorner, UIStroke, UIGradient, UITextSizeConstraint), and every light (type, colour, brightness, range, angle, face, `Switched`, `OnColor`, `GuiPower`). Output a JSON asset or a generated `CockpitLayout.kt`. The ships importer joins its glTF meshes to these records by hierarchy path (the glTF has no transparent parts and no attributes).
+
+---
+
+## 11. Decisions, open questions and risks
+
+### 11.1 Decisions taken in this spec (implementers follow them unless the user says otherwise)
+
+`docs/port/DECISIONS.md` (the lead's answers; the user asked for independent work without questions) takes precedence. It settles for this area: cruise cap **0.5 c** and **no unit above Mm** (D2, D4: "20,509 Mm" with grouping); impact warnings against terrain **on** (D16, so the danger mood, IMPACT WARNING and the WARNING lamp become live near the ground); renames **"MASS LOCK" → "MASS SHADOW"** and **"DOCKING COMPUTER" → "AUTO-DOCK"** (D30); audio stand-ins and voice lines as text (D31); **Michroma bundled** (D32); **icons as vector shapes drawn in code** (D33); GUI exports optional, not blocking; stations not lockable from the system map (D21); the reticle, velocity marker and GEAR bar removed (D20).
+
+1. **Markers are a 2D overlay** drawn after the 3D pass (ShipOverlay's anchor trick is dropped), far to near; ring, label and declutter rules exactly as 3.7.
+2. **Cockpit screens render to a texture atlas** at 10 Hz, round-robin (≤ 2 canvases per frame), mipmapped; the radar sweep is a rotating quad; decorative panels are baked once.
+3. **Dust and speed streaks run on the GPU** with Roblox's formulas (fades, widths in pixels by depth, near clip, edge fade, wrap, transparency profiles); **distance lines (off since 2026-11-06) and the screen-space speed lines are not ported** (config kept, off).
+4. **Exhaust** = ship-space particle pools per nozzle with Roblox's numbers; glow disc emissive and engine light follow `updatePlumes`.
+5. **Cockpit layout data** comes from `Assets.rbxmx` through a tool (10.6); meshes from the ships import; joined by hierarchy path.
+6. **The cockpit has its own depth pass** (near 0.05 m) and **baked two-layer lighting** (switched roof set, panel set).
+7. **Phone layout** per 6.9: prompt bottom at 0.64 H in both views; the external-view flat stack hides while the docking aid shows; marker sizes in `u` (ring 16 u, name 9 u, distance 10 u).
+8. **Cockpit buttons mirror the touch actions** (`pressAction`) and are not tappable by default (Q3 below).
+9. **LOCK tap = cycle (T), long-press = clear (Y)**; tapping a marker locks it (Q2 below).
+10. **Timers on game time** (notices, gear, boot, blink), so pausing freezes them.
+11. **Units** through `TextBuf`, "Mm"/"Mm/s" mixed case, grouping above 99.95 Mm, nothing above Mm (D4).
+12. **Scale:** `TextRange` 2,000 km → 6 Gm, radar maximum 1,000 km → 3 Gm and the giant-blip threshold 2.5 km → 7.5 Mm (×S, like D26's survey thresholds; `RadarRangeMin 300 m` stays for stations); streak `TopSpeed = min(0.5 c, 1e6·S)` = 150 Mm/s; speed gauge maximum = 150 Mm/s; everything ship-local absolute (9.5).
+13. The flat stack and the target panel stay **hidden in the cockpit view** as in Roblox; on phones a **minimal flat readout** (speed + limit/zone, throttle %, target name/distance/ETA) shows in the cockpit view by default, with a settings toggle "FLAT HUD IN COCKPIT" (9.2; Q1 below).
+14. **Cockpit FOV** default 80° vertical as Roblox (setting 60–100), no lens shift until on-device tests ask for it (9.2).
+15. **Renamed strings** (D30): chip `M-LOCK` → `M-SHADOW`, status `MASS LOCKED` → `MASS SHADOW`, docking prompt `DOCKING COMPUTER` → `AUTO-DOCK`; the lamp has no text (icon only).
+16. **Icons** are vector shapes drawn in code with AFloidDEV's motif names and the drawing sizes of 6.7 (D33); **Michroma** is added to the font atlas for the cockpit's big numbers (D32).
+17. **Sounds** (button hover/press, lock tone, comms, toast) use the audio port's stand-ins (D31); notice voice lines are skipped or shown as text per the audio/voice port.
+18. Not ported: the painted cockpit image path, the box-hull fallback, multiplayer pilot markers, Studio-only status helpers (replaced by `debugInfo`).
+19. `air` (dust air mode) = inside an atmosphere; `surface` (radar off, status SURFACE) = the near-ground band (D3, `02-flight.md` 9.5). `atmosphereState` comes from the planet-entry port (seamless entry with an optional landing assist, D14): the LANDING LED is lit while the assist flies or the ship is inside an atmosphere; status ATMOS ENTRY = descending inside an atmosphere, ASCENDING = climbing out of it, unless that port keeps explicit ENTRY/EXIT phases.
+
+### 11.2 Remaining questions (each has a default the port uses until answered)
+
+1. **Flight data in the cockpit view on phones.** Default: show the minimal flat readout (decision 13). Alternative: strict 1:1 (3D screens only, ~1 mm labels).
+2. **Touch locking.** Default: tap a marker to lock it, LOCK tap cycles, LOCK long-press clears (decision 9).
+3. **Cockpit buttons on touch.** Default: visual only (decision 8). Alternative: a look-around "console mode" where taps press caps.
+4. **Off-screen lock arrow** (Kotlin-only chevron; Roblox shows the locked target first on the radar instead). Default: keep it as a phone aid behind a setting, on.
+5. **Cockpit lights and music toggles** (3D buttons in Roblox). Default: pause-menu toggles.
+6. **Glance** (hold on a 3D screen to zoom in, 9.2). Default: not built in the first pass.
+
+### 11.3 Risks
+
+- **Cockpit cost on mid-range phones** (≈ 650 parts, ~30 dynamic canvases, many lights). Mitigation: merged meshes, baked lighting, RTT at 10 Hz with half resolution, performance preset.
+- **Readability** of the 3D screens on a phone (section 9.2); the look stays 1:1, the information comes from the minimal flat readout (decision 13).
+- **Unexported GUIs, icons and sounds:** the proposals in 6.5, 6.6 and the vector icons (6.7) may differ from the original look.
+- **Ships import dependency:** part identity, the attributes and the invisible carrier parts (absent from the glTF) are required for levers, buttons, gear, visibility and the screens.
+- **Touch arbitration** between floating controls and taps (markers, console mode), including the lever's double-tap all-stop.
+- **Depth and transparency** of the cockpit pass (near plane, canopy glass hidden from inside, emissive screens over the world).
+- **Noise and particle look** will not be bit-identical to Roblox (`math.noise`, ParticleEmitter randomness); compare by screenshots.
+- **Focus with a lens shift:** if a lens shift is ever added (9.2), the focus test, the flight arrow and the prompt must use the projected flight direction instead of the screen centre.
+- **Scale effects:** with the 0.5 c cap the speed gauge puts the whole combat band below 23 % and the streaks saturate only at 150 Mm/s; check on device that cruise still feels fast (tune `TopSpeed` down if the streaks look thin at typical trip speeds).
+
+---
+
+## Appendix A · Strings
+
+Roblox strings as shipped. Port renames (`DECISIONS.md` D30): `M-LOCK` → `M-SHADOW`, `MASS LOCKED` → `MASS SHADOW`, `DOCKING COMPUTER` → `AUTO-DOCK` (the station-side "STATION MASS LOCK" toast text belongs to `08`); key names become per-device labels (9.1).
+
+| Where | Strings |
+|---|---|
+| Flat HUD (`ShipHud`) | `FUEL`, `FUEL  (SCOOPING)`, `HEAT`, `THROTTLE`, `SPEED`, `DRIVE`, `ACCEL`, `G-FORCE`, `AGILITY`, `MASS`, `ALTITUDE`, `GRAVITY`, `PITCH`, `F-ASSIST`, `THRUST`, `CRUISE`, `BOOST`, `OVERLOADED`, `boost %.1fs`, `boost ready`, `best turn`, `climb`, `dive`, `level`, `ON`, `OFF`, `(surface %.2f g)`, `(<zone> · max <speed>)`, `AUTOPILOT` |
+| Target panel | `TARGET LOCKED`, `DISTANCE`, `ETA`, `Unknown` |
+| Zones (`ShipGravity.zoneLabel`) | `OPEN SPACE`, `APPROACH`, `DEPARTURE`, `GRAVITY WELL`, `HEAT ZONE`, `LOW ALTITUDE`, `STATION ZONE`, `SYSTEM EDGE`, `SURFACE` |
+| Autopilot status | `STANDBY`, `NO TARGET`, `ENGAGED`, `ALIGNING`, `CRUISING`, `BRAKING`, `ARRIVED`, `TARGET LOST`, `MANUAL OVERRIDE`, `ATMOSPHERE` |
+| Warp state (nav footer) | `IDLE`, `ALIGN`, `COUNTDOWN`, `TUNNEL`, `ARRIVE` |
+| Nav screen | `NAVIGATION`, `SOL` (system), `NO TARGET`, `PRESS TARGET OR <key>`, `ETA <hh:mm:ss>`, `AUTOPILOT  STANDBY`, `AUTOPILOT  <status>`, `HYPERSPACE  <state>`, tag `NAV // TARGET`, boot `NAV // ONLINE` |
+| Ship screen | `SHIP`, ship names (`VARROW`, `BRANNOCK`, `MORVEN`, `KESSOCK`, `LOCHRAN`, `CALDER`, `TORRIN`, `DORNOCH`), `M/S`, `KM/S`, `Mm/s`, `MAX <speed>`, `THR`, drive `THRUST`/`CRUISE`/`BOOST`/`REVERSE`/`AUTOPILOT`/`HYPERSPACE`, `<n> G`, chips `F-ASSIST`/`FA OFF`, `BOOST`, `GEAR`, `SCOOP`, `M-LOCK`, tag `SHIP // STATUS`, boot `SHIP // ONLINE` |
+| Gauges | `THR`, `SPD` |
+| Holos | `BODY`, `ALTITUDE`, `GRAVITY`, `PITCH`, `MASS`, `AGILITY`, `BOOST`, `STATUS`, `DEEP SPACE`, `<n> G`, `<±n> DEG`, `<n> T`, `<n> S`, `READY`, `--` |
+| Status line | `HULL FAILURE`, `OVERHEATING`, `IMPACT WARNING`, `HYPERSPACE`, `ATMOS ENTRY`, `ASCENDING`, `SURFACE`, `HEAT HIGH`, `MASS LOCKED`, `NOMINAL` |
+| Boot lines | `POWER BUS`, `SENSOR ARRAY`, `FLIGHT CONTROL`, `NAV COMPUTER`, `ALL SYSTEMS GO` |
+| Buttons (labels / cap text) | `TARGET`, `CLEAR TARGET` (`CLR`), `AUTOPILOT`, `SYSTEM MAP`, `STAR MAP`, `HYPERSPACE JUMP`, `FLIGHT ASSIST`, `BOOST`, `LANDING`, `EXTERNAL VIEW`, `COCKPIT LIGHTS` (`LGT`), `MUSIC`; tooltip key `[T]` |
+| Decorative panels | `THRUST`, `RCS`, `AUX PWR`, `SCN`, `COM`, `DAT`, `LNK`, `CRG`, `DCK`, `AUX`, `SEC`, `HULL SEAL`, `COOLANT LOOP`, `B-2`, `PUMP A 98%`, `41 C`, `AUX 2`, `01`–`04`, `PRESS`, `O2 MIX`, `SCRUB`, `HEAT`, `VENT`, `SEAL`, `ON` |
+| Prompt (from other areas) | `PRESS <key> TO LAND`, `DESCEND TO LAND`, `LANDING BLOCKED  <reason>`, `ATMOSPHERIC ENTRY`, `DESCENT`, `LEVELLING OFF`, `LEAVING ATMOSPHERE`, `ASCENT`, `CLIMB TO LEAVE ATMOSPHERE`, `CLIMB TO RETURN TO SPACE`, `<key>   REQUEST DOCKING   ·   <station>`, `CONTACTING <station> ...`, `<key>   DOCKING COMPUTER        <key>   CANCEL REQUEST`, `<key>   TAKE THE CONTROLS` |
+| Toast titles (all callers) | `SURVEY COMPLETE`, `SURVEY FAILED`, `FIRST DISCOVERY`, `ALREADY CHARTED`, `FIRST VISIT`, `DATA SOLD`, `CARGO HOLD FULL`, `LOADED INTO HOLD`, `CARGO DELIVERED`, `MINING FAILED`, `TRADE FAILED`, `SALE FAILED`, `MARKET UNAVAILABLE`, `REFUELLED`, `REFUEL FAILED`, `STORAGE SOLD`, `CHARTER GRANTED`, `CONSTRUCTION STARTED`, `SITE ABANDONED`, `STATION NEWS`, `HOME STATION`, `HOME STATION SET`, `LAUNCH DENIED`, `LAND FIRST`, `JUMP BLOCKED`, `SYSTEM EDGE`, `MINIMUM ALTITUDE`, `SHIP DESTROYED`, `SHIP NOT AVAILABLE`, `WALKABLE INTERIOR`, `ON FOOT`, `CAN'T STAND UP`, `RAMP LOCKED`, `DISEMBARK`, `ELEVATOR`, `PERSONAL TERMINAL`, `RADIO`, `LIGHTS`, and the multiplayer-only `JOINED YOUR FRIEND`, `FRIEND NOT HERE`, `FRIEND NEARBY` (drop) |
+| Comms senders | `<STATION>  ·  TRAFFIC CONTROL`, `FLIGHT COMPUTER` |
+| Cockpit hint (proposal, 6.5) | desktop `HOLD RIGHT MOUSE TO LOOK AROUND  ·  CLICK THE COCKPIT BUTTONS`; touch `DRAG WITH TWO FINGERS TO LOOK AROUND` |
