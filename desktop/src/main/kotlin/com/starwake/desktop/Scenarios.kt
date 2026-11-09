@@ -209,10 +209,20 @@ object Scenarios {
             log("auto-dock from behind: $n frames, closest hull gap %.1f m".format(minHull))
             check(game.stateName == "docked") { "auto-dock from behind never docked: ${info()}" }
             check(minHull > 0f) { "auto-dock touched the hull (gap $minHull m)" }
+            frames(30)
+            check(field("prox").toFloat() > 1e30f) { "slot wall latched into the proximity warning while docked: ${info()}" }
             shot("st-docked")
-            // --- ram the back of the hub at 120 m/s with the throttle held: must stop at the hull
+            // --- launch, pause at once for 3 s, resume: the launch grace must not run out under pause
             game.launchFromStation()
-            frames(5)
+            frames(2)
+            cmd("pause")
+            frames(180)
+            cmd("resume")
+            var minProx = Float.MAX_VALUE
+            for (i in 0 until 60) { frame(); minProx = minOf(minProx, field("prox").toFloat()) }
+            info()
+            check(minProx >= 60f) { "PROXIMITY flashed after a launch + pause (prox $minProx m)" }
+            // --- ram the back of the hub at 120 m/s with the throttle held: must stop at the hull
             cmd("ram-station")
             frames(1)
             minHull = Float.MAX_VALUE

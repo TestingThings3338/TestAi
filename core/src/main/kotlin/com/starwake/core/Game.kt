@@ -76,7 +76,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         get() = "state=$stateName landed=$landed landing=$landing docking=$docking docked=$docked " +
             "alt=${"%.1f".format(here.altitude - spec.collisionRadius)} speed=${"%.1f".format(ship.speed)} " +
             "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex " +
-            "hull=${"%.1f".format(if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE)}"
+            "hull=${"%.1f".format(if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE)} " +
+            "prox=${"%.1f".format(proximity)}"
 
     // ------------------------------------------------------------------ state
     private var state = STATE_MENU
@@ -567,6 +568,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         chase.mode = 0
         chase.snapTo(ship)
         flightTime = 0f
+        launchTime = -100f
         hints = 1f
         menu.dragHint = 0f
         lockKind = LOCK_NONE
@@ -686,9 +688,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             // station hulls join the proximity warning. Not while auto-docking (it flies its own clear
             // route, and collide() did not run to refresh the value) or landed, nor just after a launch,
             // which starts 40 m off the slot
-            if (docking || landed) {
+            // (an overlay opened this frame, e.g. on docking, skipped collide() too)
+            if (docking || docked || landed || overlay != OVERLAY_NONE) {
                 proximity = Float.MAX_VALUE
-            } else if (here.nearestStation >= 0 && time - launchTime > LAUNCH_GRACE) {
+            } else if (here.nearestStation >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
                 proximity = minOf(proximity, stationCollision.clearance(ship, system.stations[here.nearestStation]))
             }
             if (landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
@@ -1067,8 +1070,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         dustOrigin.set(ship.pos)
     }
 
-    /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
-    /** Puts the ship [dist] m behind HOME STATION (opposite its slot), nose on the hub, flying at it at [speed]. */
+    /** Harness hook: puts the ship [dist] m behind HOME STATION (opposite its slot), nose on the hub, flying at it at [speed]. */
     private fun debugBehindStation(dist: Double, speed: Float) {
         stationPort(0)
         val st = system.stations[0]
@@ -1078,11 +1080,16 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         ship.vel.set(dockDir).scale(speed)
         ship.angVel.zero()
         touch.throttle = if (speed > 0f) 0.6f else 0f
+        landed = false
         landing = false
+        liftTime = 0f
+        gear = 0f
         docking = false
         chase.snapTo(ship)
+        dustOrigin.set(ship.pos)
     }
 
+    /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
     private fun debugDrop(alt: Double) {
         system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
         val b = system.bodies[here.nearestBody]
@@ -1319,7 +1326,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         controls.clearAxes()
         chase.snapTo(ship)
         docked = false
-        launchTime = time
+        launchTime = flightTime
         overlay = OVERLAY_NONE
         screenChanged()
         showMessage("LAUNCHED  ·  " + system.stations[dockStation].name)
@@ -1481,13 +1488,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     /**
-     * Claims the screen box of a centred label at ([x], [y]) [w] wide with [lines] lines; false
+     * Claims the screen box of a label at ([x], [y]) reaching [left]/[right] from x, [lines] lines; false
      * (nothing claimed) if it would overlap a label already placed this frame.
      */
-    private fun claimLabel(x: Float, y: Float, w: Float, lines: Int, force: Boolean): Boolean {
+    private fun claimLabel(x: Float, y: Float, left: Float, right: Float, lines: Int, force: Boolean): Boolean {
         val u = frame.u
-        val x0 = x - w * 0.5f - 3f * u
-        val x1 = x + w * 0.5f + 3f * u
+        val x0 = x - left - 3f * u
+        val x1 = x + right + 3f * u
         val y0 = y - 9f * u
         val y1 = y + (if (lines > 1) 20f else 5f) * u
         if (!force) {
@@ -1598,13 +1605,24 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private fun labelAndDistance(ui: UiRenderer, a: Float, kind: Int, i: Int, x: Float, y: Float, col: Int, withDistance: Boolean, dist: Double) {
         val u = frame.u
         val name = targetName(kind, i)
+        // measure the whole label (name, and the distance line with its unit to the right)
+        val nameHalf = ui.textWidth(name, 9f * u, 0.18f) * 0.5f
+        var left = nameHalf
+        var right = nameHalf
+        var unit = ""
+        var numW = 0f
+        if (withDistance) {
+            unit = formatDistance(buf.clear(), dist.toFloat())
+            numW = ui.textWidth(buf, 11f * u, 0f, FontData.MONO)
+            left = maxOf(left, numW * 0.5f)
+            right = maxOf(right, numW * 0.5f + 4f * u + ui.textWidth(unit, 8.5f * u))
+        }
         // the locked/aimed label always shows (it is placed first, so nothing is under it yet)
-        if (!claimLabel(x, y, ui.textWidth(name, 9f * u, 0.18f), if (withDistance) 2 else 1, withDistance)) return
+        if (!claimLabel(x, y, left, right, if (withDistance) 2 else 1, withDistance)) return
         ui.text(name, x, y, 9f * u, col, UiRenderer.CENTER, tracking = 0.18f, shadow = 0.7f)
         if (withDistance) {
-            val unit = formatDistance(buf.clear(), dist.toFloat())
-            val tw = ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
-            ui.text(unit, x + tw * 0.5f + 4f * u, y + 14f * u, 8.5f * u, col, shadow = 0.7f)
+            ui.text(buf, x, y + 14f * u, 11f * u, col, UiRenderer.CENTER, shadow = 0.7f, face = FontData.MONO)
+            ui.text(unit, x + numW * 0.5f + 4f * u, y + 14f * u, 8.5f * u, col, shadow = 0.7f)
         }
     }
 
