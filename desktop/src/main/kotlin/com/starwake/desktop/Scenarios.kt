@@ -323,6 +323,36 @@ object Scenarios {
             "DECISIONS 21: the ship flies on under the map (position advances by v·3 s), the stick is released and recentred, PAUSE freezes",
         ) { SessionScenarios.mapNonPausing(it) },
 
+        "sol-start" to Scenario(
+            "sol-start",
+            "Sol: docked at MERIDIAN in the station's frame while Earth carries it (11.16 km/s, the slot holds still), LAUNCH into Earth's frame, a lock on Earth, the map, the save-game clock a day on",
+        ) { SolScenarios.start(it) },
+
+        "sol-views" to Scenario(
+            "sol-views",
+            "Sol from the cockpit: Earth, Luna, Mars, Jupiter and Saturn from a few radii with their locks, Earth from Luna; Jupiter offers no LAND, answers L with LANDING BLOCKED and holds a dive at its cloud tops",
+        ) { SolScenarios.views(it) },
+
+        "sol-trip" to Scenario(
+            "sol-trip",
+            "Sol: MERIDIAN to Mars at full throttle with the nose on Mars, timed to Mars's mass-shadow edge (about a minute) and to 60 km; peak speed at most 0.5 c; shots on the way",
+        ) { SolScenarios.trip(it) },
+
+        "sol-docking" to Scenario(
+            "sol-docking",
+            "Sol: the real auto-dock from 1.5 km behind each of the six stations (no-op GL), in its frame, clear of the hull in and out; then each station on approach (GL)",
+        ) { SolScenarios.docking(it) },
+
+        "orbits" to Scenario(
+            "orbits",
+            "03 9.5: a ship parked over Phobos rides a 6 h clock jump (Phobos turns 1.05 times, 18.2 deg net) and over Earth 4 days (88.9 deg round the Sun), keeping its spot in the frame; the map at t0, 6 h and 4 days on",
+        ) { SolScenarios.orbits(it) },
+
+        "ring-debris" to Scenario(
+            "ring-debris",
+            "03 9.5: flying through Saturn's ring at 300 m/s (FA off), half resolution: many rocks in the B ring (f 0.75), almost none in the Cassini division (the profile's gap, f 0.863), the hit and heat log; none away from rings",
+        ) { SolScenarios.ringDebris(it) },
+
         "perf" to Scenario(
             "perf",
             "Flight with continuous two-thumb input (--perf-frames, default 600): CPU ms per drawFrame and bytes allocated per frame",

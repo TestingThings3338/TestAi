@@ -57,15 +57,17 @@ float fbm(vec3 p) {
 }
 """
 
-    // ---------------------------------------------------------------- lit meshes (ship, rocks)
+    // ---------------------------------------------------------------- lit meshes (stations, ring debris)
 
     private const val LIT_VS = """
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_mat;
 #ifdef INSTANCED
+// ring debris (RingDebris.instances): position and scale, rotation quaternion, squash and shade
 layout(location = 4) in vec4 i_posScale;
-layout(location = 5) in vec4 i_axisSpin;
+layout(location = 5) in vec4 i_rot;
+layout(location = 6) in vec4 i_shape;
 #endif
 uniform mat4 u_viewProj;
 uniform mat4 u_model;
@@ -81,12 +83,11 @@ void main() {
     vec3 p = a_pos;
     vec3 n = a_normal;
 #ifdef INSTANCED
-    vec3 k = i_axisSpin.xyz;
-    float ang = i_axisSpin.w * u_time + i_posScale.x * 0.37;
-    float c = cos(ang);
-    float s = sin(ang);
-    p = p * c + cross(k, p) * s + k * dot(k, p) * (1.0 - c);
-    n = n * c + cross(k, n) * s + k * dot(k, n) * (1.0 - c);
+    // a squashed rock (Roblox: sphere.mesh scaled by its radii), turned by its quaternion
+    p *= i_shape.xyz;
+    n = normalize(n / i_shape.xyz);
+    p += 2.0 * cross(i_rot.xyz, cross(i_rot.xyz, p) + i_rot.w * p);
+    n += 2.0 * cross(i_rot.xyz, cross(i_rot.xyz, n) + i_rot.w * n);
     p = p * i_posScale.w + i_posScale.xyz;
 #endif
     vec4 wp = u_model * vec4(p, 1.0);
@@ -95,9 +96,8 @@ void main() {
     vec4 pal = u_palette[mi];
     v_albedo = pal.rgb * a_mat.y;
 #ifdef INSTANCED
-    // per-rock tint variation so the field doesn't look cloned
-    float hv = fract(i_posScale.x * 0.1234 + i_posScale.z * 0.0731 + i_posScale.w * 0.37);
-    v_albedo *= vec3(0.7 + 0.5 * hv, 0.7 + 0.45 * hv, 0.7 + 0.4 * hv);
+    // the rock's shade (VertexColor = tint x shade)
+    v_albedo *= i_shape.w;
 #endif
     v_params = vec4(u_matParams[mi].xyz, pal.a);
     gl_Position = u_viewProj * wp;

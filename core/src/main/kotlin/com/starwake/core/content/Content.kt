@@ -17,8 +17,12 @@ class Content(fontMetrics: String, val fontAtlas: ByteArray, val system: StarSys
     val stationMeshes: Array<FloatArray> = Array(StationMesh.MODELS) { StationMesh.build(it) }
     val stationLights: Array<FloatArray> = Array(StationMesh.MODELS) { StationMesh.lights(it) }
 
+    /** The ring-debris rock (one lumpy icosphere, unit size), drawn instanced and squashed per rock (RingDebris). */
+    val debrisRock: FloatArray = AsteroidMesh.build(DEBRIS_ROCK_SEED, 2)
+
     companion object {
         const val MAX_STARS = 6500
         const val MAX_DUST = 700
+        const val DEBRIS_ROCK_SEED = 84213
     }
 }

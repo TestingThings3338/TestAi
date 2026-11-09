@@ -344,12 +344,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      *
      * Screens: `launch [space|fade]` (instant docked start / instant free-flight start / the real
      * LAUNCH with fade, LOADING and reveal), `menu`, `settings`, `pause`, `resume`, `map`, `reveal`.
-     * Flight: `fa [on|off]`, `boost`, `throttle v`, `stick x y` / `stick off` (held cursor, radius
+     * Flight: `fa [on|off]`, `boost`, `throttle v`, `speed v` (velocity along the nose; with FA off it
+     * holds), `stick x y` / `stick off` (held cursor, radius
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
-     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
+     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz [ux uy uz]]`,
      * `near <body> [alt]`, `face <body>` (nose on a body), `teleport-low`, `teleport-surface`,
-     * `lock-station [s]` (locks a station, TRANQUILITY by default), `dock [s]`, `docked [s]`,
+     * `lock-station [s]` (locks a station, TRANQUILITY by default), `lock-body <body>`, `dock [s]`, `docked [s]`,
      * `behind-station [s]`, `ram-station [s]`; a station [s] is its index, id or name (`ares`,
      * `SOL-ARES`), MERIDIAN when left out.
      * World: `clock <s>` (the save-game clock; the ship moves with its frame). Diagnostics: `state`
@@ -907,6 +908,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "fa" -> if (arg == null || (arg == "on") != s.ship.flightAssist) s.toggleFlightAssist()
             "boost" -> s.requestBoost()
             "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
+            "speed" -> num(1)?.let { s.debugSpeed(it.toFloat()) }
             "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
             "look" -> if (arg == "off" || arg == null) s.debugLook(false, 0f, 0f) else s.debugLook(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
             "view" -> when (arg) {
@@ -933,7 +935,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                     val ly = num(5)
                     val lz = num(6)
                     val look = lx != null && ly != null && lz != null
-                    s.teleport(x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look)
+                    // an optional up vector after the look direction (world +Y by default)
+                    val ux = num(7)
+                    val uy = num(8)
+                    val uz = num(9)
+                    val up = ux != null && uy != null && uz != null
+                    s.teleport(
+                        x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look,
+                        if (up) ux!!.toFloat() else 0f, if (up) uy!!.toFloat() else 1f, if (up) uz!!.toFloat() else 0f,
+                    )
                 }
             }
             "near" -> nearTarget(words, system)?.let { (i, alt) -> s.near(i, alt) }
@@ -945,6 +955,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 s.debugDrop(60.0)
             }
             "lock-station" -> s.lock(Session.LOCK_STATION, station ?: 1)
+            "lock-body" -> nearTarget(words, system)?.let { (i, _) -> s.lock(Session.LOCK_BODY, i) }
             "dock" -> s.requestDocking(station ?: 0)
             "docked" -> s.debugDocked(station ?: 0)
             "behind-station" -> s.debugBehindStation(station ?: 0, 1500.0, 0f)

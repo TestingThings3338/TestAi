@@ -1,5 +1,6 @@
 package com.starwake.core.gfx
 
+import com.starwake.core.content.AsteroidMesh
 import com.starwake.core.content.Content
 import com.starwake.core.content.DustField
 import com.starwake.core.content.Primitives
@@ -11,6 +12,7 @@ import com.starwake.core.game.ShipState
 import com.starwake.core.math.Mat4
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.TAU_F
+import com.starwake.core.world.RingDebris
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.sqrt
@@ -58,6 +60,9 @@ class SceneFrame {
     val fillColor = floatArrayOf(Environment.fillColor[0], Environment.fillColor[1], Environment.fillColor[2])
 
     var exposure = 1f
+
+    /** The ring debris around the ship (03-world.md 2.12), or null: drawn when it has visible rocks. */
+    var debris: RingDebris? = null
 }
 
 /**
@@ -84,6 +89,14 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private var dustCount = 0
     private val stationMeshes = Array(StationMesh.MODELS) { GpuMesh(gl, content.stationMeshes[it], intArrayOf(3, 3, 2)) }
     private val stationLit = LitProgram(gl, false)
+
+    /** Ring debris: one rock mesh drawn instanced, its instances rewritten each frame. */
+    private val debrisMesh = GpuMesh(gl, content.debrisRock, intArrayOf(3, 3, 2)).also {
+        it.setDynamicInstances(RingDebris.COUNT, intArrayOf(4, 4, 4), 4)
+    }
+    private val debrisLit = LitProgram(gl, true)
+    private val debrisPalette = FloatArray(40)
+    private val debrisParams = FloatArray(40)
     private val glowStream = QuadStream(gl, 64, intArrayOf(3, GL.FLOAT, 3, GL.FLOAT, 4, GL.FLOAT))
 
     private val envSize = if (quality == 0) 256 else 512
@@ -192,6 +205,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             gl.depthRange(0f, 1f)
         }
         drawStations(f, false)
+        drawDebris(f)
         val ship = f.ship
         if (ship != null) drawShip(f, ship, ShipModel.PASS_OPAQUE)
         drawDust(f)
@@ -467,6 +481,38 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         }
     }
 
+    /**
+     * The ring debris (RingDebris): the visible rocks in ring coordinates around [RingDebris.origin],
+     * one instanced draw, tinted by the ring's colour (`setRing`: rocky albedo times the tint; an
+     * icy ring is lighter, as the Moon textures are). Always near the ship: the near slice.
+     */
+    private fun drawDebris(f: SceneFrame) {
+        val d = f.debris ?: return
+        if (d.visible == 0) return
+        val c = f.camera
+        d.origin.relativeTo(c.pos, rel)
+        model.setTRS(rel.x, rel.y, rel.z, d.frame, 1f)
+        val t = d.tint
+        val lift = if (d.icy) 1.3f else 1f
+        debrisMaterial(AsteroidMesh.ROCK, t, 0.30f * lift, 0.9f)
+        debrisMaterial(AsteroidMesh.DARK_ROCK, t, 0.20f * lift, 0.93f)
+        debrisMaterial(AsteroidMesh.MINERAL, t, 0.40f * lift, 0.6f)
+        debrisMesh.updateInstances(d.instances, d.visible)
+        debrisLit.begin(c.viewProj, model, f, envTex, envLod, debrisPalette, debrisParams, 0f)
+        debrisMesh.drawInstanced(d.visible)
+    }
+
+    /** Palette entry [i]: the ring tint (squared, about linear) times [albedo], with [rough]ness. */
+    private fun debrisMaterial(i: Int, tint: FloatArray, albedo: Float, rough: Float) {
+        val o = i * 4
+        for (k in 0 until 3) {
+            val v = tint[k].coerceIn(0f, 1.2f)
+            debrisPalette[o + k] = v * v * albedo
+        }
+        debrisPalette[o + 3] = rough
+        debrisParams[o] = 0f
+    }
+
     /** Glow sprites of the stations drawn in the slice [far], depth-tested against them. */
     private fun drawStationLights(f: SceneFrame, far: Boolean) {
         val c = f.camera
@@ -578,6 +624,8 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     fun dispose() {
         for (p in arrayOf(sky, star, dust, glow)) p.dispose()
         stationLit.dispose()
+        debrisLit.dispose()
+        debrisMesh.dispose()
         for (m in stationMeshes) m.dispose()
         bodies.dispose()
         fullscreen.dispose(); ships.dispose(); starMesh.dispose(); dustMesh.dispose()

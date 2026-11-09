@@ -140,6 +140,50 @@ class GpuMesh(
         gl.bindVertexArray(0)
     }
 
+    private var instanceStaging: ByteBuffer? = null
+    private var instanceStagingFloats: java.nio.FloatBuffer? = null
+    private var instanceFloats = 0
+
+    /**
+     * A per-instance float buffer of up to [maxCount] instances whose attributes start at
+     * [firstLocation], rewritten each frame with [updateInstances] (the staging buffer is allocated
+     * here, once).
+     */
+    fun setDynamicInstances(maxCount: Int, attribSizes: IntArray, firstLocation: Int) {
+        gl.bindVertexArray(vao)
+        if (instanceVbo == 0) instanceVbo = gl.genBuffer()
+        gl.bindBuffer(GL.ARRAY_BUFFER, instanceVbo)
+        val floats = attribSizes.sum()
+        gl.bufferData(GL.ARRAY_BUFFER, maxCount * floats * 4, null, GL.DYNAMIC_DRAW)
+        var offset = 0
+        for (i in attribSizes.indices) {
+            val loc = firstLocation + i
+            gl.enableVertexAttribArray(loc)
+            gl.vertexAttribPointer(loc, attribSizes[i], GL.FLOAT, false, floats * 4, offset)
+            gl.vertexAttribDivisor(loc, 1)
+            offset += attribSizes[i] * 4
+        }
+        gl.bindVertexArray(0)
+        val staging = Buffers.bytes(maxCount * floats * 4)
+        instanceStaging = staging
+        instanceStagingFloats = staging.asFloatBuffer()
+        instanceFloats = floats
+    }
+
+    /** Uploads the first [count] instances of [data] into the [setDynamicInstances] buffer (no allocation). */
+    fun updateInstances(data: FloatArray, count: Int) {
+        val floats = instanceStagingFloats ?: return
+        val staging = instanceStaging ?: return
+        val n = minOf(count * instanceFloats, floats.capacity())
+        if (n <= 0) return
+        floats.clear()
+        floats.put(data, 0, n)
+        staging.clear()
+        staging.limit(n * 4)
+        gl.bindBuffer(GL.ARRAY_BUFFER, instanceVbo)
+        gl.bufferSubData(GL.ARRAY_BUFFER, 0, n * 4, staging)
+    }
+
     fun draw(mode: Int = GL.TRIANGLES) {
         gl.bindVertexArray(vao)
         if (indexCount > 0) gl.drawElements(mode, indexCount, GL.UNSIGNED_SHORT, 0)

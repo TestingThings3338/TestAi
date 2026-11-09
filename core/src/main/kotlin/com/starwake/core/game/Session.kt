@@ -17,6 +17,7 @@ import com.starwake.core.math.clamp
 import com.starwake.core.math.expApproach
 import com.starwake.core.math.expoCurve
 import com.starwake.core.ui.UiHost
+import com.starwake.core.world.RingDebris
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -65,6 +66,21 @@ class Session(
     private val flight = FlightModel(spec)
     private val controls = ControlInput()
     val here = StarSystem.Locality()
+
+    /** Rocks in the ring plane around the ship (C65, 03-world.md 2.12). */
+    val debris = RingDebris()
+
+    /**
+     * Heat brought by ring-debris contacts (`systems:addHeat`). The heat system comes with the
+     * flight port (02); until then it only adds up here (debug read-out `rheat`).
+     */
+    var debrisHeat = 0.0
+        private set
+
+    /** Ring-debris contacts so far, and the cooldown of the hit feedback (`Rings.HitCooldownSeconds`). */
+    var debrisHits = 0
+        private set
+    private var debrisHitCooldown = 0f
 
     /** The Roblox cockpit and external views. */
     val camera = ShipCamera()
@@ -463,6 +479,7 @@ class Session(
         mark(FrameStep.C64)
         updateVoice(dt)
         mark(FrameStep.C65) // 03: ring debris
+        updateDebris(dt)
         mark(FrameStep.C66)
         updateDustMood(dt)
         mark(FrameStep.C67)
@@ -802,6 +819,26 @@ class Session(
         // the cockpit and external cameras scale it by CAMERA SHAKE when they apply it (C39)
         impact.add(a)
         chase.addShake(a * settings.cameraShake)
+    }
+
+    /**
+     * C65: the ring debris around the ship (`ringDebris:update(dt, shipPos, thrust.velocity)`). The
+     * velocity is relative to the ship's frame, which near a ring is its planet's. A contact plays
+     * the hit (Roblox `audio:playHit`, at most once a second: until the audio port a bump and a
+     * shake as strong as the hit sound would be loud) and brings heat.
+     */
+    private fun updateDebris(dt: Float) {
+        debris.count = if (settings.quality == 0) RingDebris.COUNT_LOW else RingDebris.COUNT
+        if (debrisHitCooldown > 0f) debrisHitCooldown -= dt
+        val hits = debris.update(dt.toDouble(), system, ship.pos, ship.vel)
+        if (hits <= 0) return
+        debrisHits += hits
+        debrisHeat += debris.heat
+        if (debrisHitCooldown <= 0f) {
+            debrisHitCooldown = RingDebris.HIT_COOLDOWN
+            host.haptic(Haptics.BUMP)
+            addShake(0.3f + clamp(ship.speed / 400f, 0f, 1.1f) * 0.5f)
+        }
     }
 
     /** Station hulls are solid (coarse proxies, see StationCollision). */
@@ -1163,6 +1200,7 @@ class Session(
         f.ship = ship
         f.shipView = if (mode.view == ShipView.COCKPIT) ShipModel.VIEW_COCKPIT else ShipModel.VIEW_EXTERIOR
         f.shipReach = shipReach
+        f.debris = debris
     }
 
     // ================================================================== debug (Roblox ShipDebug equivalents)
@@ -1180,17 +1218,24 @@ class Session(
         if (hold) camera.setLook(x, y)
     }
 
+    /** "speed v": the velocity (relative to the ship's frame) set to [v] m/s along the nose; with FA off it holds. */
+    fun debugSpeed(v: Float) {
+        if (mode.docked || mode.docking || mode.landed) return
+        ship.rot.rotate(0f, 0f, -v, ship.vel)
+        ship.speed = abs(v)
+    }
+
     /** "throttle v": the lever. */
     fun setThrottle(v: Float) {
         throttle = clamp(v, -1f, 1f)
         controls.throttle = throttle
     }
 
-    /** "teleport x y z [lx ly lz]": system metres, looking along l (default: keep the rotation); at rest. */
-    fun teleport(x: Double, y: Double, z: Double, lx: Float, ly: Float, lz: Float, look: Boolean) {
+    /** "teleport x y z [lx ly lz [ux uy uz]]": system metres, looking along l with up u (default: keep the rotation; up +Y); at rest. */
+    fun teleport(x: Double, y: Double, z: Double, lx: Float, ly: Float, lz: Float, look: Boolean, ux: Float = 0f, uy: Float = 1f, uz: Float = 0f) {
         undockQuietly()
         ship.pos.set(x, y, z)
-        if (look) ship.rot.lookRotation(lx, ly, lz, 0f, 1f, 0f)
+        if (look) ship.rot.lookRotation(lx, ly, lz, ux, uy, uz)
         ship.vel.zero()
         ship.angVel.zero()
         snapAfterJump()
@@ -1372,7 +1417,7 @@ class Session(
             "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
             "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name else "-"} limit=${"%.1f".format(here.speedLimit)} " +
             "ref=${system.frameName(refFrame).replace(' ', '_')} fpos=${"%.1f".format(fp.x)},${"%.1f".format(fp.y)},${"%.1f".format(fp.z)} " +
-            "clock=${"%.3f".format(system.clock)}"
+            "clock=${"%.3f".format(system.clock)} rocks=${debris.visible} rhits=$debrisHits rheat=${"%.3f".format(debrisHeat)}"
     }
 
     companion object {

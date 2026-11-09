@@ -122,7 +122,8 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val here = s.here
         val system = s.system
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
-        var warnY = frame.st + 52f * u
+        // below the first flight's "DRAG HERE TO LOOK AROUND" while it shows (it sits at the look strip's foot)
+        var warnY = frame.st + 52f * u + if (hints > 0.01f && touch.lookEnabled) 16f * u else 0f
         if (here.nearestBody == system.star && here.altitude < system.bodies[system.star].radius * 0.5) {
             val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
             ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
