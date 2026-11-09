@@ -632,6 +632,15 @@ object SolScenarios {
         if (num("rocks") != 0.0) fail("rocks shown away from any ring: ${field("rocks")}")
         cmd("fa on")
         cmd("view cockpit")
+        // a quit to the menu from inside the B ring: the menu scene draws none of the flight's rocks
+        inSaturnsRing(0.75, 60)
+        frames(3)
+        val inRing = num("sceneRocks").toInt()
+        if (inRing <= 0) fail("the scene draws no rocks in the B ring")
+        cmd("menu")
+        frames(3)
+        report.note("quit to the menu from the B ring: the scene drew $inRing rocks in flight, ${field("sceneRocks")} in the menu")
+        if (num("sceneRocks") != 0.0) fail("the menu still draws the last flight's ${field("sceneRocks")} rocks")
     }
 
     // ------------------------------------------------------------------ orbits

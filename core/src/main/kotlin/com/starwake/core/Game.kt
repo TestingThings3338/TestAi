@@ -91,6 +91,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
             "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
+            "sceneRocks=${sceneFrame.debris?.visible ?: 0} " +
             (session?.debugState() ?: "menu")
 
     /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
@@ -827,6 +828,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         sceneFrame.ship = menuShip
         sceneFrame.shipView = ShipModel.VIEW_EXTERIOR
         sceneFrame.shipReach = orbit.distance + (m?.radius ?: 0f)
+        // the ring debris belongs to a flight: after a quit from inside a ring the menu must neither
+        // draw the last session's rocks nor keep them alive
+        sceneFrame.debris = null
         updateLighting(menuShip.pos)
     }
 

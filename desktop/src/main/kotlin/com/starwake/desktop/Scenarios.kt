@@ -355,7 +355,7 @@ object Scenarios {
 
         "ring-debris" to Scenario(
             "ring-debris",
-            "03 9.5: flying through Saturn's ring at 300 m/s (FA off), half resolution: many rocks in the B ring (f 0.75), almost none in the Cassini division (the profile's gap, f 0.863), the hit and heat log; none away from rings",
+            "03 9.5: flying through Saturn's ring at 300 m/s (FA off), half resolution: many rocks in the B ring (f 0.75), almost none in the Cassini division (the profile's gap, f 0.863), the hit and heat log; none away from rings; a quit to the menu from the B ring leaves no rocks in the menu scene",
         ) { SolScenarios.ringDebris(it) },
 
         "perf" to Scenario(
