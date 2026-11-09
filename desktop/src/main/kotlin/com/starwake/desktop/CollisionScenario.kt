@@ -87,7 +87,7 @@ object CollisionScenario {
             val system = content.system
             val scene = SceneRenderer(gl, content, 2)
             val ui = UiRenderer(gl, content.font, content.fontAtlas)
-            val sc = StationCollision(FlightModel(ShipSpec.VARROW))
+            val sc = StationCollision(FlightModel(ShipSpec.STANDARD))
             s.drainErrors(0)
 
             val f = SceneFrame()

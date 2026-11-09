@@ -207,10 +207,14 @@ object RenderProbe {
             val platform = DesktopPlatform(opts.assetsDir)
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
             val scene = SceneRenderer(gl, content, 2)
+            val model = com.starwake.core.content.ShipModel.load("varrow") { platform.readAsset(it) }
+            scene.setShipModel(model)
             val system = content.system
             val home = system.stations.first { it.name == "HOME STATION" }
             val ship = ShipState()
             val f = SceneFrame()
+            f.gear = com.starwake.core.game.GearRig().also { it.setModel(model, down = false) }
+            f.shipReach = 250f
             f.quality = 2
             f.pxScale = h / 1080f
             f.time = 0.3f
@@ -233,8 +237,14 @@ object RenderProbe {
                 val fz = pos.z - fo.z
                 f.drawField = fx * fx + fy * fy + fz * fz < FIELD_RANGE * FIELD_RANGE
                 if (withShip) {
-                    ship.pos.set(pos.x + cam.forward.x * 16.5 - cam.up.x * 4.0, pos.y + cam.forward.y * 16.5 - cam.up.y * 4.0, pos.z + cam.forward.z * 16.5 - cam.up.z * 4.0)
+                    // the VARROW's centre 125 m ahead and 26 m below, like the chase camera
                     ship.rot.set(cam.rot)
+                    ship.rot.rotate(model.centreX, model.centreY, model.centreZ, out)
+                    ship.pos.set(
+                        pos.x + cam.forward.x * 125.0 - cam.up.x * 26.0 - out.x,
+                        pos.y + cam.forward.y * 125.0 - cam.up.y * 26.0 - out.y,
+                        pos.z + cam.forward.z * 125.0 - cam.up.z * 26.0 - out.z,
+                    )
                     ship.engineOutput = 0.4f
                     f.ship = ship
                 } else {

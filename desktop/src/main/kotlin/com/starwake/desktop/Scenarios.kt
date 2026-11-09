@@ -66,6 +66,11 @@ object Scenarios {
             "Draw calls, depth slices, body full-screen passes per frame: spawn, 30 km out, deep space, field 40/55 km, star behind/ahead",
         ) { RenderProbe.passes(it) },
 
+        "ships" to Scenario(
+            "ships",
+            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: chase, far chase, cockpit, gear in flight, menu backdrop per ship",
+        ) { ShipsScenario.run(it) },
+
         "map" to Scenario(
             "map",
             "System map without Game: opening view (none / OUTPOST II / PLANET III selected), pinch on PLANET II, two-finger pan, tap-select, ship close-ups, no per-frame allocation",

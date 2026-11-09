@@ -77,34 +77,45 @@ class StationCollision(private val flight: FlightModel) {
      * Cheap when the ship is more than the station radius + 50 m from its centre.
      */
     fun collide(ship: ShipState, st: StarSystem.Station): Float {
-        val dx = ship.pos.x - st.pos.x
-        val dy = ship.pos.y - st.pos.y
-        val dz = ship.pos.z - st.pos.z
-        val reach = st.radius + COLLIDE_RANGE
-        if (dx * dx + dy * dy + dz * dz > reach * reach) return 0f
-        // the delta is small here, so floats are exact enough in local space
-        st.rot.rotateInverse(dx.toFloat(), dy.toFloat(), dz.toFloat(), local)
-        var px = local.x
-        var py = local.y
-        var pz = local.z
-        val r = flight.spec.collisionRadius
+        val spec = flight.spec
+        val reach = st.radius + COLLIDE_RANGE + spec.reach - spec.collisionRadius
+        val ex = ship.pos.x - st.pos.x
+        val ey = ship.pos.y - st.pos.y
+        val ez = ship.pos.z - st.pos.z
+        if (ex * ex + ey * ey + ez * ez > reach * reach) return 0f
+        val r = spec.collisionRadius
+        val probes = spec.probes
         var impact = 0f
-        for (q in PROXIES[st.model]) {
-            val bx = px - q.bx
-            val by = py - q.by
-            val bz = pz - q.bz
-            val lim = q.br + r
-            if (bx * bx + by * by + bz * bz >= lim * lim) continue
-            val d = distance(q, px, py, pz)
-            if (d >= r) continue
-            val push = r - d
-            st.rot.rotate(nx, ny, nz, world)
-            val hit = flight.resolveContact(ship, world.x, world.y, world.z, push.toDouble())
-            if (hit > impact) impact = hit
-            // keep the local position in step with the push, so later proxies see the moved ship
-            px += nx * push
-            py += ny * push
-            pz += nz * push
+        var k = 0
+        while (k < probes.size) {
+            // each probe from where the earlier pushes left the ship
+            ship.rot.rotate(probes[k], probes[k + 1], probes[k + 2], world)
+            k += 3
+            val dx = ship.pos.x - st.pos.x + world.x
+            val dy = ship.pos.y - st.pos.y + world.y
+            val dz = ship.pos.z - st.pos.z + world.z
+            // the delta is small here, so floats are exact enough in local space
+            st.rot.rotateInverse(dx.toFloat(), dy.toFloat(), dz.toFloat(), local)
+            var px = local.x
+            var py = local.y
+            var pz = local.z
+            for (q in PROXIES[st.model]) {
+                val bx = px - q.bx
+                val by = py - q.by
+                val bz = pz - q.bz
+                val lim = q.br + r
+                if (bx * bx + by * by + bz * bz >= lim * lim) continue
+                val d = distance(q, px, py, pz)
+                if (d >= r) continue
+                val push = r - d
+                st.rot.rotate(nx, ny, nz, world)
+                val hit = flight.resolveContact(ship, world.x, world.y, world.z, push.toDouble())
+                if (hit > impact) impact = hit
+                // keep the local position in step with the push, so later proxies see the moved ship
+                px += nx * push
+                py += ny * push
+                pz += nz * push
+            }
         }
         return impact
     }
@@ -115,15 +126,27 @@ class StationCollision(private val flight: FlightModel) {
      * further out it returns a lower bound that is at least 113 m.
      */
     fun clearance(ship: ShipState, st: StarSystem.Station): Float {
-        val dx = ship.pos.x - st.pos.x
-        val dy = ship.pos.y - st.pos.y
-        val dz = ship.pos.z - st.pos.z
-        val r = flight.spec.collisionRadius
-        val d2 = dx * dx + dy * dy + dz * dz
-        val reach = st.radius + CLEARANCE_RANGE
-        if (d2 > reach * reach) return (sqrt(d2) - st.radius).toFloat() - r
-        st.rot.rotateInverse(dx.toFloat(), dy.toFloat(), dz.toFloat(), local)
-        return sceneDistance(PROXIES[st.model], local.x, local.y, local.z, Float.MAX_VALUE) - r
+        val spec = flight.spec
+        val r = spec.collisionRadius
+        val ex = ship.pos.x - st.pos.x
+        val ey = ship.pos.y - st.pos.y
+        val ez = ship.pos.z - st.pos.z
+        val d2 = ex * ex + ey * ey + ez * ez
+        val reach = st.radius + CLEARANCE_RANGE + spec.reach - r
+        if (d2 > reach * reach) return (sqrt(d2) - st.radius).toFloat() - spec.reach
+        val probes = spec.probes
+        var best = Float.MAX_VALUE
+        var k = 0
+        while (k < probes.size) {
+            ship.rot.rotate(probes[k], probes[k + 1], probes[k + 2], world)
+            k += 3
+            val dx = ship.pos.x - st.pos.x + world.x
+            val dy = ship.pos.y - st.pos.y + world.y
+            val dz = ship.pos.z - st.pos.z + world.z
+            st.rot.rotateInverse(dx.toFloat(), dy.toFloat(), dz.toFloat(), local)
+            best = minOf(best, sceneDistance(PROXIES[st.model], local.x, local.y, local.z, best + r) - r)
+        }
+        return best
     }
 
     /**

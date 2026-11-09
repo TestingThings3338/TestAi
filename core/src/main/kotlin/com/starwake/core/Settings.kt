@@ -1,5 +1,7 @@
 package com.starwake.core
 
+import com.starwake.core.content.ShipCatalog
+
 /** Player settings, persisted as a compact "key=value;" string through [Platform]. */
 class Settings {
     /** 0 low, 1 medium, 2 high. */
@@ -17,7 +19,9 @@ class Settings {
     var leftHanded = false
     var haptics = true
     var showFps = false
-    var livery = 0
+
+    /** Ship to fly: index into ShipCatalog (0 = VARROW). */
+    var ship = 0
 
     val renderScale: Float
         get() = when (quality) {
@@ -35,7 +39,7 @@ class Settings {
 
     fun serialize(): String =
         "q=$quality;fps=$fpsMode;roll=${b(stickXRoll)};climb=${b(pitchUpClimb)};sens=$sensitivity;" +
-            "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};livery=$livery"
+            "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};ship=$ship"
 
     fun deserialize(data: String?) {
         if (data.isNullOrEmpty()) return
@@ -54,7 +58,7 @@ class Settings {
                     "left" -> leftHanded = v == "1"
                     "hap" -> haptics = v == "1"
                     "showfps" -> showFps = v == "1"
-                    "livery" -> livery = v.toInt().coerceIn(0, 31)
+                    "ship" -> ship = v.toInt().coerceIn(0, ShipCatalog.all.size - 1)
                 }
             } catch (_: NumberFormatException) {
                 // ignore corrupt values, keep defaults

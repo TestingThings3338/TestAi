@@ -6,7 +6,7 @@ import kotlin.test.assertTrue
 
 class SettingsTest {
     private fun fields(s: Settings) = listOf(
-        s.quality, s.fpsMode, s.stickXRoll, s.pitchUpClimb, s.sensitivity, s.leftHanded, s.haptics, s.showFps, s.livery,
+        s.quality, s.fpsMode, s.stickXRoll, s.pitchUpClimb, s.sensitivity, s.leftHanded, s.haptics, s.showFps, s.ship,
     )
 
     @Test
@@ -21,7 +21,7 @@ class SettingsTest {
     fun serializeDeserializeRoundTrip() {
         val a = Settings().apply {
             quality = 0; fpsMode = 2; stickXRoll = false; pitchUpClimb = false; sensitivity = 1.35f
-            leftHanded = true; haptics = false; showFps = true; livery = 3
+            leftHanded = true; haptics = false; showFps = true; ship = 3
         }
         val text = a.serialize()
         val b = Settings().apply { deserialize(text) }
@@ -37,7 +37,7 @@ class SettingsTest {
         for (q in 0..2) for (f in 0..2) for (flag in listOf(true, false)) {
             val a = Settings().apply {
                 quality = q; fpsMode = f; stickXRoll = flag; pitchUpClimb = !flag; leftHanded = flag
-                haptics = !flag; showFps = flag; sensitivity = 0.5f + q * 0.25f; livery = f + q
+                haptics = !flag; showFps = flag; sensitivity = 0.5f + q * 0.25f; ship = f + q
             }
             assertEquals(fields(a), fields(Settings().apply { deserialize(a.serialize()) }))
         }
@@ -46,17 +46,17 @@ class SettingsTest {
     @Test
     fun serializedFormIsCompactKeyValuePairs() {
         val text = Settings().serialize()
-        assertEquals("q=2;fps=0;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;livery=0", text)
+        assertEquals("q=2;fps=0;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;ship=0", text)
         assertTrue(!text.contains(' ') && !text.contains('\n'))
     }
 
     @Test
     fun nullEmptyAndGarbageInputKeepTheCurrentValues() {
-        val s = Settings().apply { quality = 1; livery = 2; sensitivity = 0.8f }
+        val s = Settings().apply { quality = 1; ship = 2; sensitivity = 0.8f }
         val before = fields(s)
         for (junk in listOf(
-            null, "", ";;;", "garbage", "=", "=1", "q", "q=", "q=abc", "fps=1.5", "sens=fast", "livery=x",
-            "unknown=7", "q=1=2", "\u0000￿", "q=9999999999999", "sens=", "livery=-",
+            null, "", ";;;", "garbage", "=", "=1", "q", "q=", "q=abc", "fps=1.5", "sens=fast", "ship=x",
+            "unknown=7", "q=1=2", "\u0000￿", "q=9999999999999", "sens=", "ship=-",
         )) {
             s.deserialize(junk)
             assertEquals(before, fields(s), "input '$junk' must not change anything")
@@ -66,11 +66,11 @@ class SettingsTest {
     @Test
     fun partialAndMixedInputAppliesTheValidParts() {
         val s = Settings()
-        s.deserialize("q=0;fps=oops;sens=1.2;bogus;livery=4;showfps=1;;")
+        s.deserialize("q=0;fps=oops;sens=1.2;bogus;ship=4;showfps=1;;")
         assertEquals(0, s.quality)
         assertEquals(0, s.fpsMode, "invalid value keeps the default")
         assertEquals(1.2f, s.sensitivity)
-        assertEquals(4, s.livery)
+        assertEquals(4, s.ship)
         assertEquals(true, s.showFps)
         assertEquals(true, s.haptics, "missing keys keep the default")
         // later duplicates win
@@ -92,11 +92,11 @@ class SettingsTest {
     @Test
     fun outOfRangeValuesAreClamped() {
         val s = Settings()
-        s.deserialize("q=7;fps=-3;sens=9.5;livery=-2")
+        s.deserialize("q=7;fps=-3;sens=9.5;ship=-2")
         assertEquals(2, s.quality)
         assertEquals(0, s.fpsMode)
         assertEquals(1.5f, s.sensitivity)
-        assertEquals(0, s.livery)
+        assertEquals(0, s.ship)
         s.deserialize("q=-1;fps=99;sens=0.01")
         assertEquals(0, s.quality)
         assertEquals(2, s.fpsMode)

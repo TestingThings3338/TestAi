@@ -8,7 +8,13 @@ import com.starwake.core.math.clamp
 import kotlin.math.abs
 import kotlin.math.sqrt
 
-/** Performance envelope of a ship hull. Speeds in m/s, rates in rad/s, accelerations per second. */
+/**
+ * Performance envelope and collision shape of a ship hull. Speeds in m/s, rates in rad/s,
+ * accelerations per second, lengths in metres (ship space: origin = flight model pivot, nose -Z).
+ *
+ * The flight numbers are still the same for every hull (the Roblox handling arrives with the flight
+ * model port); the shape comes from the hull: Roblox's collision probes ([fromModel]).
+ */
 class ShipSpec(
     val name: String,
     val role: String,
@@ -33,11 +39,70 @@ class ShipSpec(
     val boostCost: Float = 0.42f,
     val boostAccelMultiplier: Float = 2.6f,
     val capacitorRecharge: Float = 0.12f,
+    /** Radius of every collision probe sphere. */
     val collisionRadius: Float = 7.0f,
+    /** Centres of the collision probes, ship space (x, y, z per probe). */
+    val probes: FloatArray = floatArrayOf(0f, 0f, 0f),
+    /** Height of the origin above the ground when the ship stands on its landing gear. */
+    val groundClearance: Float = collisionRadius,
+    /** Size of the hull (x width, y height, z length), metres. */
+    val sizeX: Float = 2f * collisionRadius,
+    val sizeY: Float = 2f * collisionRadius,
+    val sizeZ: Float = 2f * collisionRadius,
 ) {
+    /** Radius around the origin that holds every probe sphere (broad-phase bound). */
+    val reach: Float
+
+    init {
+        require(probes.isNotEmpty() && probes.size % 3 == 0) { "probes are x, y, z triples" }
+        var r = 0f
+        var i = 0
+        while (i < probes.size) {
+            r = maxOf(r, sqrt(probes[i] * probes[i] + probes[i + 1] * probes[i + 1] + probes[i + 2] * probes[i + 2]))
+            i += 3
+        }
+        reach = r + collisionRadius
+    }
+
     companion object {
-        /** Starter ship. The hull model is a stand-in until the Roblox ship geometry is exported. */
-        val VARROW = ShipSpec("VARROW", "LIGHT MULTIPURPOSE", 22_000)
+        /** Flight envelope of every hull for now; a single 7 m sphere at the origin (the old stand-in hull). */
+        val STANDARD = ShipSpec("STANDARD", "", 0)
+
+        /**
+         * Spec of a Roblox ship: name, role and price from the shipyard, the collision shape from the
+         * model like ShipStation.probeFor: spheres of radius max(2, smallest bounds side / 2) at the
+         * bounds centre and towards both ends (and both sides when the ship is wide), and the ground
+         * clearance RootToGround - SeatOffset.Y.
+         */
+        fun fromModel(entry: com.starwake.core.content.ShipCatalog.Entry, m: com.starwake.core.content.ShipModel): ShipSpec {
+            val sx = m.rbxBounds[0]
+            val sy = m.rbxBounds[1]
+            val sz = m.rbxBounds[2]
+            val radius = maxOf(2f, minOf(sx, minOf(sy, sz)) * 0.5f)
+            val cx = m.centreX
+            val cy = m.centreY
+            val cz = m.centreZ
+            val alongZ = maxOf(0f, sz * 0.5f - radius)
+            val alongX = maxOf(0f, sx * 0.5f - radius)
+            val wide = alongX > radius * 0.5f
+            val probes = FloatArray(if (wide) 15 else 9)
+            fun put(i: Int, x: Float, y: Float, z: Float) {
+                probes[i * 3] = x; probes[i * 3 + 1] = y; probes[i * 3 + 2] = z
+            }
+            put(0, cx, cy, cz)
+            put(1, cx, cy, cz - alongZ)
+            put(2, cx, cy, cz + alongZ)
+            if (wide) {
+                put(3, cx - alongX, cy, cz)
+                put(4, cx + alongX, cy, cz)
+            }
+            val ground = m.rbxBounds[6] - m.eyeY
+            return ShipSpec(
+                entry.name, entry.role, entry.price,
+                collisionRadius = radius, probes = probes, groundClearance = ground,
+                sizeX = sx, sizeY = sy, sizeZ = sz,
+            )
+        }
     }
 }
 
@@ -110,6 +175,7 @@ class ShipState {
 class FlightModel(var spec: ShipSpec) {
     private val local = Vec3()
     private val tmp = Vec3()
+    private val probe = Vec3()
 
     /**
      * Advances the ship by [dt]. [limit] is the dynamic speed limit for the current location
@@ -205,20 +271,50 @@ class FlightModel(var spec: ShipSpec) {
     }
 
     /**
-     * Pushes the ship out of a sphere and bounces it. Returns the impact speed (0 = no contact).
+     * Pushes the ship's collision probes out of a sphere and bounces the ship (each probe in turn,
+     * against the position the previous one left). Returns the largest impact speed (0 = no contact).
      * Double precision throughout: planet radii are millions of metres.
      */
     fun collideSphere(s: ShipState, cx: Double, cy: Double, cz: Double, radius: Double): Float {
-        val dx = s.pos.x - cx
-        val dy = s.pos.y - cy
-        val dz = s.pos.z - cz
+        val p = spec.probes
         val minDist = radius + spec.collisionRadius
-        val d2 = dx * dx + dy * dy + dz * dz
-        if (d2 >= minDist * minDist) return 0f
-        val d = sqrt(d2)
-        // exactly at the centre there is no direction to push along: pick "up"
-        if (d <= 1e-4) return resolveContact(s, 0f, 1f, 0f, minDist - d)
-        return resolveContact(s, (dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat(), minDist - d)
+        var impact = 0f
+        var i = 0
+        while (i < p.size) {
+            s.rot.rotate(p[i], p[i + 1], p[i + 2], probe)
+            i += 3
+            val dx = s.pos.x + probe.x - cx
+            val dy = s.pos.y + probe.y - cy
+            val dz = s.pos.z + probe.z - cz
+            val d2 = dx * dx + dy * dy + dz * dz
+            if (d2 >= minDist * minDist) continue
+            val d = sqrt(d2)
+            // exactly at the centre there is no direction to push along: pick "up"
+            val hit = if (d <= 1e-4) {
+                resolveContact(s, 0f, 1f, 0f, minDist - d)
+            } else {
+                resolveContact(s, (dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat(), minDist - d)
+            }
+            if (hit > impact) impact = hit
+        }
+        return impact
+    }
+
+    /** Gap (m) between the nearest collision probe and a sphere; negative while touching. */
+    fun clearance(s: ShipState, cx: Double, cy: Double, cz: Double, radius: Double): Double {
+        val p = spec.probes
+        var best = Double.MAX_VALUE
+        var i = 0
+        while (i < p.size) {
+            s.rot.rotate(p[i], p[i + 1], p[i + 2], probe)
+            i += 3
+            val dx = s.pos.x + probe.x - cx
+            val dy = s.pos.y + probe.y - cy
+            val dz = s.pos.z + probe.z - cz
+            val d = sqrt(dx * dx + dy * dy + dz * dz)
+            if (d < best) best = d
+        }
+        return best - radius - spec.collisionRadius
     }
 
     /**

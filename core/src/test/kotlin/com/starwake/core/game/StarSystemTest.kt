@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 
 class StarSystemTest {
     private val system = StarSystem()
-    private val local = ShipSpec.VARROW.maxSpeed
+    private val local = ShipSpec.STANDARD.maxSpeed
 
     private fun at(x: Double, y: Double, z: Double) = DVec3(x, y, z)
 
@@ -90,7 +90,7 @@ class StarSystemTest {
 
     @Test
     fun dynamicLimitLetsTheShipCruiseAndSlowDown() {
-        val model = FlightModel(ShipSpec.VARROW)
+        val model = FlightModel(ShipSpec.STANDARD)
         val s = ShipState()
         val c = ControlInput().also { it.throttle = 1f }
         repeat(60 * 15) { model.step(s, c, 1f / 60f, StarSystem.MAX_SPEED) }

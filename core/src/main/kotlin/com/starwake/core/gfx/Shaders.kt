@@ -152,6 +152,103 @@ void main() {
     fun litVs(instanced: Boolean) = HEADER + (if (instanced) "#define INSTANCED\n" else "") + LIT_VS
     val litFs = HEADER + LIT_FS
 
+    // ---------------------------------------------------------------- Roblox ships (ShipModel)
+
+    /** Bones the ship shader holds (the largest rig, Brannock, has 36). */
+    const val SHIP_MAX_BONES = 48
+
+    /**
+     * Quantised ship vertices (see ShipModel): position u16 x3 + material/bone, normal snorm8,
+     * sRGB colour + opacity. Each vertex is moved by its bone (3x4, landing gear) in ship space,
+     * then by u_model (camera-relative ship pose).
+     */
+    val shipVs = HEADER + """
+layout(location = 0) in vec4 a_pos;
+layout(location = 1) in vec4 a_normal;
+layout(location = 2) in vec4 a_color;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform vec4 u_quant;
+uniform vec4 u_bones[$SHIP_MAX_BONES * 3];
+uniform vec4 u_mat[16];
+out vec3 v_pos;
+out vec3 v_normal;
+flat out vec3 v_albedo;
+flat out vec4 v_params;
+flat out float v_alpha;
+void main() {
+    float bone = floor(a_pos.w * (1.0 / 256.0));
+    int mi = int(a_pos.w - bone * 256.0 + 0.5);
+    int bi = int(bone + 0.5) * 3;
+    vec4 p = vec4(u_quant.xyz + a_pos.xyz * u_quant.w, 1.0);
+    vec4 r0 = u_bones[bi];
+    vec4 r1 = u_bones[bi + 1];
+    vec4 r2 = u_bones[bi + 2];
+    vec3 sp = vec3(dot(r0, p), dot(r1, p), dot(r2, p));
+    vec3 n = a_normal.xyz;
+    vec3 sn = vec3(dot(r0.xyz, n), dot(r1.xyz, n), dot(r2.xyz, n));
+    vec4 wp = u_model * vec4(sp, 1.0);
+    v_pos = wp.xyz;
+    v_normal = mat3(u_model) * sn;
+    v_albedo = pow(a_color.rgb, vec3(2.2));
+    v_params = u_mat[mi];
+    v_alpha = a_color.a;
+    gl_Position = u_viewProj * wp;
+}
+"""
+
+    /**
+     * The lit model of the rocks and stations plus what Roblox materials need: Neon (and the engine
+     * glow discs) is unlit, its colour times the glow; glass is blended with its opacity.
+     */
+    val shipFs = HEADER + """
+precision highp float;
+in vec3 v_pos;
+in vec3 v_normal;
+flat in vec3 v_albedo;
+flat in vec4 v_params; // x metallic, y emissive, z engine-driven, w roughness
+flat in float v_alpha;
+uniform vec3 u_sunDir;
+uniform vec3 u_sunColor;
+uniform vec3 u_fillDir;
+uniform vec3 u_fillColor;
+uniform vec3 u_ambient;
+uniform float u_engine;
+uniform float u_exposure;
+uniform float u_envLod;
+uniform samplerCube u_env;
+out vec4 o_color;
+""" + TONEMAP + """
+void main() {
+    vec3 N = normalize(v_normal);
+    vec3 V = normalize(-v_pos);
+    float metal = v_params.x;
+    float rough = v_params.w;
+    vec3 alb = v_albedo;
+    float ndl = max(dot(N, u_sunDir), 0.0);
+    vec3 H = normalize(u_sunDir + V);
+    float ndh = max(dot(N, H), 0.0);
+    float ndv = max(dot(N, V), 0.001);
+    float gloss = 1.0 - rough;
+    float specPow = exp2(gloss * 10.0 + 1.0);
+    float specNorm = (specPow + 8.0) * 0.0398;
+    vec3 F0 = mix(vec3(0.04), alb, metal);
+    float fres = pow(1.0 - ndv, 5.0);
+    vec3 F = F0 + (vec3(1.0) - F0) * fres * gloss;
+    vec3 diff = alb * (1.0 - metal);
+    vec3 col = (diff * ndl + F * (specNorm * pow(ndh, specPow) * ndl)) * u_sunColor;
+    col += diff * max(dot(N, u_fillDir), 0.0) * u_fillColor;
+    col += (diff + F0 * 0.5) * u_ambient * (0.75 + 0.25 * N.y);
+    vec3 R = reflect(-V, N);
+    vec3 env = textureLod(u_env, R, rough * u_envLod).rgb;
+    env *= env;
+    col += env * F * (0.6 + 1.4 * metal) * 1.6;
+    float emis = v_params.y * mix(1.0, u_engine, v_params.z);
+    if (v_params.y > 0.0) col = alb * emis;
+    o_color = vec4(tonemap(col), v_alpha);
+}
+"""
+
     // ---------------------------------------------------------------- background (cubemap)
 
     val skyVs = HEADER + """

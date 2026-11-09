@@ -9,12 +9,13 @@ import com.starwake.core.math.Rng
 import com.starwake.core.math.Vec3
 import kotlin.math.abs
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class FlightModelTest {
-    private val spec = ShipSpec.VARROW
+    private val spec = ShipSpec.STANDARD
     private val model = FlightModel(spec)
     private val dt = 1f / 60f
 
@@ -42,8 +43,11 @@ class FlightModelTest {
     // ---------------------------------------------------------------- spec sanity
 
     @Test
-    fun kiteSpecIsInternallyConsistent() {
-        assertEquals("VARROW", spec.name)
+    fun standardSpecIsInternallyConsistent() {
+        assertEquals("STANDARD", spec.name)
+        // one probe at the origin: the sphere tests below see the plain collision sphere
+        assertContentEquals(floatArrayOf(0f, 0f, 0f), spec.probes)
+        assertEquals(spec.collisionRadius, spec.reach)
         assertTrue(spec.maxReverse < spec.maxSpeed && spec.maxSpeed < spec.boostSpeed)
         assertTrue(spec.boostCost in 0f..1f && spec.capacitorRecharge > 0f)
         assertTrue(spec.maxPitchRate > 0f && spec.maxYawRate > 0f && spec.maxRollRate > 0f)

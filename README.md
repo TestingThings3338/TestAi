@@ -4,7 +4,7 @@ A native Android version of **Untitled Space Exploration**, a game by AFloidDEV 
 
 **Status:** port milestone 1. It has the engine, the main menu, the flight model and touch controls, in an asteroid field next to a ringed gas giant.
 
-The ship in this build is a **stand-in hull** labelled VARROW. The real Roblox ships (VARROW, CALDER, LOCHRAN, BRANNOCK, KESSOCK, MORVEN, TORRIN, DORNOCH) and their cockpits will replace it once their part data is exported from Roblox Studio into `roblox/` (see below).
+You fly the real ships of the Roblox game: VARROW (the starter ship), TORRIN, CALDER, LOCHRAN, BRANNOCK, KESSOCK, DORNOCH and MORVEN, with their 3D cockpits, canopy glass, engine glow and animated landing gear. Pick one with the arrows on the ship card in the main menu. For now they all share one flight model; each ship's own handling comes with the flight-model port.
 
 ## Install the latest build on your phone
 
@@ -56,8 +56,9 @@ The game is played in landscape with two thumbs.
 
 ## How it is optimized for phones
 
-- **Custom OpenGL ES 3.0 renderer, with no game-engine overhead.** The APK is about 0.2 MB.
-  - The scene is drawn in about 12 draw calls. The asteroid field uses instanced rendering: one draw call per rock shape.
+- **Custom OpenGL ES 3.0 renderer, with no game-engine overhead.** The APK is about 3 MB, 2.8 MB of it the eight ships.
+  - The scene is drawn in about 15 draw calls. The asteroid field uses instanced rendering: one draw call per rock shape.
+  - A ship is 25,000–60,000 triangles in two meshes (hull, cockpit), drawn in one call per mesh for the solid parts and one for the glass. The landing gear moves in the vertex shader (one matrix per gear joint), so nothing is re-uploaded while it folds.
   - There are no post-processing passes. Tone mapping and gamma are done inside each shader, so no extra full-screen framebuffer traffic is needed.
   - The space background (nebula) and the gas giant's surface are baked into textures once at startup.
   - Text uses one signed-distance-field font atlas containing the game's fonts (Titillium Web, Sarpanch, Roboto Mono), which stays sharp at any size.
@@ -73,11 +74,15 @@ The game is played in landscape with two thumbs.
 
 ## Porting from Roblox
 
-The Roblox source lives in Roblox Studio and on the developer's PC. To port the real content, the export should go into `roblox/` in this repo:
+The Roblox exports are in `roblox/source/` (see `roblox/README.md`): the scripts, the eight ships as glTF (`Ships.gltf`) and the `Assets` folder (`Assets.rar`: ships with their attributes, stations, decks).
 
-- `roblox/scripts/` – every script as `.lua`.
-- `roblox/ships/<NAME>.json` – every part of each ship model: class, shape, position/rotation (CFrame), size, colour, material, transparency, and mesh IDs for MeshParts.
-- `roblox/docs/` – `SPACE_ENGINE_ANALYSIS.md`, memory/state notes and UI screenshots.
+The ships in `app/src/main/assets/ships/` are generated from them. To rebuild them after a new export (Python 3, standard library, and `bsdtar` to read the RAR):
+
+```bash
+python3 tools/roblox/convert_ships.py
+```
+
+The script header documents the binary format: quantised vertices, the view classes (cockpit, outside), the landing-gear joints, nozzles and lights. The output is deterministic, so unchanged inputs give identical files.
 
 ## Project layout
 
@@ -87,7 +92,9 @@ app/      Android shell: Activity, GLSurfaceView, GLES30 binding, touch and game
           refresh rate, keep-awake and performance hints
 desktop/  Headless preview tool: runs the real engine on Mesa (software OpenGL) and saves
           PNG screenshots plus CPU and allocation numbers
-tools/    gen_font.py builds the SDF font atlas from tools/fonts
+tools/    gen_font.py builds the SDF font atlas from tools/fonts;
+          roblox/convert_ships.py builds the ship assets, roblox/extract_lua.py the readable scripts
+roblox/   The Roblox exports (source/) the port is built from
 ```
 
 ## Building

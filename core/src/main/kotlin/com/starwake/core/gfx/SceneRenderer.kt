@@ -3,11 +3,11 @@ package com.starwake.core.gfx
 import com.starwake.core.content.AsteroidMesh
 import com.starwake.core.content.Content
 import com.starwake.core.content.DustField
-import com.starwake.core.content.KiteShip
-import com.starwake.core.content.Liveries
 import com.starwake.core.content.Primitives
+import com.starwake.core.content.ShipModel
 import com.starwake.core.content.StarField
 import com.starwake.core.content.StationMesh
+import com.starwake.core.game.GearRig
 import com.starwake.core.game.ShipState
 import com.starwake.core.math.DEG2RAD
 import com.starwake.core.math.Mat4
@@ -33,7 +33,15 @@ class SceneFrame {
     val camera = Camera()
     var time = 0f
     var ship: ShipState? = null
-    var livery = 0
+
+    /** How the ship is seen: ShipModel.VIEW_EXTERIOR (chase, menu) or VIEW_COCKPIT (from the seat). */
+    var shipView = ShipModel.VIEW_EXTERIOR
+
+    /** Landing-gear pose of the ship's model (bones). */
+    var gear: GearRig? = null
+
+    /** How far (m) from the camera the ship and its plumes reach: the near depth slice covers at least that. */
+    var shipReach = 0f
     var quality = 2
     var pxScale = 1f
     val dustVelocity = Vec3()
@@ -59,7 +67,7 @@ class SceneFrame {
 }
 
 /**
- * Renders the 3D scene. Everything is drawn camera-relative. Typical frame cost: ~12 draw calls,
+ * Renders the 3D scene. Everything is drawn camera-relative. Typical frame cost: ~15 draw calls,
  * one texture lookup for the background, no post-processing passes.
  *
  * Depth: the near scene shares one 24-bit depth buffer (near plane 0.5 m) only while everything in
@@ -68,7 +76,6 @@ class SceneFrame {
  * half of the depth range (see planSlices); the near slice then uses the front half.
  */
 class SceneRenderer(private val gl: Gl, private val content: Content, quality: Int) {
-    private val lit = LitProgram(gl, false)
     private val litInst = LitProgram(gl, true)
     private val sky = ShaderProgram(gl, "sky", Shaders.skyVs, Shaders.skyFs)
     private val star = ShaderProgram(gl, "stars", Shaders.starVs, Shaders.starFs)
@@ -76,7 +83,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val glow = ShaderProgram(gl, "glow", Shaders.glowVs, Shaders.glowFs)
 
     private val fullscreen = GpuMesh(gl, Primitives.fullscreenTriangle, intArrayOf(2))
-    private val shipMesh = GpuMesh(gl, content.ship, intArrayOf(3, 3, 2))
+    private val ships = ShipRenderer(gl)
     private val rockMeshes = Array(content.rocks.size) { v ->
         GpuMesh(gl, content.rocks[v], intArrayOf(3, 3, 2)).also {
             val f = content.field
@@ -90,7 +97,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private var dustCount = 0
     private val stationMeshes = Array(StationMesh.MODELS) { GpuMesh(gl, content.stationMeshes[it], intArrayOf(3, 3, 2)) }
     private val stationLit = LitProgram(gl, false)
-    private val glowStream = QuadStream(gl, 48, intArrayOf(3, GL.FLOAT, 3, GL.FLOAT, 4, GL.FLOAT))
+    private val glowStream = QuadStream(gl, 64, intArrayOf(3, GL.FLOAT, 3, GL.FLOAT, 4, GL.FLOAT))
 
     private val envSize = if (quality == 0) 256 else 512
     private val envTex = bakeEnvironment(envSize)
@@ -106,8 +113,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     private val tmp2 = Vec3()
     private val side = Vec3()
     private val axis = Vec3()
-    private val shipPalette = FloatArray(40)
-    private val shipParams = FloatArray(40)
     private val rockPalette = FloatArray(40)
     private val rockParams = FloatArray(40)
     private val identityRot = Quat()
@@ -174,7 +179,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         fieldRadius = fr * 1.01f
         smallRockRadius = small
         setQuality(quality)
-        setupPalettes(0)
         rockMaterial(AsteroidMesh.ROCK, 0.20f, 0.18f, 0.16f, 0.88f, 0.05f)
         rockMaterial(AsteroidMesh.DARK_ROCK, 0.11f, 0.10f, 0.095f, 0.92f, 0.05f)
         rockMaterial(AsteroidMesh.MINERAL, 0.36f, 0.40f, 0.46f, 0.35f, 0.45f)
@@ -203,27 +207,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         rockParams[i * 4] = metal
     }
 
-    private var paletteLivery = -1
+    /** The ship model drawn for [SceneFrame.ship] (uploads it; not per frame). */
+    fun setShipModel(m: ShipModel?) = ships.setModel(m)
 
-    private fun setupPalettes(livery: Int) {
-        if (livery == paletteLivery) return
-        paletteLivery = livery
-        val l = Liveries.all[livery.coerceIn(0, Liveries.all.size - 1)]
-        fun mat(i: Int, r: Float, g: Float, b: Float, rough: Float, metal: Float, emissive: Float = 0f, engine: Float = 0f) {
-            shipPalette[i * 4] = r; shipPalette[i * 4 + 1] = g; shipPalette[i * 4 + 2] = b; shipPalette[i * 4 + 3] = rough
-            shipParams[i * 4] = metal; shipParams[i * 4 + 1] = emissive; shipParams[i * 4 + 2] = engine
-        }
-        mat(KiteShip.PRIMARY, l.primary[0], l.primary[1], l.primary[2], 0.40f, 0.15f)
-        mat(KiteShip.SECONDARY, l.secondary[0], l.secondary[1], l.secondary[2], 0.36f, 0.2f)
-        mat(KiteShip.DARK, 0.075f, 0.08f, 0.09f, 0.55f, 0.5f)
-        mat(KiteShip.GLASS, 0.035f, 0.07f, 0.10f, 0.06f, 0.85f, emissive = 1.2f)
-        mat(KiteShip.ENGINE, 0.30f, 0.62f, 1.0f, 1f, 0f, emissive = 1.5f, engine = 1f)
-        mat(KiteShip.LIGHT, 0.30f, 0.90f, 1.0f, 1f, 0f, emissive = 2.4f)
-        mat(KiteShip.METAL, 0.62f, 0.64f, 0.66f, 0.28f, 1f)
-        mat(KiteShip.RED, 1.0f, 0.12f, 0.10f, 1f, 0f, emissive = 3f)
-        mat(KiteShip.GREEN, 0.10f, 1.0f, 0.30f, 1f, 0f, emissive = 3f)
-        mat(KiteShip.WHITE, 1f, 1f, 1f, 1f, 0f, emissive = 2.5f)
-    }
+    /** Ship draw calls and triangles of the last frame (diagnostics). */
+    val shipDrawCalls get() = ships.drawCalls
+    val shipTriangles get() = ships.triangles
 
     fun render(f: SceneFrame) {
         val cam = f.camera
@@ -237,6 +226,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.disable(GL.BLEND)
         gl.disable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
+        ships.resetStats()
 
         planSlices(f)
         drawBackground(f)
@@ -264,8 +254,10 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         drawAsteroids(f, false)
         drawStations(f, false)
         val ship = f.ship
-        if (ship != null) drawShip(f, ship)
+        if (ship != null) drawShip(f, ship, ShipModel.PASS_OPAQUE)
         drawDust(f)
+        // canopy glass after everything opaque, blended, without depth writes
+        if (ship != null) drawShip(f, ship, ShipModel.PASS_GLASS)
         drawStationLights(f, false)
         if (ship != null) drawShipGlows(f, ship)
         gl.depthMask(true)
@@ -339,7 +331,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
                 s.add(rel.dot(c.right), rel.dot(c.up), rel.dot(c.forward), stationBound[st.model], tx, ty)
             }
         }
-        s.plan(NEAR_REACH)
+        s.plan(maxOf(NEAR_REACH, if (f.ship != null) f.shipReach else 0f))
         depthSlices = if (s.split) 2 else 1
         if (!s.split) return
         // one scale for the whole slice keeps the depth order inside it exact (rocks vs station);
@@ -382,14 +374,30 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         }
     }
 
-    private fun drawShip(f: SceneFrame, ship: ShipState) {
-        setupPalettes(f.livery)
+    /**
+     * One pass of the ship model (ShipModel.PASS_*): opaque with the rest of the scene, glass after
+     * it with alpha blending and no depth writes. The engine glow discs follow the throttle like
+     * ShipHull.updatePlumes (half transparent at idle, opaque at full, 1.35x brighter on boost).
+     */
+    private fun drawShip(f: SceneFrame, ship: ShipState, pass: Int) {
+        val rig = f.gear ?: return
+        if (ships.model == null) return
         val c = f.camera
         ship.pos.relativeTo(c.pos, rel)
         model.setTRS(rel.x, rel.y, rel.z, ship.rot, 1f)
-        val engine = 0.25f + ship.engineOutput * 0.9f
-        lit.begin(c.viewProj, model, f, envTex, envLod, shipPalette, shipParams, engine)
-        shipMesh.draw()
+        val glow = ship.engineOutput.coerceIn(0f, 1f)
+        val engine = (0.5f + 0.5f * glow) * (if (ship.boosting) 1.35f else 1f) * ENGINE_DISC_GLOW
+        ships.begin(c.viewProj, f, envTex, envLod, engine)
+        if (pass == ShipModel.PASS_GLASS) {
+            gl.enable(GL.BLEND)
+            gl.blendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
+            gl.depthMask(false)
+            ships.draw(pass, f.shipView, model, rig)
+            gl.depthMask(true)
+            gl.disable(GL.BLEND)
+        } else {
+            ships.draw(pass, f.shipView, model, rig)
+        }
     }
 
     private fun drawDust(f: SceneFrame) {
@@ -417,34 +425,50 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         dustMesh.drawRange(GL.TRIANGLES, dustCount * 6)
     }
 
+    /**
+     * Exhaust plumes from the model's engine glow discs (ShipExhaust: a hot core that turns from
+     * near-white into the engine colour, and a wider, fainter veil; length = diameter x (0.4 idle ..
+     * 3.4 full) x 1.6 on boost) and soft halos on the outside lights. The Roblox ships' nav lights
+     * burn steadily (no blink pattern in the game's code).
+     */
     private fun drawShipGlows(f: SceneFrame, ship: ShipState) {
         val c = f.camera
         val t = f.time
+        val m = ships.model ?: return
         glowStream.begin()
-        val out = ship.engineOutput
+        val thrust = ship.engineOutput.coerceIn(0f, 1f)
         val boost = ship.boosting
-        // exhaust direction (+Z in ship space)
+        val stretch = if (boost) EXHAUST_BOOST_LENGTH else 1f
+        val bright = if (boost) EXHAUST_BOOST_BRIGHTNESS else 1f
+        // exhaust direction (+Z in ship space: the plume carrier is aligned with the ship)
         ship.rot.rotate(0f, 0f, 1f, axis)
-        for (n in KiteShip.nozzles) {
-            ship.rot.rotate(n, tmp)
-            ship.pos.relativeTo(c.pos, rel)
+        ship.pos.relativeTo(c.pos, rel)
+        for (n in m.nozzles) {
+            val d = n.diameter
+            ship.rot.rotate(n.x, n.y, n.z + d * EXHAUST_START, tmp)
             val px = rel.x + tmp.x
             val py = rel.y + tmp.y
             val pz = rel.z + tmp.z
-            val len = 2.2f + out * 7.5f
-            val width = KiteShip.NOZZLE_RADIUS * (1.0f + out * 0.25f)
-            val cr = if (boost) 0.75f else 0.35f
-            val cg = if (boost) 0.75f else 0.68f
-            plume(px, py, pz, len, width, 0.25f + out * 0.85f, cr, cg, 1f)
-            val halo = 1.1f + out * 1.0f
-            billboard(px, py, pz, halo, c, 0f, 0.25f, 0.55f, 1f, 0.2f + out * 0.3f)
+            val len = d * (EXHAUST_IDLE + (EXHAUST_FULL - EXHAUST_IDLE) * thrust) * stretch
+            // veil: wider, fainter, longer; only with some thrust
+            if (thrust > EXHAUST_VEIL_THRESHOLD) {
+                plume(px, py, pz, len * 1.5f, d * 0.75f, 0.28f * thrust * bright, n.r, n.g, n.b)
+            }
+            // hot core: the colour lerped 60 % towards white
+            val hr = n.r + (1f - n.r) * 0.6f
+            val hg = n.g + (1f - n.g) * 0.6f
+            val hb = n.b + (1f - n.b) * 0.6f
+            plume(px, py, pz, len, d * 0.475f, (0.45f + 0.55f * thrust) * bright, hr, hg, hb)
+            billboard(px, py, pz, d * (0.55f + 0.35f * thrust), c, 0f, n.r, n.g, n.b, (0.25f + 0.35f * thrust) * bright)
         }
-        // navigation lights: steady red/green, white strobes on the fins
-        light(ship, KiteShip.navGreen, c, 0.1f, 1f, 0.3f, 0.9f, 0.55f)
-        light(ship, KiteShip.navRed, c, 1f, 0.12f, 0.1f, 0.9f, 0.55f)
-        val phase = (t % 1.4f)
-        if (phase < 0.08f) {
-            for (s in KiteShip.strobes) light(ship, s, c, 1f, 1f, 1f, 1.0f, 0.6f)
+        // halos on the outside lights (Roblox: Neon parts with Point/SpotLights), not on parts the
+        // current view hides
+        val hidden = if (f.shipView == ShipModel.VIEW_COCKPIT) ShipModel.CLASS_EXTERIOR else ShipModel.CLASS_COCKPIT
+        for (l in m.lights) {
+            if (!l.enabled || l.cls == hidden || l.type == ShipModel.LIGHT_SURFACE) continue
+            ship.rot.rotate(l.x, l.y, l.z, tmp)
+            val size = if (l.type == ShipModel.LIGHT_SPOT) 1.1f else 0.5f + l.range * 0.07f
+            billboard(rel.x + tmp.x, rel.y + tmp.y, rel.z + tmp.z, size, c, 0f, l.r, l.g, l.b, minOf(1f, 0.3f + l.brightness * 0.18f))
         }
         gl.enable(GL.BLEND)
         gl.blendFunc(GL.ONE, GL.ONE)
@@ -456,12 +480,6 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.uniform1f(glow.u("u_time"), t % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
-    }
-
-    private fun light(ship: ShipState, local: Vec3, c: Camera, r: Float, g: Float, b: Float, intensity: Float, size: Float) {
-        ship.rot.rotate(local, tmp)
-        ship.pos.relativeTo(c.pos, rel)
-        billboard(rel.x + tmp.x, rel.y + tmp.y, rel.z + tmp.z, size, c, 0f, r, g, b, intensity)
     }
 
     /** Camera-facing quad. uv spans -1..1. */
@@ -650,12 +668,12 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     fun dispose() {
-        lit.dispose(); litInst.dispose()
+        litInst.dispose()
         for (p in arrayOf(sky, star, dust, glow)) p.dispose()
         stationLit.dispose()
         for (m in stationMeshes) m.dispose()
         bodies.dispose()
-        fullscreen.dispose(); shipMesh.dispose(); starMesh.dispose(); dustMesh.dispose()
+        fullscreen.dispose(); ships.dispose(); starMesh.dispose(); dustMesh.dispose()
         glowStream.dispose()
         for (m in rockMeshes) m.dispose()
         gl.deleteTexture(envTex)
@@ -664,14 +682,30 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     companion object {
         /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
         private const val GLOW_PERIOD = TAU_F / 61f
+
+        /** Emission of the engine glow discs at full throttle (tone-mapped: bright, still coloured). */
+        private const val ENGINE_DISC_GLOW = 1.6f
+
+        /** ShipConfig.Exhaust: start behind the disc, length at idle / full throttle (x diameter), boost stretch. */
+        private const val EXHAUST_START = 0.1f
+        private const val EXHAUST_IDLE = 0.4f
+        private const val EXHAUST_FULL = 3.4f
+        private const val EXHAUST_BOOST_LENGTH = 1.6f
+
+        /** BoostBrightness / Brightness (4 / 2.2). */
+        private const val EXHAUST_BOOST_BRIGHTNESS = 4f / 2.2f
+
+        /** No veil below this throttle (VeilThreshold). */
+        private const val EXHAUST_VEIL_THRESHOLD = 0.05f
         private const val STATION_DRAW_RANGE = 3.0e6f
 
         /** Station light sprites keep their apparent size beyond this distance (m). */
         private const val LIGHT_FAR = 20_000f
 
         /**
-         * Depth (m) of the camera's own cluster before anything else joins it: the ship (within
-         * ~40 m of the far chase camera), its plume and the dust streaks (~110 m), with margin.
+         * Least depth (m) of the camera's own cluster before anything else joins it: the dust
+         * streaks (~110 m), with margin. The ship and its plumes reach further from the far chase
+         * camera of a big hull; SceneFrame.shipReach extends the cluster to cover them.
          */
         private const val NEAR_REACH = 250f
 

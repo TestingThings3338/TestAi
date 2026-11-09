@@ -1,11 +1,13 @@
 package com.starwake.core
 
 import com.starwake.core.content.Content
-import com.starwake.core.content.Liveries
+import com.starwake.core.content.ShipCatalog
+import com.starwake.core.content.ShipModel
 import com.starwake.core.game.AsteroidField
 import com.starwake.core.game.ChaseCamera
 import com.starwake.core.game.ControlInput
 import com.starwake.core.game.FlightModel
+import com.starwake.core.game.GearRig
 import com.starwake.core.game.OrbitCamera
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
@@ -74,7 +76,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     /** Harness/test read-out of the flight state (allocates; never called per frame by the game). */
     val debugInfo: String
         get() = "state=$stateName landed=$landed landing=$landing docking=$docking docked=$docked " +
-            "alt=${"%.1f".format(here.altitude - spec.collisionRadius)} speed=${"%.1f".format(ship.speed)} " +
+            "ship=${model?.id} gear=${"%.2f".format(gearRig.downFraction)} stowed=${gearRig.stowed} " +
+            "alt=${"%.1f".format(here.altitude - spec.groundClearance)} speed=${"%.1f".format(ship.speed)} " +
             "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex " +
             "hull=${"%.1f".format(if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE)} " +
             "prox=${"%.1f".format(proximity)}"
@@ -105,7 +108,14 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private var displayApplied = false
 
     // ------------------------------------------------------------------ simulation
-    private val spec = ShipSpec.VARROW
+    private var spec = ShipSpec.STANDARD
+    override val shipSpec: ShipSpec get() = spec
+
+    /** The flown ship's hull (Settings.ship); models already loaded are kept for quick switching. */
+    private var model: ShipModel? = null
+    private val models = arrayOfNulls<ShipModel>(ShipCatalog.all.size)
+    private var shipIndex = -1
+    private val gearRig = GearRig()
     private val system = StarSystem()
     private val here = StarSystem.Locality()
     private val dustOrigin = com.starwake.core.math.DVec3()
@@ -134,13 +144,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private var lockIndex = -1
     private var aimKind = LOCK_NONE
 
-    // landing (L): mode, touchdown state and gear animation (legs 1.6 s, then doors 0.6 s)
+    // landing (L): mode, touchdown state; the gear itself animates in [gearRig] (legs 1.6 s, doors 0.6 s)
     private var landing = false
     private var landed = false
     private var landedBody = -1
     /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
     private var liftTime = 0f
-    private var gear = 0f
+
+    /** Gear position forced by the harness (null = follow landing), like ShipHull.gearForce. */
+    private var gearForce: Boolean? = null
+
+    /** 1 = gear down and locked, 0 = stowed (see GearRig.downFraction). */
+    private val gear: Float get() = gearRig.downFraction
     private var message: String? = null
     private var messageTime = 0f
     private val upV = Vec3()
@@ -191,9 +206,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val tmp2 = Vec3()
     private val buf = TextBuf(64)
     private val menuShipRot = Quat()
+    private val menuCentre = com.starwake.core.math.DVec3()
 
     init {
-        menuShipRot.setAxisAngle(0f, 1f, 0f, 2.75f)
+        // nose towards the menu column, the sunlit flank and top towards the camera
+        menuShipRot.setAxisAngle(0f, 1f, 0f, 1.25f)
         val roll = Quat().setAxisAngle(0f, 0f, 1f, 0.3f)
         val pitch = Quat().setAxisAngle(1f, 0f, 0f, 0.06f)
         menuShipRot.mul(menuShipRot, pitch).mul(menuShipRot, roll)
@@ -205,7 +222,56 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         menuShip.rot.set(menuShipRot)
         menuShip.engineOutput = 0.15f
         orbit.yaw = 0.18f
+        sceneFrame.gear = gearRig
     }
+
+    /**
+     * Makes ship [index] (ShipCatalog) the flown one: loads its model once, takes its spec (Roblox
+     * collision probes, ground clearance), landing gear, camera framing and menu placement, and hands
+     * it to the renderer. GL thread; not per frame (the first load of a ship reads its asset).
+     */
+    private fun selectShip(index: Int) {
+        val i = index.coerceIn(0, ShipCatalog.all.size - 1)
+        val entry = ShipCatalog.all[i]
+        val m = models[i] ?: ShipModel.load(entry.id) { platform.readAsset(it) }.also { models[i] = it }
+        shipIndex = i
+        model = m
+        spec = ShipSpec.fromModel(entry, m)
+        flight.spec = spec
+        gearRig.setModel(m, gearWanted())
+        configureCameras(entry, m)
+        scene?.setShipModel(m)
+    }
+
+    /**
+     * Camera framing from the Roblox external camera (ShipConfig.Ships[..].ExternalCamera: offset
+     * from the ship origin and pitch, seen at FieldOfView 80). The chase view takes that exact
+     * place and tilt; through its narrower lens the hull looks closer. The far chase backs off
+     * about the ship's centre until the hull fills the share of the screen it does in Roblox, and
+     * tilts so the centre sits at the same height on screen. The cockpit view sits at the pilot's
+     * eye (SeatOffset), and the menu orbit scales with the hull.
+     */
+    private fun configureCameras(entry: ShipCatalog.Entry, m: ShipModel) {
+        val ox = entry.cameraX - m.centreX
+        val oy = entry.cameraY - m.centreY
+        val oz = entry.cameraZ - m.centreZ
+        val tanRoblox = kotlin.math.tan(ROBLOX_FOV * 0.5f * DEG2RAD)
+        val tanChase = kotlin.math.tan(CHASE_FOV * 0.5f * DEG2RAD)
+        val k = tanRoblox / tanChase
+        tmp.set(ox, oy, oz)
+        tmp2.set(ox * k, oy * k, oz * k)
+        // angle from the camera down to the centre, minus Roblox's tilt = where the centre sits on screen
+        val a = kotlin.math.atan2(oy, oz)
+        val below = a + entry.cameraPitchDeg * DEG2RAD
+        val farTilt = a - kotlin.math.atan(kotlin.math.tan(below) * tanChase / tanRoblox)
+        screenPt.set(m.centreX, m.centreY, m.centreZ)
+        fwdV.set(m.eyeX, m.eyeY, m.eyeZ)
+        chase.configure(fwdV, screenPt, tmp, entry.cameraPitchDeg * DEG2RAD, tmp2, -farTilt)
+        orbit.distance = m.radius * MENU_ORBIT
+    }
+
+    /** Gear position the game asks for: down while landing or landed (or as forced by the harness). */
+    private fun gearWanted(): Boolean = gearForce ?: (state == STATE_FLIGHT && (landing || landed))
 
     // ================================================================== platform callbacks
 
@@ -224,6 +290,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         c.field.setQuality(settings.quality)
         scene = SceneRenderer(gl, c, settings.quality)
         appliedQuality = settings.quality
+        // the hull: loaded once, uploaded again with every new GL context
+        if (shipIndex != settings.ship) selectShip(settings.ship) else scene?.setShipModel(model)
         ui = UiRenderer(gl, c.font, c.fontAtlas)
         lastFrameNanos = 0L
         if (!displayApplied) {
@@ -285,7 +353,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     /**
      * Scripting hook for tests / the preview harness. Commands: "launch", "menu", "settings",
-     * "pause", "resume", "fa", "boost", "camera", "livery". Any thread (applied next frame).
+     * "pause", "resume", "fa", "boost", "camera", "ship" (next ship), "ship=<id>", "gear-down",
+     * "gear-up", "gear-auto" (force the landing gear like Roblox's ShipDebug gear switch), and the
+     * flight set-ups below. Any thread (applied next frame).
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
@@ -314,13 +384,15 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 sc.setQuality(q)
             } else {
                 sc?.dispose()
-                scene = SceneRenderer(gl, c, q)
+                scene = SceneRenderer(gl, c, q).also { it.setShipModel(model) }
             }
             appliedQuality = q
             if (lockKind == LOCK_ASTEROID && !c.field.active[lockIndex]) lockKind = LOCK_NONE
         }
 
         handleSystemEvents()
+        // a ship picked in the menu (or by the harness): swap the hull (allocates, only then)
+        if (settings.ship != shipIndex) selectShip(settings.ship)
         input.drain(this)
         update(dt)
         val active = if (state == STATE_FLIGHT && overlay == OVERLAY_NONE) 1 else 0
@@ -363,7 +435,21 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 }
                 "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(1500.0, 0f)
                 "ram-station" -> if (state == STATE_FLIGHT) debugBehindStation(400.0, 120f)
-                "livery" -> settings.livery = (settings.livery + 1) % Liveries.all.size
+                "ship" -> {
+                    settings.ship = (settings.ship + 1) % ShipCatalog.all.size
+                    settingsDirty = true
+                }
+                "gear-down" -> gearForce = true
+                "gear-up" -> gearForce = false
+                "gear-auto" -> gearForce = null
+                else -> if (cmd.startsWith("ship=")) {
+                    val id = cmd.substring(5)
+                    val i = ShipCatalog.all.indexOfFirst { it.id == id }
+                    if (i >= 0) {
+                        settings.ship = i
+                        settingsDirty = true
+                    }
+                }
             }
         }
         if (pauseRequested) {
@@ -578,7 +664,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         docking = false
         docked = false
         liftTime = 0f
-        gear = 0f
+        gearRig.update(0f, gearWanted(), true)
         message = null
         screenChanged()
     }
@@ -591,6 +677,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         orbit.idle = 10f
         lockKind = LOCK_NONE
         docked = false
+        gearRig.update(0f, gearWanted(), true)
         screenChanged()
     }
 
@@ -618,20 +705,32 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     private fun updateMenu(dt: Float) {
         orbit.update(dt)
-        menuShip.pos.y = system.home.y + AsteroidField.SHOWCASE_Y + sin(time * 0.7f) * 0.35
         tmpQ.setAxisAngle(0f, 0f, 1f, sin(time * 0.5f) * 0.03f)
         menuShip.rot.mul(menuShipRot, tmpQ)
+        // the hull's centre floats at the showcase point, bobbing gently; the orbit circles it
+        val m = model
+        val size = (m?.radius ?: 8f) / 8f
+        menuCentre.set(
+            system.home.x + AsteroidField.SHOWCASE_X,
+            system.home.y + AsteroidField.SHOWCASE_Y + sin(time * 0.7f) * 0.35 * size,
+            system.home.z + AsteroidField.SHOWCASE_Z,
+        )
+        if (m != null) menuShip.rot.rotate(m.centreX, m.centreY, m.centreZ, tmp) else tmp.zero()
+        menuShip.pos.set(menuCentre.x - tmp.x, menuCentre.y - tmp.y, menuCentre.z - tmp.z)
         menuShip.engineOutput = 0.12f + 0.03f * sin(time * 3f)
+        gearRig.update(dt, gearWanted(), false)
         val cam = sceneFrame.camera
-        orbit.apply(menuShip.pos, cam.pos, cam.rot)
+        orbit.apply(menuCentre, cam.pos, cam.rot)
         cam.fovY = 42f * DEG2RAD
-        // lens shift moves the ship to the right of the menu column on wide screens
+        // lens shift moves the ship to the right of the menu column on wide screens, and up off the ship card
         cam.shiftX = if (frame.w > frame.h * 1.4f) 0.30f else 0f
-        cam.shiftY = 0.04f
+        cam.shiftY = 0.16f
         sceneFrame.dustVelocity.zero()
         sceneFrame.dustIntensity = 0.35f
         sceneFrame.dustOrigin.set(cam.pos)
         sceneFrame.ship = menuShip
+        sceneFrame.shipView = ShipModel.VIEW_EXTERIOR
+        sceneFrame.shipReach = orbit.distance + (m?.radius ?: 0f)
         updateLighting(menuShip.pos)
     }
 
@@ -652,7 +751,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             if (touch.consumeAction() || gamepad.consumePress(GamepadState.DPAD_DOWN)) doAction()
 
             system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-            updateGear(dt)
+            gearRig.update(dt, gearWanted(), false)
             if (landed) holdLanded(dt)
             // landing mode: the vertical thrusters give a gentle, safe descent rate
             if (landing && !landed) controls.strafeY *= LANDING_VERTICAL
@@ -712,7 +811,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         chase.renderRotation(cam.rot)
         val boostFov = if (ship.boosting) 9f else 0f
         chase.fovBoost += (boostFov - chase.fovBoost) * expApproach(4f, dt)
-        cam.fovY = (if (chase.mode == 2) 60f else 52f + speedFrac * 3f + chase.fovBoost) * DEG2RAD
+        val cockpit = chase.mode == 2
+        cam.fovY = (if (cockpit) COCKPIT_FOV else CHASE_FOV + speedFrac * 3f + chase.fovBoost) * DEG2RAD
         cam.shiftX = 0f
         cam.shiftY = 0f
         // speed lines move at a capped "visual" speed so they stay readable at Mm/s
@@ -740,7 +840,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         dc.z += (tb - dc.z) * k
         sceneFrame.drawField = nearField(cam.pos)
         updateLighting(ship.pos)
-        sceneFrame.ship = if (chase.mode == 2) null else ship
+        // the real hull in every view: from the seat without the canopy cage (and with the pilot)
+        sceneFrame.ship = ship
+        sceneFrame.shipView = if (cockpit) ShipModel.VIEW_COCKPIT else ShipModel.VIEW_EXTERIOR
+        sceneFrame.shipReach = chase.viewDistance * (1f + chase.speedPull * 1.8f) + (model?.radius ?: 0f) + PLUME_REACH
     }
 
     private fun readControls(dt: Float) {
@@ -806,9 +909,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             val dy = field.py[i] - sy
             val dz = field.pz[i] - sz
             val r = field.collisionRadius[i]
-            val reach = r + 400f
+            val reach = r + 400f + spec.reach
             if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) continue
-            val d = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.collisionRadius
+            // the probes all lie within spec.reach of the origin: a rock this lower bound keeps clear
+            // of every probe, and farther than the nearest one so far, needs no closer look
+            val bound = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.reach
+            if (bound > 0f && bound >= nearest) continue
+            val d = flight.clearance(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r.toDouble()).toFloat()
             if (d < nearest) nearest = d
             if (d < 0f) {
                 val impact = flight.collideSphere(ship, ox + field.px[i], oy + field.py[i], oz + field.pz[i], r.toDouble())
@@ -829,7 +936,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val ui = ui ?: return
         val f = sceneFrame
         f.time = time
-        f.livery = settings.livery
         f.quality = scene.quality
         f.pxScale = surfaceH / 1080f
         f.camera.update(surfaceW, surfaceH)
@@ -1015,13 +1121,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         haptic(Haptics.TICK)
     }
 
-    /** Gear follows the landing mode: legs extend over 1.6 s, then the doors close over 0.6 s. */
-    private fun updateGear(dt: Float) {
-        val target = if (landing || landed) 1f else 0f
-        gear = com.starwake.core.math.approach(gear, target, dt / GEAR_TIME)
-    }
-
-    /** While landed: stay on the surface, level out, and wait for a take-off input. */
+    /** While landed: stand on the gear, level out, and wait for a take-off input. */
     private fun holdLanded(dt: Float) {
         val b = system.bodies[landedBody]
         val dx = ship.pos.x - b.pos.x
@@ -1029,7 +1129,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val dz = ship.pos.z - b.pos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
         upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-        val rest = b.radius + spec.collisionRadius
+        val rest = b.radius + spec.groundClearance
         ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
         ship.vel.zero()
         ship.angVel.zero()
@@ -1083,7 +1183,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         landed = false
         landing = false
         liftTime = 0f
-        gear = 0f
+        gearRig.update(0f, gearWanted(), true)
         docking = false
         chase.snapTo(ship)
         dustOrigin.set(ship.pos)
@@ -1097,7 +1197,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val dy = ship.pos.y - b.pos.y
         val dz = ship.pos.z - b.pos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
-        val r = b.radius + spec.collisionRadius + alt
+        val r = b.radius + spec.groundClearance + alt
         ship.pos.set(b.pos.x + dx / d * r, b.pos.y + dy / d * r, b.pos.z + dz / d * r)
         upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
         ship.rot.rotate(0f, 0f, -1f, fwdV)
@@ -1189,7 +1289,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 buf.append(pitchDeg, 0).append('°')
                 ui.textCentered(buf, x + bw * 0.5f, cy, 13f * u, col, face = FontData.MONO)
             } else {
-                val alt = maxOf(0.0, d - b.radius - spec.collisionRadius)
+                val alt = maxOf(0.0, d - b.radius - spec.groundClearance)
                 val unit = MapScreen.distanceText(buf, alt)
                 val tw = ui.textWidth(buf, 13f * u, face = FontData.MONO)
                 ui.textCentered(buf, x + bw * 0.5f - 6f * u, cy, 13f * u, col, face = FontData.MONO)
@@ -1209,8 +1309,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val u = frame.u
         val label = when {
             gear >= 1f -> if (landed) "LANDED" else "GEAR DOWN"
-            gear * GEAR_TIME < GEAR_LEGS -> "GEAR · LEGS"
-            else -> "GEAR · DOORS"
+            gearRig.doorsMoving -> "GEAR · DOORS"
+            else -> "GEAR · LEGS"
         }
         val x = frame.w * 0.5f
         val y = frame.h - frame.sb - 30f * u
@@ -1679,14 +1779,14 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val i = here.nearestBody
         if (i < 0) return
         val b = system.bodies[i]
-        if (here.altitude > spec.collisionRadius * 4 + ship.speed * dt * 2) return
+        if (here.altitude > maxOf(spec.reach, spec.groundClearance) * 2 + ship.speed * dt * 2) return
         if (landing && landable(i)) {
-            // touchdown: slow, gear down and roughly level -> park on the surface
+            // touchdown: slow, gear down and roughly level -> stand on the gear (RootToGround)
             val dx = ship.pos.x - b.pos.x
             val dy = ship.pos.y - b.pos.y
             val dz = ship.pos.z - b.pos.z
             val d = sqrt(dx * dx + dy * dy + dz * dz)
-            if (d - b.radius < spec.collisionRadius + 0.5) {
+            if (d - b.radius < spec.groundClearance + 0.5) {
                 upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
                 val radial = ship.vel.dot(upV)
                 ship.rot.rotate(0f, 1f, 0f, tmp)
@@ -1857,8 +1957,25 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         private const val LIFT_TIME = 1.2f
         /** Vertical thruster authority in landing mode: 0.1 x 70 m/s = a 7 m/s descent, under the touchdown limit. */
         private const val LANDING_VERTICAL = 0.1f
-        private const val GEAR_LEGS = 1.6f
-        private const val GEAR_TIME = 2.2f
+
+        /** Roblox's camera FieldOfView (ShipConfig.Camera, vertical degrees): the external offsets are made for it. */
+        private const val ROBLOX_FOV = 80f
+
+        /** Vertical FOV of the chase views at rest (they widen with speed and boost). */
+        private const val CHASE_FOV = 52f
+
+        /**
+         * Cockpit FOV: Roblox's, so the 3D cockpit is framed as built (dashboard and screens in
+         * view). Nothing of the cockpit comes closer than 0.69 m to the eye (Roblox scale: the pilot
+         * is 5 studs tall), so the camera's 0.5 m near plane holds here too.
+         */
+        private const val COCKPIT_FOV = 80f
+
+        /** Menu orbit distance relative to the hull's bounding radius. */
+        private const val MENU_ORBIT = 3.6f
+
+        /** Longest exhaust plume (m) beyond the hull, for the near depth slice. */
+        private const val PLUME_REACH = 40f
         private const val DOCK_STANDOFF = 300.0
         private const val DOCK_APPROACH_SPEED = 180f
 

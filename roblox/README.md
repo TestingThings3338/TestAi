@@ -18,3 +18,6 @@ python3 tools/roblox/extract_lua.py roblox/lua /tmp/rbx/*.rbxmx
 
 `roblox/lua/INDEX.tsv` lists every script with its line count. The port specs are in
 `docs/port/`.
+
+The game's ship assets (`app/src/main/assets/ships/`) are built from `Ships.gltf` and
+`Assets.rar` by `python3 tools/roblox/convert_ships.py` (format in its header).

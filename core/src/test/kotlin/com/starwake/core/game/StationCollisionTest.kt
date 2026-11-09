@@ -17,9 +17,9 @@ class StationCollisionTest {
     /** One station per model, with non-trivial orientations and real (1e9 m) coordinates. */
     private val stations = Array(StationMesh.MODELS) { m -> system.stations.first { it.model == m } }
     private val fields = FIELDS
-    private val flight = FlightModel(ShipSpec.VARROW)
+    private val flight = FlightModel(ShipSpec.STANDARD)
     private val sc = StationCollision(flight)
-    private val r = ShipSpec.VARROW.collisionRadius
+    private val r = ShipSpec.STANDARD.collisionRadius
 
     // ------------------------------------------------------------------ helpers
 
@@ -244,11 +244,11 @@ class StationCollisionTest {
                 s.rot.lookRotation(wAim.x, wAim.y, wAim.z, up.x, up.y, up.z)
                 s.vel.set(wAim).scale(100f)
                 ctl.clearAxes()
-                ctl.throttle = 100f / ShipSpec.VARROW.maxSpeed
+                ctl.throttle = 100f / ShipSpec.STANDARD.maxSpeed
                 var touched = false
                 val h = 1f / 120f
                 for (i in 0 until (20f / h).toInt()) {
-                    flight.step(s, ctl, h, ShipSpec.VARROW.maxSpeed)
+                    flight.step(s, ctl, h, ShipSpec.STANDARD.maxSpeed)
                     if (sc.collide(s, st) > 0f) touched = true
                     toLocal(st, s.pos, lp)
                     val gap = f.distance(lp.x.toDouble(), lp.y.toDouble(), lp.z.toDouble(), 30.0)
@@ -773,7 +773,7 @@ class StationCollisionTest {
          * A ship flying at the hull keeps its centre this far from the mesh: its collision radius,
          * less what hull greebles may stick out past the proxies. Anything closer is real penetration.
          */
-        val MIN_GAP = (ShipSpec.VARROW.collisionRadius - HULL_TOLERANCE).toDouble()
+        val MIN_GAP = (ShipSpec.STANDARD.collisionRadius - HULL_TOLERANCE).toDouble()
 
         /** Random auto-dock starts per model and band (anywhere free / 0-5 m off the hull). */
         const val RANDOM_STARTS = 25

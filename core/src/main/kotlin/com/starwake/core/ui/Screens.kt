@@ -1,7 +1,7 @@
 package com.starwake.core.ui
 
 import com.starwake.core.Settings
-import com.starwake.core.content.Liveries
+import com.starwake.core.content.ShipCatalog
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.UiRenderer
@@ -14,6 +14,9 @@ import kotlin.math.min
 interface GameActions : UiHost {
     val settings: Settings
     val deviceInfo: String
+
+    /** The ship being flown (follows Settings.ship once its model is loaded). */
+    val shipSpec: ShipSpec
     fun launch()
     fun openSettings()
     fun closeSettings()
@@ -44,8 +47,8 @@ class MainMenu(private val game: GameActions) {
     private val launch = group.add(Button("LAUNCH", primary = true) { game.launch() })
     private val settingsBtn = group.add(Button("SETTINGS") { game.openSettings() })
     private val exit = group.add(Button("EXIT") { game.exitApp() })
-    private val names = Array(Liveries.all.size) { Liveries.all[it].name }
-    private val livery = group.add(Selector("", names, { game.settings.livery }, { game.settings.livery = it; game.settingsChanged(false, false) }))
+    private val names = Array(ShipCatalog.all.size) { ShipCatalog.all[it].name }
+    private val ship = group.add(Selector("", names, { game.settings.ship }, { game.settings.ship = it; game.settingsChanged(false, false) }))
     private val card = Rect()
     private val buf = TextBuf(48)
     private var titleY = 0f
@@ -66,7 +69,7 @@ class MainMenu(private val game: GameActions) {
         val cw = 262f * u
         val ch = 150f * u
         card.set(f.w - f.sr - 26f * u - cw, f.h - f.sb - 22f * u - ch, cw, ch)
-        livery.r.set(card.x + 14f * u, card.y + ch - 42f * u, cw - 28f * u, 34f * u)
+        ship.r.set(card.x + 14f * u, card.y + ch - 42f * u, cw - 28f * u, 34f * u)
         group.slop = 6f * u
     }
 
@@ -85,7 +88,7 @@ class MainMenu(private val game: GameActions) {
         val c = card
         ui.rect(c.x, c.y, c.w, c.h, withAlpha(Theme.PANEL, a * 0.85f), -12f * u)
         ui.rect(c.x, c.y, c.w, c.h, withAlpha(Theme.ACCENT, a * 0.35f), -12f * u, 1.2f * u)
-        val spec = ShipSpec.VARROW
+        val spec = game.shipSpec
         ui.text(spec.name, c.x + 16f * u, c.y + 28f * u, 19f * u, withAlpha(Theme.TEXT, a), tracking = 0.15f, face = FontData.TITLE)
         ui.text(spec.role, c.x + 16f * u, c.y + 44f * u, 9.5f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
         buf.clear().append(spec.price / 1000).append(',').appendPadded(spec.price % 1000, 3).append(" CR")

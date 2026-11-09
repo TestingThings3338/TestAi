@@ -111,7 +111,7 @@ class AsteroidFieldTest {
 
     @Test
     fun aShipFlyingTheLaneHitsNothing() {
-        val model = FlightModel(ShipSpec.VARROW)
+        val model = FlightModel(ShipSpec.STANDARD)
         val s = ShipState()
         s.pos.set(0.0, 0.0, 200.0)
         val c = ControlInput().also { it.throttle = 1f }

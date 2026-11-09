@@ -1,6 +1,8 @@
 package com.starwake.desktop
 
 import com.starwake.core.content.Content
+import com.starwake.core.content.ShipModel
+import com.starwake.core.game.GearRig
 import com.starwake.core.game.ShipState
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
@@ -52,11 +54,22 @@ object Smoke {
             r.note("UiRenderer + font atlas upload in %.0f ms".format((System.nanoTime() - t0) / 1e6))
             s.drainErrors(0)
 
+            t0 = System.nanoTime()
+            val model = ShipModel.load("varrow") { platform.readAsset(it) }
+            val rig = GearRig().also { it.setModel(model, down = false) }
+            scene.setShipModel(model)
+            GLES20.glFinish()
+            r.note("VARROW model parsed + uploaded in %.0f ms (%d triangles outside)".format((System.nanoTime() - t0) / 1e6, model.triangles(ShipModel.VIEW_EXTERIOR)))
+            s.drainErrors(0)
+
             val f = SceneFrame()
             val ship = ShipState()
+            // the hull's centre at the origin, which the camera circles
+            ship.pos.set(-model.centreX.toDouble(), -model.centreY.toDouble(), -model.centreZ.toDouble())
             f.ship = ship
+            f.gear = rig
+            f.shipReach = model.radius * 4f
             f.quality = 2
-            f.livery = 0
             f.pxScale = h / 1080f
             f.dustIntensity = 0.6f
 
@@ -67,7 +80,7 @@ object Smoke {
                 for (i in 0 until 4) {
                     frame++
                     f.time = frame / 60f
-                    orbit(f, v.yaw + i * 0.004f, v.pitch, v.distance)
+                    orbit(f, v.yaw + i * 0.004f, v.pitch, v.distance * model.radius / 8f)
                     f.camera.update(w, h)
                     val t = System.nanoTime()
                     scene.render(f)
