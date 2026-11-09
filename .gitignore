@@ -8,3 +8,4 @@ local.properties
 captures/
 /.claude/worktrees/
 /roblox/lua/
+__pycache__/

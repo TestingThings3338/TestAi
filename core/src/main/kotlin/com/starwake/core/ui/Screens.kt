@@ -164,6 +164,13 @@ class SettingsScreen(private val game: GameActions) {
         controls += group.add(Selector("HAPTICS", arrayOf("OFF", "ON"), { if (s.haptics) 1 else 0 }, {
             s.haptics = it == 1; game.settingsChanged(false, false)
         }))
+        // Roblox OPTIONS > AUDIO: MUSIC and EFFECTS, 0-100 % in 5 % steps (`09` 8.4)
+        controls += group.add(Slider("MUSIC", 0f, 1f, { s.musicVolume }, {
+            s.musicVolume = it; game.settingsChanged(false, false)
+        }, step = 0.05f, format = Slider.FORMAT_PERCENT))
+        controls += group.add(Slider("EFFECTS", 0f, 1f, { s.effectsVolume }, {
+            s.effectsVolume = it; game.settingsChanged(false, false)
+        }, step = 0.05f, format = Slider.FORMAT_PERCENT))
         back = group.add(Button("DONE", primary = true) { game.closeSettings() })
     }
 
@@ -198,7 +205,7 @@ class SettingsScreen(private val game: GameActions) {
         val pad = 22f * u
         val colW = (p.w - pad * 3f) * 0.5f
         ui.text("GRAPHICS & VIEW", p.x + pad, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
-        ui.text("CONTROLS", p.x + pad * 2f + colW, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
+        ui.text("CONTROLS & SOUND", p.x + pad * 2f + colW, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
         group.draw(ui, u, a)
         ui.text(game.deviceInfo, infoX, infoY, 9.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.05f)
         ui.text("QUALITY sets resolution, stars, dust and asteroid count.", infoX, infoY + 15f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
@@ -209,6 +216,12 @@ class PauseScreen(private val game: GameActions) {
     val group = WidgetGroup(game)
     private val resume = group.add(Button("RESUME", primary = true) { game.resume() })
     private val settings = group.add(Button("SETTINGS") { game.openSettings() })
+
+    /** Roblox J / the cockpit's Music button (DECISIONS 21b: MUSIC goes into the pause menu). */
+    private val music = group.add(Button(MUSIC_ON) {
+        game.settings.musicOn = !game.settings.musicOn
+        game.settingsChanged(false, false)
+    })
     private val menu = group.add(Button("MAIN MENU") { game.quitToMenu() })
     private var cx = 0f
     private var top = 0f
@@ -218,9 +231,9 @@ class PauseScreen(private val game: GameActions) {
         cx = f.w * 0.5f
         val bw = 236f * u
         val bh = 46f * u
-        top = f.h * 0.5f - (bh * 3f + 24f * u) * 0.5f + 20f * u
+        top = f.h * 0.5f - (bh * 4f + 36f * u) * 0.5f + 20f * u
         var y = top
-        for (b in arrayOf(resume, settings, menu)) {
+        for (b in arrayOf(resume, settings, music, menu)) {
             b.r.set(cx - bw * 0.5f, y, bw, bh)
             y += bh + 12f * u
         }
@@ -231,7 +244,13 @@ class PauseScreen(private val game: GameActions) {
         val u = f.u
         ui.rect(0f, 0f, f.w, f.h, withAlpha(Theme.BLACK, alpha * 0.5f))
         ui.textCentered("PAUSED", cx, top - 34f * u, 26f * u, withAlpha(Theme.TEXT, alpha), tracking = 0.3f, shadow = 0.6f, face = FontData.TITLE)
+        music.label = if (game.settings.musicOn) MUSIC_ON else MUSIC_OFF
         group.draw(ui, u, alpha)
+    }
+
+    private companion object {
+        const val MUSIC_ON = "MUSIC: ON"
+        const val MUSIC_OFF = "MUSIC: OFF"
     }
 }
 
