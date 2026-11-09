@@ -246,6 +246,107 @@ class StationModelTest {
     }
 
     @Test
+    fun blinkersWithoutAPhaseGetASlotEach() {
+        // ShipStation.readModel draws math.random() * period per part when BlinkPhase is missing, so such
+        // parts must not share a slot (one phase): the Refinery's six UmbilicalLamps (2.4 s, duty 0.8)
+        // beside the pads, the site's two
+        for (t in all) {
+            for (l in models.getValue(t).lamps) {
+                if (l.kind == StationModel.LAMP_BLINK && l.phase < 0f) assertEquals(1, l.parts, "$t: unphased blinker slot with ${l.parts} parts")
+            }
+        }
+        val refinery = models.getValue("RefineryStation")
+        val umbilical = refinery.lamps.filter { it.kind == StationModel.LAMP_BLINK && it.phase < 0f }
+        assertEquals(6, umbilical.size)
+        assertTrue(umbilical.all { abs(it.period - 2.4f) < 1e-4f && abs(it.duty - 0.8f) < 1e-4f })
+        assertEquals(59, refinery.lamps.size, "54 slots + 5 for the umbilical lamps that had shared one")
+        assertEquals(2, models.getValue("Site").lamps.count { it.kind == StationModel.LAMP_BLINK && it.phase < 0f })
+    }
+
+    /** Index [i] of [mesh]. */
+    private fun index(mesh: StationModel.Mesh, b: ByteBuffer, i: Int) =
+        if (mesh.indexSize == 2) b.getShort(i * 2).toInt() and 0xFFFF else b.getInt(i * 4)
+
+    /** Calls [f] with the three vertex indices of every triangle of [pass] (all classes and groups). */
+    private inline fun triangles(mesh: StationModel.Mesh, pass: Int, f: (Int, Int, Int) -> Unit) {
+        val b = ByteBuffer.wrap(mesh.indices).order(ByteOrder.LITTLE_ENDIAN)
+        val first = mesh.first(pass)
+        val n = mesh.count(pass, 0)
+        var i = first
+        while (i < first + n) {
+            f(index(mesh, b, i), index(mesh, b, i + 1), index(mesh, b, i + 2))
+            i += 3
+        }
+    }
+
+    @Test
+    fun translucentPaintHasItsOwnPassUnderTheSignText() {
+        val v = FloatArray(10)
+        for (t in all) {
+            val mesh = models.getValue(t).mesh
+            var paint = 0
+            var allOpaque = 0
+            var opaquePaint = 0
+            var paintInTranslucent = 0
+            // PASS_PAINT: only paint, and only translucent paint
+            triangles(mesh, StationModel.PASS_PAINT) { a, b, c ->
+                var translucent = false
+                for (i in intArrayOf(a, b, c)) {
+                    vertex(mesh, i, v)
+                    assertTrue(v[3] >= StationModel.MAT_PAINT1, "$t: material ${v[3]} in the paint pass")
+                    if (v[9] < 0.999f) translucent = true
+                }
+                if (!translucent) allOpaque++
+                paint++
+            }
+            // a polygon goes by its most transparent corner: only the Garden's one UIGradient frame can leave a
+            // triangle of its fan with opaque corners
+            if (t != "GardenStation") assertEquals(0, allOpaque, "$t: opaque triangles in the paint pass")
+            assertTrue(allOpaque <= 32, "$t: $allOpaque opaque triangles in the paint pass")
+            // PASS_OPAQUE paint is opaque
+            triangles(mesh, StationModel.PASS_OPAQUE) { a, _, _ ->
+                vertex(mesh, a, v)
+                if (v[3] >= StationModel.MAT_PAINT1) {
+                    opaquePaint++
+                    assertEquals(1f, v[9], "$t: translucent paint in the opaque pass")
+                }
+            }
+            triangles(mesh, StationModel.PASS_TRANSLUCENT) { a, _, _ ->
+                vertex(mesh, a, v)
+                if (v[3] >= StationModel.MAT_PAINT1) paintInTranslucent++
+            }
+            if (t == StationModel.SITE) assertEquals(0, paint) else assertTrue(paint > 300, "$t: $paint translucent paint triangles")
+            assertTrue(opaquePaint > 0, t)
+            // Roblox draws translucent paint over a label only on the Refinery's back wall: the 9 panel seams
+            // (bt 0.45) after "PROCESS HALL  ·  CRYO TRANSFER" in its SurfaceGui; they stay after the text
+            assertEquals(if (t == "RefineryStation") 18 else 0, paintInTranslucent, "$t: paint triangles drawn after the text")
+        }
+        // the reviewer's case: "BAY A  ·  HYDROGEN" lies inside a (116, 120, 119) panel with BackgroundTransparency 0.2
+        // that comes before it in its SurfaceGui; that panel is in PASS_PAINT, under the text
+        val m = models.getValue("RefineryStation")
+        for (text in listOf("BAY A  ·  HYDROGEN", "BAY B  ·  HELIUM-3", "NO NAKED FLAMES", "CRYOGENIC  ·  WEAR GLOVES", "KEEP CENTRELINE")) {
+            val l = m.labels.first { it.text == text }
+            var under = 0
+            val st = FloatArray(6)
+            triangles(m.mesh, StationModel.PASS_PAINT) { a, b, c ->
+                // a triangle in the label's plane (paint lies 0.5..6 cm under the text) covering the label's centre
+                var flat = true
+                for ((k, i) in intArrayOf(a, b, c).withIndex()) {
+                    vertex(m.mesh, i, v)
+                    val dx = v[0] - l.origin[0]
+                    val dy = v[1] - l.origin[1]
+                    val dz = v[2] - l.origin[2]
+                    if (abs(dx * l.normal[0] + dy * l.normal[1] + dz * l.normal[2]) > 0.1f) flat = false
+                    st[k * 2] = (dx * l.u[0] + dy * l.u[1] + dz * l.u[2]) / dot(l.u, l.u)
+                    st[k * 2 + 1] = (dx * l.v[0] + dy * l.v[1] + dz * l.v[2]) / dot(l.v, l.v)
+                }
+                if (flat && covers(st, 0.5f, 0.5f)) under++
+            }
+            assertTrue(under > 0, "$text: no translucent paint under it in PASS_PAINT")
+        }
+    }
+
+    @Test
     fun signLabels() {
         val counts = mapOf(
             "RingStation" to 27, "GardenStation" to 12, "FoundryStation" to 22, "SpireStation" to 32,
@@ -365,6 +466,9 @@ class StationModelTest {
         assertContentEquals(a.bounds, b.bounds)
         assertFailsWith<IllegalArgumentException> { StationModel.parse(bytes.copyOf().also { it[0] = 'X'.code.toByte() }) }
         assertFailsWith<IllegalArgumentException> { StationModel.parse(bytes.copyOf().also { it[4] = 9 }) }
+        // version 1 (three passes, translucent paint mixed with the glass) is not read any more
+        assertEquals(2, StationModel.VERSION)
+        assertFailsWith<IllegalArgumentException> { StationModel.parse(bytes.copyOf().also { it[4] = 1 }) }
         assertFailsWith<Exception> { StationModel.parse(bytes.copyOf(bytes.size - 7)) }
     }
 
@@ -386,6 +490,15 @@ class StationModelTest {
         out[7] = b.get(o + 9) / 127f
         out[8] = b.get(o + 10) / 127f
         out[9] = (b.get(o + 15).toInt() and 0xFF) / 255f
+    }
+
+    /** Whether the 2D triangle [t] (x0, y0, x1, y1, x2, y2) covers ([x], [y]), either winding. */
+    private fun covers(t: FloatArray, x: Float, y: Float): Boolean {
+        fun side(ax: Float, ay: Float, bx: Float, by: Float) = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        val d0 = side(t[0], t[1], t[2], t[3])
+        val d1 = side(t[2], t[3], t[4], t[5])
+        val d2 = side(t[4], t[5], t[0], t[1])
+        return (d0 >= 0f && d1 >= 0f && d2 >= 0f) || (d0 <= 0f && d1 <= 0f && d2 <= 0f)
     }
 
     private fun len(a: FloatArray) = kotlin.math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])

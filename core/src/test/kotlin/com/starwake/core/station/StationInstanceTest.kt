@@ -45,6 +45,30 @@ class StationInstanceTest {
     }
 
     @Test
+    fun unphasedBlinkersBlinkOutOfStep() {
+        // the Refinery's six UmbilicalLamps (Blink 2.4, BlinkDuty 0.8, no BlinkPhase): Roblox draws a phase per
+        // part, so they do not flash in unison
+        val m = model("RefineryStation")
+        val slots = (1..m.lamps.size).filter { m.lamps[it - 1].kind == StationModel.LAMP_BLINK && m.lamps[it - 1].phase < 0f }
+        assertEquals(6, slots.size)
+        for (seed in 0 until 4) {
+            val st = StationInstance(m, seed)
+            var mixed = 0
+            val n = 2400 // 2.4 s, one period
+            val onTime = IntArray(slots.size)
+            for (i in 0 until n) {
+                st.update(0.001f, Float.NaN, 0f, 0f)
+                val lit = slots.count { st.isLit(it) }
+                if (lit in 1 until slots.size) mixed++
+                for ((k, s) in slots.withIndex()) if (st.isLit(s)) onTime[k]++
+            }
+            assertTrue(mixed > n / 10, "seed $seed: the six lamps disagree only ${mixed * 100 / n} % of the time")
+            // each keeps its own duty
+            for (k in slots.indices) near(0.8f, onTime[k] / n.toFloat(), 0.01f, "seed $seed lamp $k duty")
+        }
+    }
+
+    @Test
     fun lampTableChangesOnlyWhenALampSwitches() {
         val m = model("RingStation")
         val st = StationInstance(m, seed = 1)

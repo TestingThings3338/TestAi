@@ -125,6 +125,125 @@ class StationCollidersTest {
     }
 
     @Test
+    fun grazingMovesAreStopped() {
+        // a 40 x 40 x 10 m wall (face at z = 5) and ShipStation's default probe (r = 10.5), starting 5 cm off the
+        // face, where Roblox's slide response leaves the ship, moving 4.3 m (260 m/s at 60 fps) at a shallow angle
+        // into the wall: the move ends inside the wall from 0.67 degrees on, and the sweep must say where it touched
+        val c = one(StationColliders.SHAPE_BLOCK, cf(0f, 0f, 0f), 40f, 40f, 10f)
+        val hit = StationHit()
+        val r = 10.5f
+        val gap = 0.05f
+        val len = 4.3f
+        for (deg in listOf(0.5, 0.7, 1.0, 2.0, 3.0, 4.0, 5.0, 8.0, 10.0, 20.0, 45.0, 90.0)) {
+            val a = Math.toRadians(deg)
+            val z0 = 5f + r + gap
+            val y0 = -10f
+            val y1 = (y0 + len * cos(a)).toFloat()
+            val z1 = (z0 - len * sin(a)).toFloat()
+            val into = len * sin(a).toFloat()
+            val h = c.sphereCast(0f, y0, z0, 0f, y1, z1, r, null, hit)
+            if (into <= gap) {
+                assertFalse(h, "$deg deg: the move ends ${gap - into} m short of the wall")
+                continue
+            }
+            assertTrue(h, "$deg deg: the move ends ${into - gap} m inside the wall and the sweep missed it")
+            near(gap / into, hit.fraction, 2e-4f, "$deg deg: fraction")
+            near(1f, hit.nz, 1e-5f, "$deg deg: normal")
+            // at the reported fraction the sphere just touches
+            val y = y0 + (y1 - y0) * hit.fraction
+            val z = z0 + (z1 - z0) * hit.fraction
+            near(0f, c.clearance(0f, y, z, r, 1f, null), 2e-3f, "$deg deg: gap at the contact")
+        }
+    }
+
+    @Test
+    fun touchingAndLeavingOrSlidingIsFree() {
+        val c = one(StationColliders.SHAPE_BLOCK, cf(0f, 0f, 0f), 40f, 40f, 10f)
+        val hit = StationHit()
+        val r = 10.5f
+        // resting on the face (within 0.5 mm): lifting off, sliding along it and moving in
+        val z0 = 5f + r + 0.0005f
+        assertFalse(c.sphereCast(0f, 0f, z0, 0f, 0f, z0 + 5f, r, null, hit), "lifting off")
+        assertFalse(c.sphereCast(0f, 0f, z0, 0f, 6f, z0, r, null, hit), "sliding along")
+        assertTrue(c.sphereCast(0f, 0f, z0, 0f, 6f, z0 - 1f, r, null, hit), "pressing in")
+        near(0f, hit.fraction, 1e-6f, "pressing in stops at once")
+        // passing beside a ball, cylinder and wedge within 1 cm: no contact; 1 cm closer: contact
+        val ball = one(StationColliders.SHAPE_BALL, cf(0f, 0f, 0f), 10f, 10f, 10f)
+        assertFalse(ball.sphereCast(-50f, 5f + 2f + 0.01f, 0f, 50f, 5f + 2f + 0.01f, 0f, 2f, null, hit), "past the ball")
+        assertTrue(ball.sphereCast(-50f, 5f + 2f - 0.01f, 0f, 50f, 5f + 2f - 0.01f, 0f, 2f, null, hit), "grazing the ball")
+        near(0.5f, hit.fraction, 0.01f, "ball graze near the middle of the move")
+        val cyl = one(StationColliders.SHAPE_CYLINDER, cf(0f, 0f, 0f), 20f, 8f, 8f)
+        assertFalse(cyl.sphereCast(0f, -30f, 4f + 2f + 0.01f, 0f, 30f, 4f + 2f + 0.01f, 2f, null, hit), "past the cylinder")
+        assertTrue(cyl.sphereCast(0f, -30f, 4f + 2f - 0.01f, 0f, 30f, 4f + 2f - 0.01f, 2f, null, hit), "grazing the cylinder")
+    }
+
+    @Test
+    fun sweepsAgreeWithTheContactsAlongTheMove() {
+        // every shape, turned at random, swept at random (many shallow): a reported hit is a touch (gap ~0) with
+        // nothing touched before it; no hit means the sphere never sinks in along the whole move
+        val rng = java.util.Random(1234)
+        val shapes = intArrayOf(
+            StationColliders.SHAPE_BLOCK, StationColliders.SHAPE_BALL, StationColliders.SHAPE_CYLINDER, StationColliders.SHAPE_WEDGE,
+        )
+        val hit = StationHit()
+        var hits = 0
+        var misses = 0
+        repeat(4000) { n ->
+            val shape = shapes[n % shapes.size]
+            val sx = 4f + rng.nextFloat() * 40f
+            val sy = 4f + rng.nextFloat() * 40f
+            val sz = 4f + rng.nextFloat() * 40f
+            val c = one(shape, cf(0f, 0f, 0f, rng.nextFloat() * 360f), sx, if (shape == StationColliders.SHAPE_BALL) sx else sy, if (shape == StationColliders.SHAPE_BALL) sx else sz)
+            val r = 0.5f + rng.nextFloat() * 10f
+            // start somewhere around it, outside
+            var x0: Float; var y0: Float; var z0: Float
+            do {
+                x0 = (rng.nextFloat() - 0.5f) * 120f
+                y0 = (rng.nextFloat() - 0.5f) * 120f
+                z0 = (rng.nextFloat() - 0.5f) * 120f
+            } while (c.clearance(x0, y0, z0, r, 1e9f, null) < 0.01f)
+            // half of the moves aim at the collider's centre, slightly off, and reach 0.3..1.6 of the way;
+            // the rest roll a direction and a length
+            val dist = sqrt(x0 * x0 + y0 * y0 + z0 * z0)
+            var len = 0.5f + rng.nextFloat() * 60f
+            var dx: Float; var dy: Float; var dz: Float
+            if (n % 2 == 0) {
+                dx = -x0 + (rng.nextFloat() - 0.5f) * 30f
+                dy = -y0 + (rng.nextFloat() - 0.5f) * 30f
+                dz = -z0 + (rng.nextFloat() - 0.5f) * 30f
+                len = dist * (0.3f + rng.nextFloat() * 1.3f)
+            } else {
+                dx = rng.nextFloat() - 0.5f; dy = rng.nextFloat() - 0.5f; dz = rng.nextFloat() - 0.5f
+            }
+            val dl = sqrt(dx * dx + dy * dy + dz * dz)
+            val x1 = x0 + dx / dl * len
+            val y1 = y0 + dy / dl * len
+            val z1 = z0 + dz / dl * len
+            val h = c.sphereCast(x0, y0, z0, x1, y1, z1, r, null, hit)
+            val end = if (h) hit.fraction else 1f
+            // nothing touched before the end (sampled every 2 cm), and at a hit the sphere touches
+            val steps = maxOf(2, (len * end / 0.02f).toInt())
+            for (k in 0 until steps) {
+                val s = end * k / steps
+                val g = c.clearance(x0 + (x1 - x0) * s, y0 + (y1 - y0) * s, z0 + (z1 - z0) * s, r, 1e9f, null)
+                assertTrue(g > -2e-3f, "case $n shape $shape: sinks ${-g} m in at $s of the move (hit $h at ${hit.fraction})")
+            }
+            if (h) {
+                hits++
+                val g = c.clearance(x0 + (x1 - x0) * end, y0 + (y1 - y0) * end, z0 + (z1 - z0) * end, r, 1e9f, null)
+                assertTrue(abs(g) < 3e-3f, "case $n shape $shape: gap $g at the reported contact")
+                val nl = hit.nx * hit.nx + hit.ny * hit.ny + hit.nz * hit.nz
+                assertTrue(abs(nl - 1f) < 1e-3f, "case $n: normal length $nl")
+                // the normal faces the incoming sphere
+                assertTrue(hit.nx * (x1 - x0) + hit.ny * (y1 - y0) + hit.nz * (z1 - z0) <= 1e-3f * len, "case $n: normal along the move")
+            } else {
+                misses++
+            }
+        }
+        assertTrue(hits > 800 && misses > 800, "$hits hits, $misses misses")
+    }
+
+    @Test
     fun groupsMoveTheirColliders() {
         // a block 100 m out on +X in group 1, which turns about Y through the origin
         val c = one(StationColliders.SHAPE_BLOCK, cf(100f, 0f, 0f), 10f, 10f, 10f, group = 1)

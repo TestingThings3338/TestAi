@@ -34,7 +34,7 @@ SURFACEGUI FACES (canvas axes in part space; verified on the data: offset-placed
   The canvas is the face (studs) times PixelsPerStud. A GUI draws even on an invisible part.
 
 OUTPUT  stations/<Type>.stm, one per model (all little-endian; str = u8 length + UTF-8 bytes):
-    char[4] "USTM", u16 version (1), u16 flags (bit 0: construction site, groups are build stages)
+    char[4] "USTM", u16 version (2), u16 flags (bit 0: construction site, groups are build stages)
     str     type ("RingStation"...), str builtBy
     f32     radius (attribute Radius)
     f32[3]  hangarSize, f32[3] hangarCentre, f32[3] mouthSize (0 when the model has none)
@@ -44,11 +44,13 @@ OUTPUT  stations/<Type>.stm, one per model (all little-endian; str = u8 length +
             per group 1..G-1: str name, f32 degrees per second, f32[3] axis (unit), f32[3] centre
     u8      padCount, per pad: u8 index, u8 lamp slot, f32[3] size, f32[12] top (CFrame of the pad's
             top face: position, then the 3x3 rotation row-major as Roblox's R00..R22)
-    u8      lampCount L (slots 1..L; slot 0 = none), per slot:
+    u8      lampCount L (slots 1..L, L <= 63, the game's uniform table; slot 0 = none), per slot:
               u8 kind (0 accent, 1 pad, 2 PAPI, 3 blinker), u8 pass (0 opaque, 2 lamp), u8 pad index,
               u8 0, u8[4] sRGB colour + opacity (as built), f32 period, f32 phase (-1 = not set:
               the game picks one), f32 duty, f32 PAPI threshold (radians), f32[3] PAPI position,
-              u16 parts
+              u16 parts. Blinkers share a slot only when period, phase, duty and transparency agree;
+              a blinker without BlinkPhase gets a slot of its own, since Roblox gives each such part
+              its own random phase (ShipStation.readModel).
     u16     colliderCount, per collider: u8 shape (0 block, 1 ball, 2 cylinder (axis X), 3 wedge,
             4 corner wedge), u8 group, f32[12] CFrame, f32[3] size
     u8      lightCount, per light: u8 type (0 point, 1 spot, 2 surface), u8 group, u8[3] sRGB colour,
@@ -65,7 +67,7 @@ OUTPUT  stations/<Type>.stm, one per model (all little-endian; str = u8 length +
             u8[3] sRGB colour, u8 0, f32[3] transparency at 0, 0.6 and 1 along the beam
     mesh:   f32[3] origin, f32 step (metres per quantum: position = origin + q * step, q < 2^19)
             u32 vertexCount, u32 indexCount, u8 indexSize (2 or 4), u8[3] 0
-            u32 counts[3 passes][3 LOD classes][G groups]: index counts, stored in that order
+            u32 counts[4 passes][3 LOD classes][G groups]: index counts, stored in that order
             the vertices as 16 planes of vertexCount bytes (the loader interleaves them into the GPU's
             16-byte vertex below; planes with deltas deflate to a third of the interleaved bytes):
               x lo, x hi, y lo, y hi, z lo, z hi  (each word stored as the difference to the previous
@@ -81,8 +83,13 @@ OUTPUT  stations/<Type>.stm, one per model (all little-endian; str = u8 length +
                            low nibble = LightInfluence * 15, high nibble = round((1 - LI) * Brightness / 0.15)
               u8  r, g, b, a  sRGB colour, a = opacity (1 - Transparency)
 
-  Passes: 0 opaque (with paint, accent and PAPI lamps), 1 translucent (0 < Transparency < 1, glass,
-  ForceField), 2 lamps (blinkers and pad lamps, blended: their opacity changes at runtime).
+  Passes: 0 opaque (with opaque paint, accent and PAPI lamps), 1 translucent (0 < Transparency < 1,
+  glass, ForceField), 2 lamps (blinkers and pad lamps, blended: their opacity changes at runtime),
+  3 translucent paint (frames and strokes with transparency). Pass 3 is drawn before the sign text
+  and pass 1 after it, so a label stays on top of the paint under it as in Roblox (neither the text
+  nor the blended passes write depth, so the draw order decides); the few translucent frames that
+  Roblox draws over a label of their SurfaceGui (later in the GUI's draw order, overlapping the
+  label) go to pass 1 instead.
   LOD classes, nested so each detail level is one prefix of its pass: class 2 (parts >= 40 m, paint
   >= 12 m on them) is drawn at every level, class 1 (parts >= 3 m, paint >= 1.5 m or 20 m^2) at
   levels 0 and 1, class 0 only at level 0. Level 0 < 3 km, level 1 3-15 km, level 2 15-60 km,
@@ -106,7 +113,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-VERSION = 1
+VERSION = 2
 MODELS = ["RingStation", "GardenStation", "FoundryStation", "SpireStation", "HollowStation", "RefineryStation"]
 SITE = "Site"
 
@@ -127,7 +134,10 @@ ROBLOX_MATERIAL = {
 }
 FORCEFIELD = M["forcefield"]
 
-PASS_OPAQUE, PASS_TRANSLUCENT, PASS_LAMP = 0, 1, 2
+PASS_OPAQUE, PASS_TRANSLUCENT, PASS_LAMP, PASS_PAINT = 0, 1, 2, 3
+PASSES = 4
+# lamp slots the game's shader holds (StationInstance.LAMP_SLOTS - 1; slot 0 = none)
+MAX_LAMP_SLOTS = 63
 LAMP_ACCENT, LAMP_PAD, LAMP_PAPI, LAMP_BLINK = 0, 1, 2, 3
 SHAPE_BLOCK, SHAPE_BALL, SHAPE_CYLINDER, SHAPE_WEDGE, SHAPE_CORNER = 0, 1, 2, 3, 4
 POS_BITS = 19
@@ -993,12 +1003,14 @@ def bake_paint(model, mesh, texts, stats):
             # Global ZIndexBehavior: by ZIndex, then hierarchy order; SurfaceGuis by ZOffset
             items.sort(key=lambda t: t[0])
             placed = []  # (bbox, polygon in face metres, colour key, layer)
+            labels = []  # (bbox, quad in face metres) of the labels drawn so far on this face
             for _, (key, node, rect, xf, clips, li, br), pps in items:
                 if node["class"] == "TextLabel":
                     x0, y0, w, h = rect
                     quad = [xf.apply(c) for c in ((x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h))]
                     quad = [(q[0] / pps, q[1] / pps) for q in quad]
                     text_layer = layer_above(placed, quad, None)
+                    labels.append((bbox(quad), quad))
                     texts.append(make_label(part, node, rect, xf, pps, li, br, tl, ru, du, nu, min(text_layer, MAX_LAYERS),
                                             sign, pads_folder))
                     stats["labels"] += 1
@@ -1034,7 +1046,15 @@ def bake_paint(model, mesh, texts, stats):
                     if min(wm, hm) >= LOD2_PAINT:
                         cls = 2
                     cls = min(cls, part_lod)
-                    ps = PASS_OPAQUE if a_min >= 0.999 else PASS_TRANSLUCENT
+                    ps = PASS_OPAQUE
+                    if a_min < 0.999:
+                        # translucent paint goes under the sign text, unless Roblox draws it over a label
+                        # (a frame after the label in the GUI's draw order that overlaps it)
+                        pm = [(v[0] / pps, v[1] / pps) for v in poly]
+                        bp = bbox(pm)
+                        over = any(overlaps(bp, bl) and convex_overlap(pm, ql) for bl, ql in labels)
+                        ps = PASS_TRANSLUCENT if over else PASS_PAINT
+                        stats["paintOverText" if over else "paintUnderText"] += 1
                     base = len(mesh.verts)
                     for p3, v in zip(root, poly):
                         mesh.verts.append((p3[0], p3[1], p3[2], n[0], n[1], n[2], srgb_byte(v[2]), srgb_byte(v[3]),
@@ -1136,22 +1156,27 @@ def lamp_slots(model):
             period = float(a["Blink"])
             phase = num(a.get("BlinkPhase"), -1.0)
             duty = min(0.98, max(0.02, num(a.get("BlinkDuty"), 0.5)))
-            key = ("blink", f32(period), f32(phase), f32(duty), f32(part.transparency))
+            if phase < 0:
+                # no BlinkPhase: Roblox draws a random phase per part, so the part needs a slot of its own
+                key = ("blink-part", nid)
+            else:
+                key = ("blink", f32(period), f32(phase), f32(duty), f32(part.transparency))
             part.slot = slot(key, {"kind": LAMP_BLINK, "pass": PASS_LAMP, "pad": 0, "color": col, "period": period,
                                    "phase": phase, "duty": duty, "papi": 0.0, "pos": (0.0, 0.0, 0.0), "parts": 0})
         elif a.get("Accent") is True:
             part.slot = slot(("accent",), {"kind": LAMP_ACCENT, "pass": PASS_OPAQUE, "pad": 0, "color": col,
                                            "period": 0.0, "phase": 0.0, "duty": 0.0, "papi": 0.0,
                                            "pos": (0.0, 0.0, 0.0), "parts": 0})
-    if len(slots) > 255:
-        raise ValueError("%s: %d lamp slots" % (model.name, len(slots)))
+    if len(slots) > MAX_LAMP_SLOTS:
+        raise ValueError("%s: %d lamp slots, the game holds %d" % (model.name, len(slots), MAX_LAMP_SLOTS))
     return slots, pad_lamp
 
 
 def convert(model):
     mesh = Mesh(model.groups)
     slots, pad_lamp = lamp_slots(model)
-    stats = {"frames": 0, "paintPolygons": 0, "labels": 0, "layers": 0, "rendered": 0, "invisible": 0}
+    stats = {"frames": 0, "paintPolygons": 0, "labels": 0, "layers": 0, "rendered": 0, "invisible": 0,
+             "paintUnderText": 0, "paintOverText": 0}
     colliders = []
     for part in model.parts:
         a = part.attrs
@@ -1240,10 +1265,10 @@ def pstr(s):
 
 def encode_mesh(mesh):
     G = len(mesh.groups)
-    lists = [[[mesh.tris.get((ps, cls, g), []) for g in range(G)] for cls in (2, 1, 0)] for ps in range(3)]
+    lists = [[[mesh.tris.get((ps, cls, g), []) for g in range(G)] for cls in (2, 1, 0)] for ps in range(PASSES)]
     order = []
     counts = []
-    for ps in range(3):
+    for ps in range(PASSES):
         for ci in range(3):
             for g in range(G):
                 order.append(lists[ps][ci][g])
@@ -1381,6 +1406,7 @@ def write_model(model, out_dir):
         "file": fname, "bytes": len(out), "parts": model.part_count, "partCountAttribute": num(a.get("PartCount")),
         "renderedParts": stats["rendered"], "invisibleParts": stats["invisible"], "paintFrames": stats["frames"],
         "paintPolygons": stats["paintPolygons"], "paintLayers": stats["layers"], "labels": len(texts),
+        "translucentPaintUnderText": stats["paintUnderText"], "translucentPaintOverText": stats["paintOverText"],
         "vertices": nverts, "indices": nidx, "indexSize": isize, "stepMm": round(step * 1000, 3), "triangles": tri,
         "groups": [g["name"] for g in model.groups[1:]], "lampSlots": len(slots),
         "lampKinds": {k: sum(1 for s in slots if s["kind"] == i) for i, k in enumerate(["accent", "pad", "papi", "blink"])},

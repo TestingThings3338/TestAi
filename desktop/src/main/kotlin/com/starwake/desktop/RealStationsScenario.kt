@@ -16,6 +16,10 @@ import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.station.StationInstance
 import org.lwjgl.opengles.GLES20
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
+import java.io.File
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.sqrt
 
@@ -26,6 +30,11 @@ import kotlin.math.sqrt
  * a side and a rear view, inside the hangar, at the pads, then at the distances of detail levels 1
  * and 2 and the 60 km marker. The site is also shown with its stages part-built (orange hologram).
  * Logs load times, triangles and draw calls per detail level.
+ *
+ * Checks (fail the scenario): sign text on semi-transparent paint shows at full contrast (Refinery
+ * wall and floor labels, a Spire pad number; 3x crops written as real-<type>-sign-*.png), and the
+ * local lights do not pop between two camera positions 1.2 m apart where the first renderer
+ * switched a light (Ring, Spire; real-<type>-lightpop[-diff].png).
  */
 object RealStationsScenario {
     private class View(
@@ -229,6 +238,21 @@ object RealStationsScenario {
                         ),
                     )
                 }
+                val probe = Probe(s, r, scene, f, stations, gpu, st, signs, stationPos, stationRot, envTex, envLod)
+                when (type) {
+                    "RefineryStation" -> {
+                        // the review's case: labels painted on semi-transparent panels of their SurfaceGui
+                        for (text in REFINERY_SIGNS) probe.signContrast(model.labels.first { it.text == text })
+                    }
+                    "SpireStation" -> {
+                        // pad numbers under the pad's translucent ring strokes and chevrons
+                        probe.signContrast(model.labels.first { it.isPadNumber && it.pad == 1 })
+                        // the first renderer switched the brightness-12 downlight at (-40, 12.8, -40) at z = -357.5
+                        probe.lightPop(-25f, -30f, -358.1f, -356.9f, -40f, -75f, -40f)
+                    }
+                    // ... and the right-wall wash spot at (176.6, -72.7, -140) at z = -133
+                    "RingStation" -> probe.lightPop(-25f, -30f, -133.6f, -132.4f, 176f, -45f, -140f)
+                }
                 if (type == "SpireStation") perf(s, r, stations, gpu, st, signs, f, stationPos, stationRot, envTex, envLod, content.fontAtlas)
                 signs.dispose()
                 gpu.dispose()
@@ -243,6 +267,236 @@ object RealStationsScenario {
 
     /** Far marker size (px) beyond 60 km. */
     private const val MARKER_PX = 9f
+
+    /** Refinery labels that sit on semi-transparent paint of their own SurfaceGui (wall, floor). */
+    private val REFINERY_SIGNS = listOf("BAY A  ·  HYDROGEN", "NO NAKED FLAMES", "KEEP CENTRELINE")
+
+    /**
+     * Lowest acceptable luma steps (0..255) the sign text makes inside its box: 90th percentile and
+     * largest. Measured on the Refinery labels: 21-27 and 21-28 while the translucent panel was
+     * drawn over the text, 55-86 and 77-123 with the text on top.
+     */
+    private const val MIN_TEXT_STEP_P90 = 40
+    private const val MIN_TEXT_STEP_MAX = 60
+
+    /**
+     * Light pops: largest share (%) of the picture whose local light, averaged over 15 x 15 px,
+     * changes by more than POP_LEVEL luma levels between frames 1.2 m apart. Measured at the two
+     * probes: 0.748 % (Ring) and 0.510 % (Spire) with the first renderer's hard top-8 choice, 0.000
+     * and 0.058 % with fading (the rest is parallax: near lit edges moving with the camera).
+     */
+    private const val POP_LEVEL = 3
+    private const val MAX_POP_SHARE = 0.2
+
+    /**
+     * Close-up checks of one station without the parked ship: renders on the session's target and
+     * reads it back.
+     */
+    private class Probe(
+        val s: GlSession, val r: ScenarioReport, val scene: SceneRenderer, val f: SceneFrame, val stations: StationRenderer,
+        val gpu: StationRenderer.ModelGpu, val st: StationInstance, val signs: StationRenderer.Signs,
+        val stationPos: DVec3, val stationRot: Quat, val envTex: Int, val envLod: Float,
+    ) {
+        private val rel = Vec3()
+        private val eye = Vec3()
+        private val tgt = Vec3()
+        private val upv = Vec3()
+        private val tmp = Vec3()
+        private val pose = Mat4()
+        private val type = gpu.model.type.removeSuffix("Station").lowercase()
+
+        /** Camera at [e] looking at [t] with [u] up (station space, metres). */
+        fun camera(e: FloatArray, t: FloatArray, u: FloatArray, fov: Float) {
+            stationRot.rotate(e[0], e[1], e[2], eye)
+            stationRot.rotate(t[0], t[1], t[2], tgt)
+            stationRot.rotate(u[0], u[1], u[2], upv)
+            val cam = f.camera
+            cam.fovY = fov * DEG2RAD
+            cam.near = 0.5f
+            cam.far = 6000f
+            cam.pos.set(stationPos.x + eye.x, stationPos.y + eye.y, stationPos.z + eye.z)
+            cam.rot.lookRotation(tgt.x - eye.x, tgt.y - eye.y, tgt.z - eye.z, upv.x, upv.y, upv.z)
+            cam.update(s.opts.width, s.opts.height)
+        }
+
+        /** The station at detail level 0 over the background, with or without sign text, [lights] per pixel at most. */
+        fun render(withSigns: Boolean, lights: Int = com.starwake.core.gfx.StationShaders.MAX_LIGHTS): BufferedImage {
+            val gl = s.gl
+            scene.render(f)
+            stationPos.relativeTo(f.camera.pos, rel)
+            pose.setTRS(rel.x, rel.y, rel.z, stationRot, 1f)
+            gl.depthRange(0f, 1f)
+            gl.enable(GL.DEPTH_TEST)
+            gl.depthFunc(GL.LEQUAL)
+            gl.enable(GL.CULL_FACE)
+            gl.cullFace(GL.BACK)
+            stations.maxLights = lights
+            stations.begin(f, envTex, envLod)
+            stations.drawOpaque(gpu, st, pose, f.camera.viewProj, 0)
+            stations.drawTransparent(gpu, st, if (withSigns) signs else null, pose, f.camera.viewProj, 0)
+            stations.maxLights = com.starwake.core.gfx.StationShaders.MAX_LIGHTS
+            gl.disable(GL.DEPTH_TEST)
+            gl.disable(GL.CULL_FACE)
+            GLES20.glFinish()
+            s.drainErrors(0)
+            return Screenshot.toImage(s.target.readPixels(), s.opts.width, s.opts.height)
+        }
+
+        /** Screen box (x0, y0, x1, y1, top-down pixels) of station-space points; false if one is behind the camera. */
+        fun box(points: List<FloatArray>, out: IntArray): Boolean {
+            val m = f.camera.viewProj.m
+            val w = s.opts.width
+            val h = s.opts.height
+            var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
+            stationPos.relativeTo(f.camera.pos, rel)
+            for (p in points) {
+                stationRot.rotate(p[0], p[1], p[2], tmp)
+                val x = rel.x + tmp.x
+                val y = rel.y + tmp.y
+                val z = rel.z + tmp.z
+                val cw = m[3] * x + m[7] * y + m[11] * z + m[15]
+                if (cw <= 0.01f) return false
+                val sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * 0.5f + 0.5f) * w
+                val sy = (1f - ((m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * 0.5f + 0.5f)) * h
+                x0 = minOf(x0, sx); y0 = minOf(y0, sy); x1 = maxOf(x1, sx); y1 = maxOf(y1, sy)
+            }
+            out[0] = x0.toInt().coerceIn(0, w - 1); out[1] = y0.toInt().coerceIn(0, h - 1)
+            out[2] = x1.toInt().coerceIn(0, w - 1); out[3] = y1.toInt().coerceIn(0, h - 1)
+            return out[2] > out[0] && out[3] > out[1]
+        }
+
+        /**
+         * A label straight on from 1.2 x its width (a little below its middle, as a pilot over the
+         * deck sees a wall sign), rendered with and without the sign text: how far the text moves
+         * the pixels of its box (90th percentile and largest luma step), and a 3x crop for review.
+         * When translucent paint covered the text (the review's finding) the steps were a quarter
+         * of the text's own contrast; blank pad numbers (the locale finding) would show none.
+         */
+        fun signContrast(l: StationModel.Label) {
+            val w = sqrt(l.u[0] * l.u[0] + l.u[1] * l.u[1] + l.u[2] * l.u[2])
+            val hv = sqrt(l.v[0] * l.v[0] + l.v[1] * l.v[1] + l.v[2] * l.v[2])
+            val c = FloatArray(3) { l.origin[it] + l.u[it] * 0.5f + l.v[it] * 0.5f }
+            val d = maxOf(w, hv * 3f) * 1.2f
+            // up = against the text's "down"; the camera sits 7 degrees below the label's middle
+            val up = FloatArray(3) { -l.v[it] / hv }
+            val e = FloatArray(3) { c[it] + l.normal[it] * d - up[it] * d * 0.12f }
+            camera(e, c, up, 40f)
+            val with = render(true)
+            val without = render(false)
+            val corners = listOf(
+                l.origin, FloatArray(3) { l.origin[it] + l.u[it] }, FloatArray(3) { l.origin[it] + l.v[it] },
+                FloatArray(3) { l.origin[it] + l.u[it] + l.v[it] },
+            )
+            val b = IntArray(4)
+            check(box(corners, b)) { "${l.text}: label not in view" }
+            val steps = ArrayList<Int>()
+            var textPx = 0
+            var lumaSum = 0L
+            for (y in b[1]..b[3]) for (x in b[0]..b[2]) {
+                val a = luma(with.getRGB(x, y))
+                val o = luma(without.getRGB(x, y))
+                val dl = abs(a - o)
+                steps += dl
+                if (dl > 8) {
+                    textPx++
+                    lumaSum += a
+                }
+            }
+            steps.sort()
+            val p90 = steps[(steps.size * 9) / 10]
+            val pmax = steps.last()
+            val name = "real-$type-sign-" + l.text.lowercase().filter { it in 'a'..'z' || it in '0'..'9' }.take(16).ifEmpty { "pad${l.pad}" }
+            crop(with, b, File(s.opts.outDir, "$name.png"))
+            r.note(
+                "  %-34s text \"%s\": %d text pixels, mean luma %.1f, luma step p90 %d, max %d (box %dx%d px)"
+                    .format(
+                        name, (if (l.isPadNumber) StationModel.padNumber(l.pad) else l.text).replace('·', '.'), textPx,
+                        if (textPx > 0) lumaSum / textPx.toDouble() else 0.0, p90, pmax, b[2] - b[0], b[3] - b[1],
+                    ),
+            )
+            check(p90 >= MIN_TEXT_STEP_P90 && pmax >= MIN_TEXT_STEP_MAX) {
+                "${l.text}: the sign text barely shows over its paint (luma step p90 $p90, max $pmax)"
+            }
+        }
+
+        /**
+         * Two camera positions 1.2 m apart on the hangar centre line ([x], [y], [z0] and [z1]) where
+         * the first renderer swapped its 8th and 9th light, looking at ([tx], [ty], [tz]), the pool
+         * of the light it switched. Per frame the local lights' contribution L (with lights minus
+         * without); the change of L between the frames, box-blurred over 15 x 15 px with its sign,
+         * marks a pool turning on or off (edges that move with the camera give +/- pairs that
+         * cancel). Writes the second frame and the change amplified 4x for review.
+         */
+        fun lightPop(x: Float, y: Float, z0: Float, z1: Float, tx: Float, ty: Float, tz: Float) {
+            val up = floatArrayOf(0f, 1f, 0f)
+            val shots = ArrayList<BufferedImage>()
+            for (z in floatArrayOf(z0, z1)) {
+                camera(floatArrayOf(x, y, z), floatArrayOf(tx, ty, tz), up, 60f)
+                val lit = render(true)
+                val dark = render(true, 0)
+                shots += lit
+                shots += dark
+            }
+            val w = s.opts.width
+            val h = s.opts.height
+            val diff = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
+            // signed change of the light contribution, and its integral image for the box blur
+            val sat = LongArray((w + 1) * (h + 1))
+            var light = 0L
+            for (py in 0 until h) {
+                var row = 0L
+                for (px in 0 until w) {
+                    val l0 = luma(shots[0].getRGB(px, py)) - luma(shots[1].getRGB(px, py))
+                    val l1 = luma(shots[2].getRGB(px, py)) - luma(shots[3].getRGB(px, py))
+                    val d = l1 - l0
+                    light += abs(l1)
+                    row += d
+                    sat[(py + 1) * (w + 1) + px + 1] = sat[py * (w + 1) + px + 1] + row
+                    val v = minOf(255, abs(d) * 4)
+                    diff.setRGB(px, py, (v shl 16) or (v shl 8) or v)
+                }
+            }
+            val k = 7
+            var pop = 0
+            var peak = 0.0
+            for (py in k until h - k) for (px in k until w - k) {
+                val a = sat[(py - k) * (w + 1) + px - k]
+                val b = sat[(py - k) * (w + 1) + px + k + 1]
+                val c = sat[(py + k + 1) * (w + 1) + px - k]
+                val e = sat[(py + k + 1) * (w + 1) + px + k + 1]
+                val mean = abs(e - b - c + a) / ((2.0 * k + 1) * (2 * k + 1))
+                if (mean > POP_LEVEL) pop++
+                if (mean > peak) peak = mean
+            }
+            val name = "real-$type-lightpop"
+            Screenshot.write(shots[2], File(s.opts.outDir, "$name.png"))
+            Screenshot.write(diff, File(s.opts.outDir, "$name-diff.png"))
+            val n = w.toDouble() * h
+            val share = pop * 100.0 / n
+            r.note(
+                "  %-34s camera (%.0f, %.0f, %.1f -> %.1f) at (%.0f, %.0f, %.0f): light contribution mean %.2f luma; between the frames a 15 px area changes by %.1f levels at most, %.3f %% of the picture by > %d"
+                    .format(name, x, y, z0, z1, tx, ty, tz, light / n, peak, share, POP_LEVEL),
+            )
+            check(share < MAX_POP_SHARE) { "$type: $share % of the picture changes its light by > $POP_LEVEL levels between frames 1.2 m apart (a light popped)" }
+        }
+
+        private fun luma(p: Int): Int = (((p shr 16) and 0xFF) * 54 + ((p shr 8) and 0xFF) * 183 + (p and 0xFF) * 19) shr 8
+
+        private fun crop(img: BufferedImage, b: IntArray, file: File) {
+            val pad = 12
+            val x0 = (b[0] - pad).coerceAtLeast(0)
+            val y0 = (b[1] - pad).coerceAtLeast(0)
+            val x1 = (b[2] + pad).coerceAtMost(img.width - 1)
+            val y1 = (b[3] + pad).coerceAtMost(img.height - 1)
+            val k = maxOf(1, minOf(3, 1600 / (x1 - x0 + 1)))
+            val out = BufferedImage((x1 - x0 + 1) * k, (y1 - y0 + 1) * k, BufferedImage.TYPE_INT_RGB)
+            val g = out.createGraphics()
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
+            g.drawImage(img.getSubimage(x0, y0, x1 - x0 + 1, y1 - y0 + 1), 0, 0, out.width, out.height, null)
+            g.dispose()
+            Screenshot.write(out, file)
+        }
+    }
 
     /**
      * The station's per-frame CPU work in the worst view (MERIDIAN, inside the hangar, detail level

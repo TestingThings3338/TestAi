@@ -78,7 +78,10 @@ class StationModel private constructor(
         val pad: Int,
         /** Colour as built: sRGB bytes 0..255 and opacity (1 - Transparency) 0..255. */
         val r: Int, val g: Int, val b: Int, val a: Int,
-        /** Blinkers: period (s), phase (s; negative = not set in Roblox: the instance picks one), duty 0.02..0.98. */
+        /**
+         * Blinkers: period (s), phase (s; negative = not set in Roblox: the instance picks one, and
+         * the slot holds that one part, as Roblox draws a phase per part), duty 0.02..0.98.
+         */
         val period: Float, val phase: Float, val duty: Float,
         /** PAPI: threshold elevation (radians) and the lamp's position (station space). */
         val papiThreshold: Float, val papiX: Float, val papiY: Float, val papiZ: Float,
@@ -143,8 +146,9 @@ class StationModel private constructor(
 
     /**
      * The quantised mesh: [VERTEX_BYTES]-byte vertices (see the converter) and indices in the order
-     * pass (opaque, translucent, lamp) / LOD class (2, 1, 0) / group. Detail level L draws classes
-     * 2 down to L of a pass, which is one prefix of that pass's range.
+     * pass ([PASS_OPAQUE], [PASS_TRANSLUCENT], [PASS_LAMP], [PASS_PAINT]) / LOD class (2, 1, 0) /
+     * group. Detail level L draws classes 2 down to L of a pass, which is one prefix of that pass's
+     * range.
      */
     class Mesh(
         val originX: Float, val originY: Float, val originZ: Float,
@@ -256,12 +260,27 @@ class StationModel private constructor(
     }
 
     companion object {
-        const val VERSION = 1
+        const val VERSION = 2
         const val VERTEX_BYTES = 16
+
+        /** Hull, opaque paint, accent and PAPI lamps: depth written, not blended. */
         const val PASS_OPAQUE = 0
+
+        /**
+         * Translucent parts (glass, ForceField, 0 < Transparency < 1), blended after the sign text,
+         * plus the few translucent frames Roblox draws over a label of their SurfaceGui.
+         */
         const val PASS_TRANSLUCENT = 1
+
+        /** Blinkers and pad lamps: blended, their opacity changes at runtime. */
         const val PASS_LAMP = 2
-        const val PASSES = 3
+
+        /**
+         * Translucent paint (SurfaceGui frames and strokes with transparency): blended before the
+         * sign text, so a label stays on top of the paint under it as in Roblox.
+         */
+        const val PASS_PAINT = 3
+        const val PASSES = 4
         const val LAMP_ACCENT = 0
         const val LAMP_PAD = 1
         const val LAMP_PAPI = 2
@@ -300,6 +319,13 @@ class StationModel private constructor(
 
         /** Asset path of a model. */
         fun path(type: String) = "stations/$type.stm"
+
+        /**
+         * Pad [index] as Roblox prints it ("%02d": "01".."06", for the pad boards and "PAD 04"), in
+         * ASCII digits whatever the default locale: String.format would give native digits in
+         * Arabic, Persian, Hindi-digit, Bengali or Burmese locales, which the font atlas lacks.
+         */
+        fun padNumber(index: Int): String = if (index in 0..9) "0$index" else index.toString()
 
         /** Reads stations/<type>.stm through [read] (asset path -> bytes). */
         fun load(type: String, read: (String) -> ByteArray): StationModel = parse(read(path(type)))

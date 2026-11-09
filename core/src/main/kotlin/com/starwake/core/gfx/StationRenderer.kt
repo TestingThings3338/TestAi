@@ -13,11 +13,13 @@ import kotlin.math.sqrt
  * Draws the Roblox stations ([StationModel]) with their runtime state ([StationInstance]).
  *
  * Per station and frame, at most one draw call per pass and detail level: the opaque hull and
- * paint, the sign text, the translucent parts, the lamps (blinkers and pad lamps, blended because
- * their opacity changes), and for a build site the hologram of the next stage; plus one per light
- * beam (the Spire's lighthouse). Rotating groups and lamp colours are uniforms (uploaded only when
- * they change), so no mesh is ever rebuilt. Detail levels ([lodFor]): 0 within 3 km, 1 to 15 km,
- * 2 to 60 km (Roblox's LodDistance); beyond that [drawMarker] shows a dot instead.
+ * paint, the translucent paint, the sign text over it, the translucent parts, the lamps (blinkers
+ * and pad lamps, blended because their opacity changes), and for a build site the hologram of the
+ * next stage; plus one per light beam (the Spire's lighthouse). Rotating groups and lamp colours
+ * are uniforms (uploaded only when they change), so no mesh is ever rebuilt. Detail levels
+ * ([lodFor]): 0 within 3 km, 1 to 15 km, 2 to 60 km (Roblox's LodDistance); beyond that
+ * [drawMarker] shows a dot instead. Up to [maxLights] Roblox lights are evaluated per pixel
+ * ([StationLightPicker]: the nearest, faded in and out so none pops).
  *
  * The caller passes the station's camera-relative pose ([pose]: station space -> camera-relative
  * world, rotation and translation, optionally a uniform scale for a far depth slice) and the
@@ -154,9 +156,7 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
     private val lightPos = FloatArray(StationShaders.MAX_LIGHTS * 4)
     private val lightCol = FloatArray(StationShaders.MAX_LIGHTS * 4)
     private val lightDir = FloatArray(StationShaders.MAX_LIGHTS * 4)
-    private val lightOrder = IntArray(64)
-    private val lightKey = FloatArray(64)
-    private val camStation = FloatArray(3)
+    private val lightPicker = StationLightPicker(StationShaders.MAX_LIGHTS)
     private val tmp = FloatArray(4)
 
     /** Draw calls and triangles since the last [resetStats]. */
@@ -252,8 +252,11 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
     }
 
     /**
-     * Everything blended, after the opaque scene: sign text (detail level 0 only), translucent parts,
-     * lamps, a build site's hologram stage and light beams. Depth tested, not written.
+     * Everything blended, after the opaque scene, in this order: translucent paint, sign text
+     * (detail level 0 only) over it, translucent parts, lamps, a build site's hologram stage and
+     * light beams. Depth tested, not written, so the order decides what covers what: a label stays
+     * on top of the semi-transparent panel or stroke it sits on (as Roblox draws a SurfaceGui), and
+     * glass in front of a sign still tints it.
      */
     fun drawTransparent(
         gpu: ModelGpu, st: StationInstance, signs: Signs?, pose: Mat4, viewProj: Mat4, lod: Int, depthFraction: Float = 1f,
@@ -263,8 +266,18 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
         gl.enable(GL.BLEND)
         gl.blendFunc(GL.ONE, GL.ONE_MINUS_SRC_ALPHA)
         gl.depthMask(false)
-        if (lod == 0 && signs != null && signs.glyphs > 0) drawSigns(signs, st, pose, viewProj, depthFraction)
         bindMesh(gpu, st, pose, viewProj, depthFraction)
+        val np = m.count(StationModel.PASS_PAINT, lod)
+        if (np > 0) {
+            gl.uniform1i(uPass, StationShaders.PASS_TRANSLUCENT)
+            drawRange(gpu, m.first(StationModel.PASS_PAINT), np)
+        }
+        if (lod == 0 && signs != null && signs.glyphs > 0) {
+            drawSigns(signs, st, pose, viewProj, depthFraction)
+            // back to the mesh program: its uniforms (pose, lamps, groups, lights) are still set
+            // for this station, the font sits on unit 0's 2D target beside the cube map
+            mesh.use()
+        }
         val nt = m.count(StationModel.PASS_TRANSLUCENT, lod)
         if (nt > 0) {
             gl.uniform1i(uPass, StationShaders.PASS_TRANSLUCENT)
@@ -342,8 +355,8 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
     }
 
     /**
-     * Picks the Roblox lights whose reach comes closest to the camera (at most [maxLights]) and
-     * uploads them camera-relative.
+     * Picks the Roblox lights whose reach comes closest to the camera (at most [maxLights], with
+     * weights that fade them in and out: [StationLightPicker]) and uploads them camera-relative.
      */
     private fun lights(model: StationModel, st: StationInstance, pose: Mat4) {
         val ls = model.lights
@@ -353,64 +366,32 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
         val tx = pm[12]
         val ty = pm[13]
         val tz = pm[14]
-        camStation[0] = -(pm[0] * tx + pm[1] * ty + pm[2] * tz) / k2
-        camStation[1] = -(pm[4] * tx + pm[5] * ty + pm[6] * tz) / k2
-        camStation[2] = -(pm[8] * tx + pm[9] * ty + pm[10] * tz) / k2
-        var n = 0
-        val cap = minOf(ls.size, lightOrder.size)
-        for (i in 0 until cap) {
-            val l = ls[i]
-            val dx = l.x - camStation[0]
-            val dy = l.y - camStation[1]
-            val dz = l.z - camStation[2]
-            val key = sqrt(dx * dx + dy * dy + dz * dz) - l.range
-            if (key > LIGHT_CULL) continue
-            // insertion into the sorted list
-            var j = n
-            while (j > 0 && lightKey[j - 1] > key) {
-                lightKey[j] = lightKey[j - 1]
-                lightOrder[j] = lightOrder[j - 1]
-                j--
-            }
-            lightKey[j] = key
-            lightOrder[j] = i
-            n++
-        }
-        val count = minOf(n, maxLights)
+        val camX = -(pm[0] * tx + pm[1] * ty + pm[2] * tz) / k2
+        val camY = -(pm[4] * tx + pm[5] * ty + pm[6] * tz) / k2
+        val camZ = -(pm[8] * tx + pm[9] * ty + pm[10] * tz) / k2
+        val p = lightPicker
+        val count = p.pick(st, camX, camY, camZ, maxLights)
         val scale = sqrt(k2)
+        val il = 1f / scale
         for (j in 0 until count) {
-            val l = ls[lightOrder[j]]
-            // group transform, then the pose
-            val g = l.group
-            var x = l.x
-            var y = l.y
-            var z = l.z
-            var dx = l.dirX
-            var dy = l.dirY
-            var dz = l.dirZ
-            if (g != 0) {
-                st.groupRows(g, groupRows, 0)
-                val r = groupRows
-                val nx = r[0] * x + r[1] * y + r[2] * z + r[3]
-                val ny = r[4] * x + r[5] * y + r[6] * z + r[7]
-                val nz = r[8] * x + r[9] * y + r[10] * z + r[11]
-                x = nx; y = ny; z = nz
-                val ex = r[0] * dx + r[1] * dy + r[2] * dz
-                val ey = r[4] * dx + r[5] * dy + r[6] * dz
-                val ez = r[8] * dx + r[9] * dy + r[10] * dz
-                dx = ex; dy = ey; dz = ez
-            }
+            val l = ls[p.index[j]]
+            // the light where its group has turned it (the picker did that), then the pose
+            val x = p.pos[j * 3]
+            val y = p.pos[j * 3 + 1]
+            val z = p.pos[j * 3 + 2]
+            val dx = p.dir[j * 3]
+            val dy = p.dir[j * 3 + 1]
+            val dz = p.dir[j * 3 + 2]
             val o = j * 4
             lightPos[o] = pm[0] * x + pm[4] * y + pm[8] * z + pm[12]
             lightPos[o + 1] = pm[1] * x + pm[5] * y + pm[9] * z + pm[13]
             lightPos[o + 2] = pm[2] * x + pm[6] * y + pm[10] * z + pm[14]
             lightPos[o + 3] = l.range * scale
-            val il = 1f / scale
             lightDir[o] = (pm[0] * dx + pm[4] * dy + pm[8] * dz) * il
             lightDir[o + 1] = (pm[1] * dx + pm[5] * dy + pm[9] * dz) * il
             lightDir[o + 2] = (pm[2] * dx + pm[6] * dy + pm[10] * dz) * il
             lightDir[o + 3] = 0f
-            val b = l.brightness * LIGHT_GAIN
+            val b = l.brightness * LIGHT_GAIN * p.weight[j]
             lightCol[o] = srgbToLinear(l.r) * b
             lightCol[o + 1] = srgbToLinear(l.g) * b
             lightCol[o + 2] = srgbToLinear(l.b) * b
@@ -537,9 +518,6 @@ class StationRenderer(private val gl: Gl, val font: FontData, fontAtlas: ByteArr
 
         /** Roblox light brightness -> linear radiance scale of the local lights. */
         private const val LIGHT_GAIN = 0.35f
-
-        /** Lights whose reach ends more than this far (m) from the camera are not considered. */
-        private const val LIGHT_CULL = 600f
         private const val BEAM_SEGMENTS = 10
         private const val BEAM_GAIN = 0.9f
         private const val FIELD_SHIMMER_SPEED = 2.4f
@@ -586,9 +564,9 @@ internal object SignLayout {
         return buf
     }
 
-    private fun textOf(l: StationModel.Label, name: String): String = when {
+    internal fun textOf(l: StationModel.Label, name: String): String = when {
         l.isStationName -> name
-        l.isPadNumber -> "%02d".format(l.pad)
+        l.isPadNumber -> StationModel.padNumber(l.pad)
         else -> l.text
     }
 

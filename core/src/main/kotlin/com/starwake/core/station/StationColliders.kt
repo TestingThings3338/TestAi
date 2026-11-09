@@ -243,8 +243,9 @@ class StationColliders(shapes: IntArray, groups: IntArray, frames: FloatArray, s
      * Sweeps a sphere of [radius] from ([x0], [y0], [z0]) to ([x1], [y1], [z1]) (ShipStation.collide's
      * Spherecast): the first solid collider it touches, with the fraction of the move and the
      * contact normal. Like Roblox's Spherecast, colliders the sphere already overlaps at the start
-     * are ignored (use [sphereContact] to push out of those). Conservative advancement on the exact
-     * distance to each candidate; allocation free.
+     * are ignored (use [sphereContact] to push out of those), and so are colliders it starts on and
+     * moves away from or along. Grazing moves count: a sphere slid 5 cm off a wall that turns 1
+     * degree into it is stopped where it touches ([timeOfImpact]). Allocation free.
      */
     fun sphereCast(
         x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, radius: Float,
@@ -265,28 +266,17 @@ class StationColliders(shapes: IntArray, groups: IntArray, frames: FloatArray, s
             val mz = ez[g] - az
             // bounding sphere vs the swept segment
             val len2 = mx * mx + my * my + mz * mz
-            var t = 0f
-            if (len2 > 1e-12f) t = (((cx[i] - ax) * mx + (cy[i] - ay) * my + (cz[i] - az) * mz) / len2).coerceIn(0f, 1f)
+            if (len2 < 1e-12f) continue
+            val t = (((cx[i] - ax) * mx + (cy[i] - ay) * my + (cz[i] - az) * mz) / len2).coerceIn(0f, 1f)
             val dx = ax + mx * t - cx[i]
             val dy = ay + my * t - cy[i]
             val dz = az + mz * t - cz[i]
             val reach = bound[i] + radius
             if (dx * dx + dy * dy + dz * dz > reach * reach) continue
-            if (signedDistance(i, ax, ay, az, tmp) < radius) continue // overlapping at the start
-            val len = sqrt(len2)
-            if (len < 1e-6f) continue
-            var s = 0f
-            var hit = false
-            for (k in 0 until MAX_STEPS) {
-                val d = signedDistance(i, ax + mx * s, ay + my * s, az + mz * s, tmp) - radius
-                if (d <= CONTACT_EPS) {
-                    hit = true
-                    break
-                }
-                s += d / len
-                if (s > 1f || s >= bestT) break
-            }
-            if (hit && s < bestT) {
+            val f0 = signedDistance(i, ax, ay, az, tmp) - radius
+            if (f0 < 0f) continue // overlapping at the start
+            val s = timeOfImpact(i, ax, ay, az, mx, my, mz, radius, f0, minOf(1f, bestT))
+            if (s >= 0f && s < bestT) {
                 bestT = s
                 best = i
                 out.nx = tmp[1]; out.ny = tmp[2]; out.nz = tmp[3]
@@ -304,6 +294,36 @@ class StationColliders(shapes: IntArray, groups: IntArray, frames: FloatArray, s
     }
 
     // ------------------------------------------------------------------ internals
+
+    /**
+     * First fraction s in [0, [limit]) at which the sphere moving from a = ([ax], [ay], [az]) by
+     * s * m touches collider [i], or -1. [f0] is the gap at s = 0 (>= 0); the contact normal is left
+     * in tmp[1..3].
+     *
+     * The gap f(s) = distance(a + s m) - radius is a convex function of s (every shape here is
+     * convex and [signedDistance] is its exact distance), with slope f'(s) = normal . m. So a Newton
+     * step s += f / -f' never passes the first contact: it lands on a flat face in one step and
+     * converges quadratically on edges and curved surfaces, however shallow the approach (plain
+     * conservative advancement shrinks the gap only by a factor 1 - sin(angle) per step and gives
+     * up on grazing moves). And once f' >= 0 the sphere only moves away: no contact later.
+     */
+    private fun timeOfImpact(
+        i: Int, ax: Float, ay: Float, az: Float, mx: Float, my: Float, mz: Float, radius: Float, f0: Float, limit: Float,
+    ): Float {
+        var s = 0f
+        var f = f0
+        for (k in 0 until MAX_STEPS) {
+            val slope = tmp[1] * mx + tmp[2] * my + tmp[3] * mz
+            // touching: a contact only when moving in (sliding along or away is free)
+            if (f <= CONTACT_EPS) return if (slope < 0f) s else -1f
+            if (slope >= 0f) return -1f
+            s += f / -slope
+            if (s >= limit) return -1f
+            f = signedDistance(i, ax + mx * s, ay + my * s, az + mz * s, tmp) - radius
+        }
+        // only an almost exactly tangent pass gets here, still in front of the contact: stop there
+        return s
+    }
 
     /** The point in each group's rest frame: p' = R^T (p - c) + c. */
     private fun toGroups(x: Float, y: Float, z: Float, frames: GroupFrames?, ox: FloatArray, oy: FloatArray, oz: FloatArray) {
@@ -543,7 +563,11 @@ class StationColliders(shapes: IntArray, groups: IntArray, frames: FloatArray, s
         const val SHAPE_WEDGE = 3
         const val SHAPE_CORNER_WEDGE = 4
         const val MAX_GROUPS = 8
-        private const val MAX_STEPS = 48
+
+        /** Newton steps per collider in [sphereCast] (a face takes 1, an edge or a curve a few). */
+        private const val MAX_STEPS = 32
+
+        /** Gap (m) that counts as touching. */
         private const val CONTACT_EPS = 1e-3f
     }
 }
