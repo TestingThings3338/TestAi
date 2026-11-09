@@ -29,6 +29,43 @@ class StationCollision(private val flight: FlightModel) {
     private val portDir = Vec3()
     private val slot = Vec3()
 
+    // the escape leg being flown inside the keep-out (station-local), see [dockWaypoint]
+    private var legStation: StarSystem.Station? = null
+    private var legX0 = 0f
+    private var legY0 = 0f
+    private var legZ0 = 0f
+    private var legX1 = 0f
+    private var legY1 = 0f
+    private var legZ1 = 0f
+
+    // escape frame of the current [dockWaypoint] call (station-local): away from the dock axis,
+    // the nearest wall's normal, two directions along that wall; and the candidate from [direction]
+    private var escOx = 0f
+    private var escOy = 0f
+    private var escOz = 0f
+    private var escNx = 0f
+    private var escNy = 0f
+    private var escNz = 0f
+    private var escT1x = 0f
+    private var escT1y = 0f
+    private var escT1z = 0f
+    private var escT2x = 0f
+    private var escT2y = 0f
+    private var escT2z = 0f
+    private var escWall = false
+    private var dirX = 0f
+    private var dirY = 0f
+    private var dirZ = 0f
+
+    // most open clear sample of the last [pathClear] trace, and its distance along the line;
+    // the full distance at the last [traceDistance] sample
+    private var traceBestS = 0f
+    private var traceBestT = 0f
+    private var traceFull = 0f
+
+    // proxies the current [pathClear] line can no longer come closer to ([traceDistance])
+    private val released = BooleanArray(MAX_PROXIES)
+
     // normal of the last [distance] / [sceneDistance] query (station-local, unit, pointing out)
     private var nx = 0f
     private var ny = 0f
@@ -97,10 +134,21 @@ class StationCollision(private val flight: FlightModel) {
         sceneDistance(PROXIES[model], x, y, z, Float.MAX_VALUE)
 
     /**
+     * True when the last [dockWaypoint] call found no way out of the keep-out: no candidate line
+     * from the ship is clear far enough to gain any clearance. In practice that needs the ship's
+     * centre buried in the hull, which [collide] never lets a flying ship do; a ship wedged in a
+     * narrow gap (like the 17.6 m one between the ring station's spindle and a tank) slides out.
+     * The waypoint is then the ship's own position, and it stays so on every later call from
+     * there, so Game should give up auto-dock (after a short grace) instead of waiting for it.
+     */
+    var boxedIn = false
+        private set
+
+    /**
      * Auto-dock routing. The ship at [shipPos] wants the stand-off point [DOCK_STANDOFF] metres in
      * front of [st]'s docking port. Returns false when it can fly straight there. Otherwise writes a
      * detour waypoint (world space) to [out] and returns true; fly to it this frame and ask again
-     * next frame.
+     * next frame. Check [boxedIn] after each call that returns true.
      *
      * The keep-out is the station's bounding sphere + 50 m, behind the plane 40 m in front of the
      * hull's front-most point (a ship behind that plane and near the station has to go around).
@@ -108,13 +156,20 @@ class StationCollision(private val flight: FlightModel) {
      * - Outside the sphere: straight to the stand-off if the line misses the keep-out; else to a
      *   point beside the station level with the stand-off (radius + 150 m off the dock axis, on the
      *   ship's side); else first straight out from the dock axis to that radius.
-     * - Inside it (close in, e.g. between the ring and the spindle): out along the first clear line
-     *   of forward, away from the dock axis, backward, up, down (checked against the proxies).
+     * - Inside it (close in, e.g. between the ring and the spindle, or wedged in a gap): out along
+     *   the first of 12 candidate lines (see [escape]) that is clear all the way out of the
+     *   keep-out, traced against the proxies. Else, or when the ship is too close to a wall for
+     *   that, along the clear start of the line that reaches the most open point, up to that
+     *   point, and look again from there. Neither: [boxedIn].
      *
-     * Every leg ends where the next one starts clear and each leg's remainder stays clear, so
-     * repeated calls converge (ship -> waypoints -> stand-off) without oscillating.
+     * Each such escape is a leg the router keeps until the ship reaches its end (while the ship
+     * stays on it), so it never switches lines between frames. A partial leg always ends further
+     * from every wall than it started, a full one ends outside the keep-out, and every leg outside
+     * it ends where the next one starts clear. So repeated calls converge (ship -> waypoints ->
+     * stand-off) or stop at [boxedIn], and never oscillate.
      */
     fun dockWaypoint(st: StarSystem.Station, shipPos: DVec3, out: DVec3): Boolean {
+        boxedIn = false
         val m = st.model
         val set = PROXIES[m]
         StationMesh.dockPort(m, portPos, portDir)
@@ -173,42 +228,110 @@ class StationCollision(private val flight: FlightModel) {
             toWorld(st, ox * rd + ax * along, oy * rd + ay * along, oz * rd + az * along, out)
             return true
         }
-        // inside the keep-out: leave it along the first clear line
+        // inside the keep-out, on a leg chosen earlier: keep flying it (it was traced clear)
+        if (onLeg(st, lx, ly, lz)) {
+            toWorld(st, legX1, legY1, legZ1, out)
+            return true
+        }
+        legStation = null
         val r = flight.spec.collisionRadius
         val s0 = sceneDistance(set, lx, ly, lz, Float.MAX_VALUE)
-        val awayX = nx
-        val awayY = ny
-        val awayZ = nz
-        // near a wall, accept lines that keep (almost) today's gap; never closer than r + 1.25 m
-        val minClear = maxOf(r + 2.5f, minOf(r + ESCAPE_CLEAR, s0 - 1f))
-        val tol = minOf(8f, (minClear - r) * 0.5f)
-        if (s0 >= minClear) {
-            for (k in 0 until ESCAPE_DIRECTIONS) {
-                var dx: Float
-                var dy: Float
-                var dz: Float
-                when (k) {
-                    0 -> { dx = ax; dy = ay; dz = az }
-                    1 -> { dx = ox; dy = oy; dz = oz }
-                    2 -> { dx = -ax; dy = -ay; dz = -az }
-                    3 -> { dx = 0f; dy = 1f; dz = 0f }
-                    else -> { dx = 0f; dy = -1f; dz = 0f }
-                }
-                // forward ends just in front of the keep-out; the others where they leave the detour sphere
-                val len = if (k == 0) front + 30f - along else rayExit(lx, ly, lz, dx, dy, dz, rd)
-                if (len <= 0f) continue
-                val ex = lx + dx * len
-                val ey = ly + dy * len
-                val ez = lz + dz * len
-                if (pathClear(set, lx, ly, lz, ex, ey, ez, minClear, tol)) {
-                    toWorld(st, ex, ey, ez, out)
-                    return true
-                }
+        // the nearest wall's normal, and two ways along that wall: t1 = a x n (round the dock axis),
+        // t2 = n x t1 (along the axis); a wall facing along the axis has no t1 (then both are skipped)
+        escNx = nx; escNy = ny; escNz = nz
+        var t1x = ay * escNz - az * escNy
+        var t1y = az * escNx - ax * escNz
+        var t1z = ax * escNy - ay * escNx
+        val t1 = sqrt(t1x * t1x + t1y * t1y + t1z * t1z)
+        escWall = t1 > 0.3f
+        if (escWall) {
+            t1x /= t1; t1y /= t1; t1z /= t1
+        }
+        escT1x = t1x; escT1y = t1y; escT1z = t1z
+        escT2x = escNz * t1y - escNy * t1z
+        escT2y = escNx * t1z - escNz * t1x
+        escT2z = escNy * t1x - escNx * t1y
+        escOx = ox; escOy = oy; escOz = oz
+        if (s0 >= r + ESCAPE_FLOOR) {
+            // a line out that keeps (almost) today's gap, never closer than r + ESCAPE_FLOOR / 2;
+            // else the clear part of one that reaches somewhere much more open
+            val minClear = maxOf(r + ESCAPE_FLOOR, minOf(r + ESCAPE_CLEAR, s0 - 1f))
+            val tol = minOf(8f, (minClear - r) * 0.5f)
+            if (escape(st, set, lx, ly, lz, along, front, rd, minClear, tol, s0 + LEG_GAIN, true, out)) return true
+        }
+        // touching or wedged: the most open point a clear move reaches, if it gains anything at all
+        // (a fixed push away from the nearest wall crosses a narrow gap into the opposite wall, and
+        // the next frame pushes back: the ship would jitter there for ever)
+        if (escape(st, set, lx, ly, lz, along, front, rd, s0 - STEP_TOL, STEP_TOL, s0 + STEP_GAIN, false, out)) return true
+        // boxed in: hold still (Game gives up); from here every later call answers the same
+        boxedIn = true
+        toWorld(st, lx, ly, lz, out)
+        return true
+    }
+
+    /**
+     * One escape search from the local point p inside the keep-out, along the [ESCAPE_DIRECTIONS]
+     * candidate lines (forward, away from the dock axis, backward, up, down, both ways round the
+     * axis, both ways along the nearest wall in two directions, straight away from it), each traced
+     * keeping [minClear] ([tol]). With [full], takes the first line that is clear all the way out
+     * of the keep-out. Else the clear start of the line that reaches the most open point, up to
+     * that point, if it is at least [minOpen] from every wall. Starts that leg and writes its end
+     * to [out]; false when no line qualifies.
+     */
+    private fun escape(
+        st: StarSystem.Station, set: Array<Proxy>, px: Float, py: Float, pz: Float, along: Float, front: Float, rd: Float,
+        minClear: Float, tol: Float, minOpen: Float, full: Boolean, out: DVec3,
+    ): Boolean {
+        var bestS = minOpen
+        var bestT = 0f
+        var bestK = -1
+        for (k in 0 until ESCAPE_DIRECTIONS) {
+            if (!direction(k)) continue
+            val dx = dirX
+            val dy = dirY
+            val dz = dirZ
+            // forward ends just in front of the keep-out; the others where they leave the detour sphere
+            val len = if (k == 0) front + 30f - along else rayExit(px, py, pz, dx, dy, dz, rd)
+            if (len <= 0f) continue
+            if (pathClear(set, px, py, pz, px + dx * len, py + dy * len, pz + dz * len, minClear, tol) && full) {
+                startLeg(st, px, py, pz, px + dx * len, py + dy * len, pz + dz * len, out)
+                return true
+            }
+            if (traceBestS > bestS && traceBestT >= MIN_ESCAPE_STEP) {
+                bestS = traceBestS
+                bestT = traceBestT
+                bestK = k
             }
         }
-        // touching or boxed in: back away from the nearest surface and look again next frame
-        toWorld(st, lx + awayX * 40f, ly + awayY * 40f, lz + awayZ * 40f, out)
+        if (bestK < 0) return false
+        // every such leg ends further from every wall than it starts, so a chain of them never loops
+        direction(bestK)
+        startLeg(st, px, py, pz, px + dirX * bestT, py + dirY * bestT, pz + dirZ * bestT, out)
         return true
+    }
+
+    /** Escape candidate [k] (unit, station-local) into dirX/Y/Z from the esc* frame; false when undefined. */
+    private fun direction(k: Int): Boolean {
+        val ax = portDir.x
+        val ay = portDir.y
+        val az = portDir.z
+        when (k) {
+            0 -> { dirX = ax; dirY = ay; dirZ = az }
+            1 -> { dirX = escOx; dirY = escOy; dirZ = escOz }
+            2 -> { dirX = -ax; dirY = -ay; dirZ = -az }
+            3 -> { dirX = 0f; dirY = 1f; dirZ = 0f }
+            4 -> { dirX = 0f; dirY = -1f; dirZ = 0f }
+            // round the dock axis (a x o): out of gaps between parts side by side around it, like the
+            // ring station's spindle and a tank
+            5 -> { dirX = ay * escOz - az * escOy; dirY = az * escOx - ax * escOz; dirZ = ax * escOy - ay * escOx }
+            6 -> { dirX = az * escOy - ay * escOz; dirY = ax * escOz - az * escOx; dirZ = ay * escOx - ax * escOy }
+            7 -> { dirX = escT1x; dirY = escT1y; dirZ = escT1z }
+            8 -> { dirX = -escT1x; dirY = -escT1y; dirZ = -escT1z }
+            9 -> { dirX = escT2x; dirY = escT2y; dirZ = escT2z }
+            10 -> { dirX = -escT2x; dirY = -escT2y; dirZ = -escT2z }
+            else -> { dirX = escNx; dirY = escNy; dirZ = escNz }
+        }
+        return k < 7 || k > 10 || escWall
     }
 
     /** Signed distance from a station-local point to proxy [index] of [model] (tests and debug views). */
@@ -220,6 +343,40 @@ class StationCollision(private val flight: FlightModel) {
     private fun toWorld(st: StarSystem.Station, x: Float, y: Float, z: Float, out: DVec3) {
         st.rot.rotate(x, y, z, world)
         out.set(st.pos.x + world.x, st.pos.y + world.y, st.pos.z + world.z)
+    }
+
+    /** Remembers the escape leg (station-local) from the ship to (x1, y1, z1) and writes its end to [out]. */
+    private fun startLeg(st: StarSystem.Station, x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, out: DVec3) {
+        legStation = st
+        legX0 = x0; legY0 = y0; legZ0 = z0
+        legX1 = x1; legY1 = y1; legZ1 = z1
+        toWorld(st, x1, y1, z1, out)
+    }
+
+    /**
+     * Is the ship (local p) still flying the remembered leg at [st]: on the segment (within
+     * [LEG_TOLERANCE]) and not yet at its end? A ship that left it (docking cancelled and flown
+     * elsewhere, another station) is not, so a stale leg is never reused.
+     */
+    private fun onLeg(st: StarSystem.Station, px: Float, py: Float, pz: Float): Boolean {
+        if (legStation !== st) return false
+        val ex = legX1 - px
+        val ey = legY1 - py
+        val ez = legZ1 - pz
+        if (ex * ex + ey * ey + ez * ez < LEG_END * LEG_END) return false
+        val dx = legX1 - legX0
+        val dy = legY1 - legY0
+        val dz = legZ1 - legZ0
+        val len2 = dx * dx + dy * dy + dz * dz
+        val wx = px - legX0
+        val wy = py - legY0
+        val wz = pz - legZ0
+        var t = if (len2 > 1e-6f) (wx * dx + wy * dy + wz * dz) / len2 else 0f
+        if (t < 0f) t = 0f else if (t > 1f) t = 1f
+        val qx = wx - dx * t
+        val qy = wy - dy * t
+        val qz = wz - dz * t
+        return qx * qx + qy * qy + qz * qz < LEG_TOLERANCE * LEG_TOLERANCE
     }
 
     /** Distance along the unit direction d from p (inside the sphere of radius [rs]) to its surface. */
@@ -272,12 +429,16 @@ class StationCollision(private val flight: FlightModel) {
 
     /**
      * Sphere-traces p0 -> p1 through [set]: true when every sample keeps [minClear] from the proxies,
-     * which guarantees at least minClear - [tol] along the whole line. Gives up after
-     * [MAX_TRACE_STEPS] samples (a line grazing a wall for a long way counts as blocked).
+     * which guarantees at least minClear - [tol] along the whole line (see [traceDistance]). Gives
+     * up after [MAX_TRACE_STEPS] samples (a line grazing a wall for a long way counts as blocked).
+     * Either way leaves the most open sample of the clear part in [traceBestS] (its distance from
+     * p0 in [traceBestT]).
      */
     private fun pathClear(
         set: Array<Proxy>, x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, minClear: Float, tol: Float,
     ): Boolean {
+        traceBestS = -Float.MAX_VALUE
+        traceBestT = 0f
         val dx = x1 - x0
         val dy = y1 - y0
         val dz = z1 - z0
@@ -286,16 +447,56 @@ class StationCollision(private val flight: FlightModel) {
         val ix = dx / len
         val iy = dy / len
         val iz = dz / len
+        for (i in set.indices) released[i] = false
         var t = 0f
         var steps = 0
         while (true) {
-            val s = sceneDistance(set, x0 + ix * t, y0 + iy * t, z0 + iz * t, minClear + TRACE_CAP)
+            val s = traceDistance(set, x0 + ix * t, y0 + iy * t, z0 + iz * t, minClear + TRACE_CAP, ix, iy, iz, minClear)
             if (s < minClear) return false
+            if (traceFull > traceBestS) {
+                traceBestS = traceFull
+                traceBestT = t
+            }
             if (t >= len) return true
             if (++steps > MAX_TRACE_STEPS) return false
             // Lipschitz bound: nothing within s - minClear + tol of this sample comes closer than minClear - tol
             t = minOf(len, t + s - minClear + tol)
         }
+    }
+
+    /**
+     * Distance from the sample p of a line traced along the unit direction i to the proxies of [set]
+     * that can still block the rest of it, capped at [cap]; the distance to all of them (for the
+     * most open point) goes to [traceFull]. A convex proxy that p is [minClear] or more from, with
+     * the line not heading into it (i · its normal >= 0), cannot: along the rest of the line its
+     * distance only grows. It is [released] from then on, so a line sliding along a flat face
+     * steps by its distance to everything else instead of creeping along the face.
+     */
+    private fun traceDistance(
+        set: Array<Proxy>, px: Float, py: Float, pz: Float, cap: Float, ix: Float, iy: Float, iz: Float, minClear: Float,
+    ): Float {
+        var best = cap
+        var full = cap
+        for (i in set.indices) {
+            val q = set[i]
+            val gone = released[i]
+            val dx = px - q.bx
+            val dy = py - q.by
+            val dz = pz - q.bz
+            // full <= best, so a proxy that cannot change best cannot change full either
+            val lim = (if (gone) full else best) + q.br
+            if (lim <= 0f || dx * dx + dy * dy + dz * dz >= lim * lim) continue
+            val d = distance(q, px, py, pz)
+            if (d < full) full = d
+            if (gone) continue
+            if (q.convex && d >= minClear && d > 0f && ix * nx + iy * ny + iz * nz >= 0f) {
+                released[i] = true
+                continue
+            }
+            if (d < best) best = d
+        }
+        traceFull = full
+        return best
     }
 
     /**
@@ -311,7 +512,9 @@ class StationCollision(private val flight: FlightModel) {
             val dx = px - q.bx
             val dy = py - q.by
             val dz = pz - q.bz
-            if (sqrt(dx * dx + dy * dy + dz * dz) - q.br >= best) continue
+            // skip it when |p - centre| - br >= best (squared: no root per proxy)
+            val lim = best + q.br
+            if (lim <= 0f || dx * dx + dy * dy + dz * dz >= lim * lim) continue
             val d = distance(q, px, py, pz)
             if (d < best) {
                 best = d
@@ -469,6 +672,13 @@ class StationCollision(private val flight: FlightModel) {
         @JvmField var nu = EMPTY
         @JvmField var nh = EMPTY
         @JvmField var planes = EMPTY
+
+        /**
+         * Its distance is a convex function outside it (boxes, and solids of revolution whose
+         * profile faces away from the axis everywhere; not the habitat ring or the dish), so a line
+         * that starts out not approaching it never gets closer (see [traceDistance]).
+         */
+        @JvmField var convex = true
     }
 
     companion object {
@@ -490,7 +700,24 @@ class StationCollision(private val flight: FlightModel) {
 
         /** Clearance (m, beyond the ship radius) an escape line from inside the keep-out must keep. */
         private const val ESCAPE_CLEAR = 15f
-        private const val ESCAPE_DIRECTIONS = 5
+
+        /** ... or, starting closer to a wall, at least this (a line then keeps at least half of it). */
+        private const val ESCAPE_FLOOR = 0.5f
+        private const val ESCAPE_DIRECTIONS = 12
+
+        /** A partial escape leg ends at least this much further (m) from every wall than it starts ... */
+        private const val LEG_GAIN = 4f
+
+        /** ... or, from too close to a wall for full lines, this much, losing at most 2 x STEP_TOL on the way. */
+        private const val STEP_GAIN = 0.1f
+        private const val STEP_TOL = 0.25f
+
+        /** Shortest partial leg (above Game's 0.5 m arrival radius, so the ship really flies it). */
+        private const val MIN_ESCAPE_STEP = 0.75f
+
+        /** A ship this close to a leg's line still flies it; this close to its end it has arrived. */
+        private const val LEG_TOLERANCE = 1f
+        private const val LEG_END = 0.6f
         private const val MAX_TRACE_STEPS = 96
         private const val TRACE_CAP = 400f
 
@@ -506,6 +733,7 @@ class StationCollision(private val flight: FlightModel) {
 
         /** Proxies per model (declared after the constants their builders use: companion init runs in order). */
         internal val PROXIES: Array<Array<Proxy>> = arrayOf(ringStation(), outpost())
+        private val MAX_PROXIES = PROXIES.maxOf { it.size }
 
         // ============================================================ model 0: ring station
 
@@ -783,6 +1011,7 @@ class StationCollision(private val flight: FlightModel) {
                 // max-over-faces folding assumes faces that look away from the axis; one tilted slightly
                 // towards it (the dish's shallow cone) is off by at most |mu| * r * (1 - cos(pi / N))
                 require(sides == 0 || mu >= -0.25f) { "$label: profile edge $i faces the axis" }
+                if (mu < -1e-5f) p.convex = false
                 pu += u0; ph += h0; eu += du; eh += dh; nu += mu; nh += mh
             }
             for (e in pu.indices) for (i in 0 until n) {

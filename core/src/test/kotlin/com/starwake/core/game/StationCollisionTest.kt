@@ -151,6 +151,45 @@ class StationCollisionTest {
     }
 
     @Test
+    fun convexProxiesNeverComeCloserAlongALineHeadingAway() {
+        // the escape trace skips a convex proxy once the line is clear of it and not heading into it
+        // (StationCollision.traceDistance): check that on every proxy flagged convex, and that the
+        // flag is off exactly for the habitat ring pieces and the dish
+        val rng = Rng(19)
+        val e = 0.05f
+        for (m in 0 until StationMesh.MODELS) for ((i, q) in StationCollision.PROXIES[m].withIndex()) {
+            val ring = q.label.startsWith("habitat ring") || q.label.startsWith("junction") || q.label.startsWith("rib ") || q.label == "dish"
+            assertEquals(!ring, q.convex, "model $m proxy ${q.label}: convex flag")
+            if (!q.convex) continue
+            var lines = 0
+            while (lines < 60) {
+                val x = q.bx + (rng.nextFloat() * 2f - 1f) * q.br * 1.5f
+                val y = q.by + (rng.nextFloat() * 2f - 1f) * q.br * 1.5f
+                val z = q.bz + (rng.nextFloat() * 2f - 1f) * q.br * 1.5f
+                val d0 = sc.proxyDistance(m, i, x, y, z)
+                if (d0 < 0.5f) continue
+                // the outward normal by central differences, and a random direction on its side
+                val gx = sc.proxyDistance(m, i, x + e, y, z) - sc.proxyDistance(m, i, x - e, y, z)
+                val gy = sc.proxyDistance(m, i, x, y + e, z) - sc.proxyDistance(m, i, x, y - e, z)
+                val gz = sc.proxyDistance(m, i, x, y, z + e) - sc.proxyDistance(m, i, x, y, z - e)
+                val dir = Vec3(rng.nextFloat() * 2f - 1f, rng.nextFloat() * 2f - 1f, rng.nextFloat() * 2f - 1f)
+                if (dir.length() < 0.1f) continue
+                dir.normalize()
+                val dot = (dir.x * gx + dir.y * gy + dir.z * gz) / sqrt(gx * gx + gy * gy + gz * gz)
+                if (kotlin.math.abs(dot) < 0.02f) continue // on a crease the sign is ambiguous
+                if (dot < 0f) dir.scale(-1f)
+                lines++
+                var t = 0f
+                while (t < q.br * 3f) {
+                    t += q.br * 0.04f
+                    val d = sc.proxyDistance(m, i, x + dir.x * t, y + dir.y * t, z + dir.z * t)
+                    assertTrue(d >= d0 - 0.01f, "model $m proxy ${q.label}: from ($x, $y, $z) at %.2f m along $dir the distance fell from %.3f to %.3f".format(t, d0, d))
+                }
+            }
+        }
+    }
+
+    @Test
     fun routerDetoursOnlyWhenTheLineIsBlocked() {
         val wp = DVec3()
         val p = DVec3()
@@ -215,7 +254,7 @@ class StationCollisionTest {
                     val gap = f.distance(lp.x.toDouble(), lp.y.toDouble(), lp.z.toDouble(), 30.0)
                     if (gap < minGap) minGap = gap
                     if (gap < MIN_GAP) {
-                        fail("model $m, flight at (${c.joinToString()}): after %.2f s the ship centre is %.2f m from the hull at $lp".format(i * h, gap))
+                        fail("model $m, flight at (${c.joinToString()}): after %.2f s the ship centre is %.2f m from the hull at $lp (ship radius $r m)".format(i * h, gap))
                     }
                 }
                 if (touched) hits++
@@ -262,8 +301,14 @@ class StationCollisionTest {
 
     // ------------------------------------------------------------------ (c) auto-dock goes around
 
-    /** Same kinematics as Game.updateDocking with the router, as described in StationCollision's KDoc. */
-    private class DockRun(val docked: Boolean, val time: Float, val minGap: Double, val detourFrames: Int, val at: String)
+    /**
+     * Same kinematics as Game.updateDocking with the router and its give-up rule (auto-dock ends
+     * once [StationCollision.boxedIn] has held for [DOCK_BOXED_GRACE]), as in the integration notes.
+     */
+    private class DockRun(
+        val docked: Boolean, val aborted: Boolean, val time: Float, val minGap: Double, val startGap: Double,
+        val detourFrames: Int, val legs: Int, val at: String,
+    )
 
     private fun simulateDock(m: Int, startX: Float, startY: Float, startZ: Float, maxTime: Float = 240f): DockRun {
         val st = stations[m]
@@ -279,14 +324,37 @@ class StationCollisionTest {
         val lp = Vec3()
         val dt = 1f / 60f
         var phase = 0
+        val startGap = f.distance(startX.toDouble(), startY.toDouble(), startZ.toDouble(), 40.0)
         var minGap = Double.MAX_VALUE
         var detours = 0
+        var boxedTime = 0f
+        // distinct waypoints so far: the route must never come back to an earlier one
+        val seen = ArrayList<DVec3>()
         var at = ""
         var frame = 0
         while (frame * dt < maxTime) {
             frame++
             val detour = phase == 0 && sc.dockWaypoint(st, pos, wp)
-            if (detour) detours++
+            if (detour) {
+                detours++
+                val last = seen.lastOrNull()
+                if (last == null || dist(last, wp) > 1.0) {
+                    for (i in 0 until seen.size - 1) {
+                        assertTrue(dist(seen[i], wp) > 1.0, "model $m from ($startX, $startY, $startZ): the waypoint went back to an earlier one after %.1f s".format(frame * dt))
+                    }
+                    seen += DVec3().set(wp)
+                }
+            }
+            if (detour && sc.boxedIn) {
+                assertTrue(dist(wp, pos) < 1e-3, "model $m: a boxed-in waypoint must be the ship's own position")
+                boxedTime += dt
+                if (boxedTime > DOCK_BOXED_GRACE) {
+                    toLocal(st, pos, lp)
+                    return DockRun(false, true, frame * dt, minGap, startGap, detours, seen.size, "boxed in at $lp")
+                }
+            } else {
+                boxedTime = 0f
+            }
             val standOff = if (phase == 0) StationCollision.DOCK_STANDOFF else -park
             val tx = if (detour) wp.x else dockPos.x + dockDir.x * standOff
             val ty = if (detour) wp.y else dockPos.y + dockDir.y * standOff
@@ -319,19 +387,28 @@ class StationCollisionTest {
             if (phase == 0 && !detour && d < 15.0) {
                 phase = 1
             } else if (phase == 1 && d < 2.0) {
-                return DockRun(true, frame * dt, minGap, detours, at)
+                return DockRun(true, false, frame * dt, minGap, startGap, detours, seen.size, at)
             }
         }
         toLocal(st, pos, lp)
-        return DockRun(false, frame * dt, minGap, detours, "stuck at $lp (phase $phase)")
+        return DockRun(false, false, frame * dt, minGap, startGap, detours, seen.size, "stuck at $lp (phase $phase)")
     }
 
+    /**
+     * The path must keep the ship sphere off the real mesh: [r] from it, or, from a start already
+     * closer (a ship wedged against the hull), never more than [GAP_SLACK] closer than it started.
+     */
     private fun assertDocks(m: Int, name: String, x: Float, y: Float, z: Float, maxTime: Float = 240f): DockRun {
         val run = simulateDock(m, x, y, z, maxTime)
-        println("model $m $name: docked ${run.docked} in %.1f s, %d detour frames, closest hull approach %.1f m at ${run.at}".format(run.time, run.detourFrames, run.minGap))
+        println("model $m $name: docked ${run.docked} in %.1f s, %d detour frames, %d legs, closest hull approach %.1f m at ${run.at}".format(run.time, run.detourFrames, run.legs, run.minGap))
         assertTrue(run.docked, "model $m from $name ($x, $y, $z): not docked after ${run.time} s, ${run.at}")
-        assertTrue(run.minGap >= r, "model $m from $name ($x, $y, $z): the path came within %.2f m of the hull at ${run.at}".format(run.minGap))
+        assertPathClear(m, name, x, y, z, run)
         return run
+    }
+
+    private fun assertPathClear(m: Int, name: String, x: Float, y: Float, z: Float, run: DockRun) {
+        val floor = minOf(r.toDouble(), run.startGap) - GAP_SLACK
+        assertTrue(run.minGap >= floor, "model $m from $name ($x, $y, $z): the path came within %.2f m of the hull (start %.2f m) at ${run.at}".format(run.minGap, run.startGap))
     }
 
     @Test
@@ -374,29 +451,128 @@ class StationCollisionTest {
             assertTrue(sc.localDistance(m, p[0], p[1], p[2]) > r + 2f, "test start (${p.joinToString()}) touches the hull")
             assertDocks(m, "close in", p[0], p[1], p[2])
         }
-        // random free starts inside the keep-out
+        // random free starts inside the keep-out: anywhere the ship fits, and 0-5 m off the hull (where
+        // a ship ends up after flying into it). Each docks, or gives up the way Game does; none is
+        // left detouring
         val rng = Rng(3)
         for (m in 0 until StationMesh.MODELS) {
             val rad = stations[m].radius.toFloat() + 50f
-            var n = 0
-            while (n < RANDOM_STARTS) {
-                val x = (rng.nextFloat() * 2f - 1f) * rad
-                val y = (rng.nextFloat() * 2f - 1f) * rad
-                val z = (rng.nextFloat() * 2f - 1f) * rad
-                if (x * x + y * y + z * z > rad * rad || -z > StationCollision.FRONT_EXTENT[m] + 40f) continue
-                if (sc.localDistance(m, x, y, z) < r + 5f) continue
-                n++
-                assertDocks(m, "random", x, y, z)
+            var aborted = 0
+            for (band in 0..1) {
+                var n = 0
+                while (n < RANDOM_STARTS) {
+                    val x = (rng.nextFloat() * 2f - 1f) * rad
+                    val y = (rng.nextFloat() * 2f - 1f) * rad
+                    val z = (rng.nextFloat() * 2f - 1f) * rad
+                    if (x * x + y * y + z * z > rad * rad || -z > StationCollision.FRONT_EXTENT[m] + 40f) continue
+                    val c = sc.localDistance(m, x, y, z) - r
+                    if (c < 0f || (band == 1 && c > 5f)) continue
+                    n++
+                    val run = simulateDock(m, x, y, z)
+                    assertTrue(run.docked || run.aborted, "model $m from ($x, $y, $z), %.1f m off the hull: still detouring after ${run.time} s, ${run.at}".format(c))
+                    if (run.aborted) aborted++ else assertPathClear(m, "random", x, y, z, run)
+                }
             }
+            println("model $m: ${2 * RANDOM_STARTS} random close-in starts, $aborted gave up")
+            // 40 000 such starts per model all dock (see the integration notes); a give-up here is a regression
+            assertEquals(0, aborted, "model $m: random close-in starts gave up")
+        }
+    }
+
+    @Test
+    fun autoDockSlidesOutOfNarrowGaps() {
+        // ships wedged against the hull, where the router used to push back and forth between two
+        // walls for ever: between the ring station's spindle and a tank (a 17.6 m gap), a tank tip and
+        // the dock head's back face, a tank tip and the hub, sliding along the hub face or the dock
+        // head's back face; the outpost's tower base over a keel fin, the V between two tanks
+        val ring = listOf(
+            floatArrayOf(0f, 74f, -100f), floatArrayOf(21.93f, -76.13f, -165.43f), floatArrayOf(125.34f, 0.97f, -50.65f),
+            floatArrayOf(-12.82f, -111.23f, -49.57f), floatArrayOf(72.67f, -7.33f, -47.58f), floatArrayOf(-105.06f, 0.78f, -192.82f),
+            floatArrayOf(94.16f, -1.99f, -191.57f), floatArrayOf(98.71f, 17.66f, -192.56f),
+        )
+        val outpost = listOf(
+            floatArrayOf(-0.41f, -117.2f, -14.77f), floatArrayOf(-101.18f, -52.52f, 4.83f), floatArrayOf(-46.76f, -39.93f, -10.12f),
+        )
+        for ((m, pts) in listOf(0 to ring, 1 to outpost)) for (p in pts) {
+            val c = sc.localDistance(m, p[0], p[1], p[2]) - r
+            assertTrue(c in 0f..5f, "wedge start (${p.joinToString()}) is %.2f m off the hull".format(c))
+            val run = assertDocks(m, "wedged %.1f m off the hull".format(c), p[0], p[1], p[2])
+            assertFalse(run.aborted)
+        }
+        // the reported case: 1.3 m of play beside the spindle, nearest wall flipping as the ship moves
+        val st = stations[0]
+        val wp = DVec3()
+        val pos = toWorld(st, 0f, 74f, -100f, DVec3())
+        assertTrue(sc.dockWaypoint(st, pos, wp))
+        assertFalse(sc.boxedIn, "the spindle-tank gap is not a dead end")
+        val lp = toLocal(st, wp, Vec3())
+        assertTrue(kotlin.math.abs(lp.y - 74f) < 1f && kotlin.math.abs(lp.z + 100f) < 1f, "escape from the gap should run along it (round the axis), not into a wall: $lp")
+    }
+
+    @Test
+    fun boxedInHoldsStillSoGameCanAbort() {
+        // a ship centre buried where the hub meets the spindle (collide never allows it; a teleport
+        // could): no line gains clearance, so the router holds the ship still and says so
+        val st = stations[0]
+        val x = 54.13f
+        val y = 24.76f
+        val z = 31.15f
+        assertTrue(sc.localDistance(0, x, y, z) < 0f)
+        val pos = toWorld(st, x, y, z, DVec3())
+        val wp = DVec3()
+        for (frame in 0 until 180) {
+            assertTrue(sc.dockWaypoint(st, pos, wp))
+            assertTrue(sc.boxedIn, "frame $frame: not boxed in")
+            assertTrue(dist(wp, pos) < 1e-3, "frame $frame: a boxed-in ship must hold still, waypoint %.3f m away".format(dist(wp, pos)))
+        }
+        val run = simulateDock(0, x, y, z)
+        assertTrue(run.aborted, "Game's give-up rule should end it: ${run.at}")
+        assertTrue(run.time <= DOCK_BOXED_GRACE + 0.05f, "gave up after ${run.time} s")
+        // the flag is per call: a free ship is not boxed in
+        assertTrue(sc.dockWaypoint(st, toWorld(st, 0f, 500f, 150f, DVec3()), wp))
+        assertFalse(sc.boxedIn)
+    }
+
+    @Test
+    fun escapeLegsAreKeptThenDropped() {
+        val st = stations[0]
+        val wp = DVec3()
+        val fresh = DVec3()
+        // a leg out of the ring hole: flying it, the waypoint stays exactly the same
+        val pos = toWorld(st, 0f, 500f, 150f, DVec3())
+        assertTrue(sc.dockWaypoint(st, pos, wp))
+        val end = DVec3().set(wp)
+        for (i in 0 until 5) {
+            val dx = end.x - pos.x
+            val dy = end.y - pos.y
+            val dz = end.z - pos.z
+            val d = sqrt(dx * dx + dy * dy + dz * dz)
+            pos.set(pos.x + dx * 10.0 / d, pos.y + dy * 10.0 / d, pos.z + dz * 10.0 / d)
+            assertTrue(sc.dockWaypoint(st, pos, wp))
+            assertTrue(dist(wp, end) < 1e-6, "the leg changed while the ship flew it")
+        }
+        // off the leg (docking cancelled, flown elsewhere): planned afresh, as a new router would
+        for (p in listOf(floatArrayOf(0f, 0f, -300f), floatArrayOf(0f, 330f, 200f), floatArrayOf(250f, 250f, -150f))) {
+            toWorld(st, p[0], p[1], p[2], pos)
+            val a = sc.dockWaypoint(st, pos, wp)
+            val b = StationCollision(flight).dockWaypoint(st, pos, fresh)
+            assertEquals(b, a)
+            if (a) assertTrue(dist(wp, fresh) < 1e-6, "stale leg reused at (${p.joinToString()})")
         }
     }
 
     @Test
     fun routerConvergesWithoutOscillating() {
-        // along every routed path the waypoint only ever moves on: it never returns to an earlier one
+        // along every routed path the waypoint only ever moves on: it never returns to an earlier one.
+        // Far starts, close in, and wedged against the hull (the wedges escape in a few partial legs)
+        val close = arrayOf(
+            listOf(floatArrayOf(0f, 500f, 150f), floatArrayOf(0f, 74f, -100f), floatArrayOf(72.67f, -7.33f, -47.58f), floatArrayOf(94.16f, -1.99f, -191.57f)),
+            listOf(floatArrayOf(195f, 60f, 0f), floatArrayOf(-101.18f, -52.52f, 4.83f), floatArrayOf(-0.41f, -117.2f, -14.77f)),
+        )
         for (m in 0 until StationMesh.MODELS) {
             val st = stations[m]
-            for (start in listOf(floatArrayOf(0f, 0f, 1500f), floatArrayOf(0f, 1500f, 0f), floatArrayOf(900f, -700f, 900f))) {
+            val far = listOf(floatArrayOf(0f, 0f, 1500f), floatArrayOf(0f, 1500f, 0f), floatArrayOf(900f, -700f, 900f))
+            for (start in far + close[m]) {
                 val pos = toWorld(st, start[0], start[1], start[2], DVec3())
                 val wp = DVec3()
                 val seen = ArrayList<DVec3>()
@@ -419,7 +595,8 @@ class StationCollisionTest {
                     pos.set(pos.x + dx * k, pos.y + dy * k, pos.z + dz * k)
                 }
                 assertFalse(sc.dockWaypoint(st, pos, wp), "model $m from ${start.joinToString()}: still detouring after 2 minutes")
-                assertTrue(switches <= 3, "model $m from ${start.joinToString()}: $switches different waypoints")
+                val limit = if (start in far) 3 else 8
+                assertTrue(switches <= limit, "model $m from ${start.joinToString()}: $switches different waypoints")
             }
         }
     }
@@ -532,9 +709,13 @@ class StationCollisionTest {
         if (!mx.isThreadAllocatedMemoryEnabled) mx.isThreadAllocatedMemoryEnabled = true
         val s = ShipState()
         val wp = DVec3()
-        // touching the dock head, inside the keep-out (escape traces), and far out behind (routing)
+        // touching the dock head, inside the keep-out (escape traces), wedged (partial legs), buried
+        // (boxed in), and far out behind (routing). Each call is off the previous call's leg, so
+        // every one inside the keep-out plans afresh
         val touching = Array(StationMesh.MODELS) { toWorld(stations[it], 160f, 0f, -270f, DVec3()) }
         val closeIn = Array(StationMesh.MODELS) { toWorld(stations[it], 0f, 500f, 150f, DVec3()) }
+        val wedged = arrayOf(toWorld(stations[0], 72.67f, -7.33f, -47.58f, DVec3()), toWorld(stations[1], -101.18f, -52.52f, 4.83f, DVec3()))
+        val buried = Array(StationMesh.MODELS) { toWorld(stations[it], 54.13f, 24.76f, 31.15f, DVec3()) }
         val behind = Array(StationMesh.MODELS) { toWorld(stations[it], 0f, 0f, 1500f, DVec3()) }
         fun round() {
             for (m in 0 until StationMesh.MODELS) {
@@ -545,6 +726,8 @@ class StationCollisionTest {
                 sc.clearance(s, st)
                 sc.dockWaypoint(st, s.pos, wp)
                 sc.dockWaypoint(st, closeIn[m], wp)
+                sc.dockWaypoint(st, wedged[m], wp)
+                sc.dockWaypoint(st, buried[m], wp)
                 sc.dockWaypoint(st, behind[m], wp)
             }
         }
@@ -553,7 +736,7 @@ class StationCollisionTest {
         for (i in 0 until 1000) round()
         val b = mx.currentThreadAllocatedBytes
         val perRound = (b - a) / 1000.0
-        println("collide + clearance + 3 x dockWaypoint per model: %.2f bytes allocated per round".format(perRound))
+        println("collide + clearance + 5 x dockWaypoint per model: %.2f bytes allocated per round".format(perRound))
         // rough JVM timings, for orientation only
         val st = stations[0]
         fun time(label: String, n: Int, body: () -> Unit) {
@@ -565,7 +748,13 @@ class StationCollisionTest {
         time("collide, touching the dock head", 20000) { s.pos.set(touching[0]); sc.collide(s, st) }
         time("clearance, next to the dock head", 20000) { sc.clearance(s, st) }
         time("dockWaypoint, outside the keep-out", 20000) { sc.dockWaypoint(st, behind[0], wp) }
-        time("dockWaypoint, escaping from inside it", 2000) { sc.dockWaypoint(st, closeIn[0], wp) }
+        var flip = false
+        time("dockWaypoint, planning an escape (close in / wedged, alternating)", 2000) {
+            flip = !flip
+            sc.dockWaypoint(st, if (flip) closeIn[0] else wedged[0], wp)
+        }
+        sc.dockWaypoint(st, closeIn[0], wp)
+        time("dockWaypoint, flying a planned leg", 20000) { sc.dockWaypoint(st, closeIn[0], wp) }
         assertTrue(perRound < 1.0, "collide / clearance / dockWaypoint allocate: %.1f bytes per round".format(perRound))
     }
 
@@ -579,7 +768,20 @@ class StationCollisionTest {
         /** Proxy-interior points within this of a hull surface (or inside the hull) count as hull. */
         const val VOLUME_TOLERANCE = 2.0
         const val PER_PROXY = 60
-        const val MIN_GAP = 2.0
+
+        /**
+         * A ship flying at the hull keeps its centre this far from the mesh: its collision radius,
+         * less what hull greebles may stick out past the proxies. Anything closer is real penetration.
+         */
+        val MIN_GAP = (ShipSpec.VARROW.collisionRadius - HULL_TOLERANCE).toDouble()
+
+        /** Random auto-dock starts per model and band (anywhere free / 0-5 m off the hull). */
         const val RANDOM_STARTS = 25
+
+        /** An escape from a ship wedged against the hull may pass this much closer to it than it started. */
+        const val GAP_SLACK = 0.5
+
+        /** Game gives up auto-dock once the router has been boxed in for this long (integration notes). */
+        const val DOCK_BOXED_GRACE = 0.5f
     }
 }

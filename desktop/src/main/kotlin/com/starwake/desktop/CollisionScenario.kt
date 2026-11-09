@@ -21,7 +21,8 @@ import kotlin.math.sqrt
  * Station collision without Game: each station through the real [SceneRenderer], with
  *  - path views: the auto-dock route ([StationCollision.dockWaypoint] + the kinematics of
  *    Game.updateDocking) from several starts drawn over it, the old straight line to the stand-off
- *    in red, the stand-off and park points;
+ *    in red, the stand-off and park points; the escape views start from ships wedged against the
+ *    hull (a start dot each), where the old router pushed back and forth between two walls;
  *  - proxy views: a CPU sphere trace of the collision proxies from the same camera (`-proxies.png`)
  *    and an overlay on the mesh render (`-overlay.png`: proxies tinted magenta, their outline yellow).
  */
@@ -34,6 +35,8 @@ object CollisionScenario {
         val ex: Float, val ey: Float, val ez: Float,
         val tx: Float, val ty: Float, val tz: Float,
         val paths: Boolean,
+        /** Route starts (station-local); null = the far [starts]. */
+        val from: Array<FloatArray>? = null,
     )
 
     private val views = listOf(
@@ -46,6 +49,19 @@ object CollisionScenario {
         View("collision-outpost-paths-side", 1, 3600f, 300f, -200f, 0f, 0f, -150f, true),
         View("collision-outpost-front", 1, -380f, 260f, -680f, 0f, 0f, -40f, false),
         View("collision-outpost-rear", 1, 330f, 120f, 640f, 0f, 0f, 0f, false),
+        // wedged starts, as in StationCollisionTest.autoDockSlidesOutOfNarrowGaps
+        View(
+            "collision-ring-escapes", 0, 700f, 260f, -60f, 0f, 0f, -130f, true,
+            arrayOf(
+                floatArrayOf(0f, 74f, -100f), floatArrayOf(21.93f, -76.13f, -165.43f), floatArrayOf(125.34f, 0.97f, -50.65f),
+                floatArrayOf(-12.82f, -111.23f, -49.57f), floatArrayOf(72.67f, -7.33f, -47.58f), floatArrayOf(-105.06f, 0.78f, -192.82f),
+                floatArrayOf(94.16f, -1.99f, -191.57f),
+            ),
+        ),
+        View(
+            "collision-outpost-escapes", 1, -330f, -260f, -330f, -40f, -60f, 0f, true,
+            arrayOf(floatArrayOf(-0.41f, -117.2f, -14.77f), floatArrayOf(-101.18f, -52.52f, 4.83f), floatArrayOf(-46.76f, -39.93f, -10.12f)),
+        ),
     )
 
     /** Route starts (station-local), as in StationCollisionTest. */
@@ -98,7 +114,7 @@ object CollisionScenario {
                 f.time = 1f + frame
                 scene.render(f)
                 ui.begin(w, h)
-                if (v.paths) drawPaths(ui, f, st, sc, r, v.name)
+                if (v.paths) drawPaths(ui, f, st, sc, r, v.name, v.from ?: starts)
                 ui.text(v.name.uppercase(), 40f * f.pxScale, 70f * f.pxScale, 30f * f.pxScale, 0xFFFFFFFF.toInt(), tracking = 0.1f, shadow = 0.6f)
                 ui.end()
                 GLES20.glFinish()
@@ -113,7 +129,10 @@ object CollisionScenario {
     }
 
     /** Simulates the routed auto-dock from every start and draws it (station-relative polylines). */
-    private fun drawPaths(ui: UiRenderer, f: SceneFrame, st: StarSystem.Station, sc: StationCollision, r: ScenarioReport, name: String) {
+    private fun drawPaths(
+        ui: UiRenderer, f: SceneFrame, st: StarSystem.Station, sc: StationCollision, r: ScenarioReport, name: String,
+        from: Array<FloatArray>,
+    ) {
         val cam = f.camera
         val portL = Vec3()
         val dirL = Vec3()
@@ -132,7 +151,8 @@ object CollisionScenario {
             ui.line(a.x, a.y, b.x, b.y, width, color)
         }
         val px = f.pxScale
-        for ((i, s0) in starts.withIndex()) {
+        for ((i, s0) in from.withIndex()) {
+            val color = colors[i % colors.size]
             val p = DVec3()
             st.rot.rotate(s0[0], s0[1], s0[2], a)
             p.set(st.pos.x + a.x, st.pos.y + a.y, st.pos.z + a.z)
@@ -143,10 +163,22 @@ object CollisionScenario {
             val dt = 1f / 60f
             var t = 0f
             var detourFrames = 0
+            var boxed = 0f
+            var outcome = "not docked"
+            // start dot (the escape views start right against the hull)
+            if (cam.project(base.x + (p.x - st.pos.x).toFloat(), base.y + (p.y - st.pos.y).toFloat(), base.z + (p.z - st.pos.z).toFloat(), b)) {
+                ui.circle(b.x, b.y, 7f * px, color)
+            }
             while (t < 240f) {
                 t += dt
                 val detour = phase == 0 && sc.dockWaypoint(st, p, wp)
                 if (detour) detourFrames++
+                // Game's give-up rule (see StationCollision.boxedIn)
+                boxed = if (detour && sc.boxedIn) boxed + dt else 0f
+                if (boxed > 0.5f) {
+                    outcome = "gave up (boxed in)"
+                    break
+                }
                 val off = if (phase == 0) so else -park
                 val tx = if (detour) wp.x else st.pos.x + dockOff.x + dockDir.x * off
                 val ty = if (detour) wp.y else st.pos.y + dockOff.y + dockDir.y * off
@@ -163,10 +195,15 @@ object CollisionScenario {
                     val k = minOf(1.0, speed * dt / d)
                     p.set(p.x + dx * k, p.y + dy * k, p.z + dz * k)
                 }
-                seg(ox, oy, oz, p.x - st.pos.x, p.y - st.pos.y, p.z - st.pos.z, 4f * px, colors[i])
-                if (phase == 0 && !detour && d < 15.0) phase = 1 else if (phase == 1 && d < 2.0) break
+                seg(ox, oy, oz, p.x - st.pos.x, p.y - st.pos.y, p.z - st.pos.z, 4f * px, color)
+                if (phase == 0 && !detour && d < 15.0) {
+                    phase = 1
+                } else if (phase == 1 && d < 2.0) {
+                    outcome = "docked"
+                    break
+                }
             }
-            r.note("$name: start (${s0.joinToString()}) docked after %.1f s, %d detour frames".format(t, detourFrames))
+            r.note("$name: start (${s0.joinToString()}) $outcome after %.1f s, %d detour frames".format(t, detourFrames))
         }
         // stand-off and park points
         for (k in 0..1) {
