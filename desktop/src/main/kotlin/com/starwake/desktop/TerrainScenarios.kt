@@ -347,7 +347,11 @@ object TerrainScenarios {
 
     // ------------------------------------------------------------------ "terrain"
 
-    /** Debug filters (environment): TERRAIN_PLANETS=earth,luna  TERRAIN_QUALITIES=2  TERRAIN_ALTS=0,3,8  TERRAIN_DESCENT=0. */
+    /**
+     * Debug filters (environment): TERRAIN_PLANETS=earth,luna  TERRAIN_QUALITIES=2 (empty: no static
+     * views)  TERRAIN_ALTS=0,3,8 (indices into [ALTITUDES])  TERRAIN_VIEWS=down  TERRAIN_SEAMS=0
+     * TERRAIN_DESCENT=0  TERRAIN_DEBUG=1..5 (albedo, water, normals, morph, transmittance).
+     */
     private fun envList(name: String): List<String>? = System.getenv(name)?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
 
     fun run(env: ScenarioEnv) {
