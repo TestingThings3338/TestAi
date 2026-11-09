@@ -391,6 +391,10 @@ class ShipModelTest {
             }
             assertTrue(abs(low + s.groundClearance) < 0.6f, "${m.id}: probes bottom at $low, ground clearance ${s.groundClearance}")
             assertTrue(s.reach < m.radius * 1.6f && s.reach > s.collisionRadius)
+            // the hull's centre (auto-dock and launches place it) is the first probe
+            assertEquals(m.centreX, s.centreX)
+            assertEquals(m.centreY, s.centreY)
+            assertEquals(m.centreZ, s.centreZ)
         }
     }
 }

@@ -194,6 +194,32 @@ object ShipsScenario {
                 check(Regex("ship=$id ").containsMatchIn(game.debugInfo)) { "ship command did not switch to $id: ${game.debugInfo}" }
                 d.shot("ships-menu-$id")
             }
+            // a big hull parks centred in HOME STATION's slot and launches clear of it (the route, the
+            // slot and the launch place the hull's centre, not the pilot's eye at the ship's origin)
+            fun hull() = Regex("hull=([^ ]+)").find(game.debugInfo)!!.groupValues[1].toFloat()
+            d.cmd("ship=brannock")
+            d.frames(5)
+            d.cmd("launch")
+            d.frames(30)
+            d.cmd("docked")
+            var n = 0
+            var minHull = Float.MAX_VALUE
+            while (game.stateName != "docked" && n < 60 * 20) {
+                d.frames(1)
+                n++
+                minHull = minOf(minHull, hull())
+            }
+            d.log("BRANNOCK slid into the slot in $n frames, closest hull gap %.1f m".format(minHull))
+            check(game.stateName == "docked") { "BRANNOCK never docked: ${game.debugInfo}" }
+            check(minHull > 0f) { "BRANNOCK touched the slot (gap $minHull m)" }
+            d.frames(30)
+            d.shot("ships-docked-brannock")
+            game.launchFromStation()
+            d.frames(2)
+            d.log(game.debugInfo)
+            check(hull() > 10f) { "BRANNOCK launched into the hull: ${game.debugInfo}" }
+            d.cmd("menu")
+            d.frames(5)
             d.cmd("ship=varrow")
             d.frames(5)
         }

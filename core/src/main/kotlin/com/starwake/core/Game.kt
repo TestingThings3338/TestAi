@@ -181,6 +181,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val labelBoxes = FloatArray(4 * MAX_LABELS)
     private var labelCount = 0
     private val dockWaypoint = com.starwake.core.math.DVec3()
+    private val hullPos = com.starwake.core.math.DVec3() // auto-dock: the hull's centre, world space
     private var dockBoxedTime = 0f // how long the router has found no way out (it then holds still)
     private var launchTime = -100f // last launch from a slot: no station proximity warning just after
     private var aimIndex = -1
@@ -430,7 +431,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                 "docked" -> if (state == STATE_FLIGHT) {
                     requestDocking(0)
                     stationPort(0)
-                    ship.pos.set(dockPos.x + dockDir.x * 20.0, dockPos.y + dockDir.y * 20.0, dockPos.z + dockDir.z * 20.0)
+                    // lined up, the hull's centre 20 m in front of the slot (updateDocking glides it in)
+                    system.stations[0].rot.rotate(0f, 1f, 0f, upV)
+                    ship.rot.lookRotation(-dockDir.x, -dockDir.y, -dockDir.z, upV.x, upV.y, upV.z)
+                    ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
+                    ship.pos.set(dockPos.x + dockDir.x * 20.0 - tmp.x, dockPos.y + dockDir.y * 20.0 - tmp.y, dockPos.z + dockDir.z * 20.0 - tmp.z)
                     dockPhase = 1
                 }
                 "behind-station" -> if (state == STATE_FLIGHT) debugBehindStation(1500.0, 0f)
@@ -1339,10 +1344,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         com.starwake.core.content.StationMesh.dockPort(model, outPos, outDir)
     }
 
-    /** How far inside the slot entrance the ship parks (half the tunnel depth). */
+    /**
+     * How far inside the slot entrance the hull's centre parks: half the tunnel depth, or less so the
+     * nose stays [PARK_NOSE_GAP] off the back wall (a hull longer than the tunnel sticks out of it).
+     */
     private fun slotParkDepth(i: Int): Double {
         com.starwake.core.content.StationMesh.slotSize(system.stations[i].model, tmp2)
-        return tmp2.z * 0.5
+        return minOf(tmp2.z * 0.5f, tmp2.z - spec.sizeZ * 0.5f - PARK_NOSE_GAP).toDouble()
     }
 
     private fun requestDocking(i: Int) {
@@ -1356,12 +1364,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         haptic(Haptics.TICK)
     }
 
-    /** Auto-dock: around the hull if needed, to a point in front of the slot, line up, then slide in. */
+    /**
+     * Auto-dock: around the hull if needed, to a point in front of the slot, line up, then slide in.
+     * The route and the slot place the hull's centre (the ship turns about it), not the ship's
+     * origin: that is the pilot's eye, well forward and up on the bigger hulls.
+     */
     private fun updateDocking(dt: Float) {
         stationPort(dockStation)
+        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
+        hullPos.set(ship.pos.x + tmp.x, ship.pos.y + tmp.y, ship.pos.z + tmp.z)
         // phase 0: detour around the hull while the router asks for it, then hold in front of the
         // slot; phase 1: glide in and park inside the tunnel
-        val detour = dockPhase == 0 && stationCollision.dockWaypoint(system.stations[dockStation], ship.pos, dockWaypoint)
+        val detour = dockPhase == 0 && stationCollision.dockWaypoint(system.stations[dockStation], hullPos, dockWaypoint)
         // the router found no way out (it holds the ship still): give up rather than wait for ever
         dockBoxedTime = if (detour && stationCollision.boxedIn) dockBoxedTime + dt else 0f
         if (dockBoxedTime > DOCK_BOXED_GRACE) {
@@ -1374,9 +1388,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val tx = if (detour) dockWaypoint.x else dockPos.x + dockDir.x * standOff
         val ty = if (detour) dockWaypoint.y else dockPos.y + dockDir.y * standOff
         val tz = if (detour) dockWaypoint.z else dockPos.z + dockDir.z * standOff
-        val dx = tx - ship.pos.x
-        val dy = ty - ship.pos.y
-        val dz = tz - ship.pos.z
+        val dx = tx - hullPos.x
+        val dy = ty - hullPos.y
+        val dz = tz - hullPos.z
         val d = sqrt(dx * dx + dy * dy + dz * dz)
         // nose along the route while going round the hull, otherwise into the slot (against the
         // outward direction); roll matched to the station's up
@@ -1386,11 +1400,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val turn = if (dockPhase == 0) 1.5f else 3f
         ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
         val speed = if (detour) DOCK_APPROACH_SPEED else if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
-        if (d > 0.5) {
-            val k = minOf(1.0, speed * dt / d)
-            ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
-            ship.pos.set(ship.pos.x + dx * k, ship.pos.y + dy * k, ship.pos.z + dz * k)
-        }
+        val k = if (d > 0.5) minOf(1.0, speed * dt / d) else 0.0
+        if (d > 0.5) ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
+        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
+        ship.pos.set(hullPos.x + dx * k - tmp.x, hullPos.y + dy * k - tmp.y, hullPos.z + dz * k - tmp.z)
         ship.speed = speed
         ship.forwardSpeed = speed
         ship.angVel.zero()
@@ -1417,10 +1430,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     override fun launchFromStation() {
         if (overlay != OVERLAY_DOCKED) return
         stationPort(dockStation)
-        // out of the slot, nose outward, at a gentle push
-        ship.pos.set(dockPos.x + dockDir.x * 40.0, dockPos.y + dockDir.y * 40.0, dockPos.z + dockDir.z * 40.0)
+        // out of the slot, nose outward, the hull on the slot axis with its tail LAUNCH_CLEAR metres
+        // off the entrance, at a gentle push
         system.stations[dockStation].rot.rotate(0f, 1f, 0f, upV)
         ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
+        val out = spec.sizeZ * 0.5 + LAUNCH_CLEAR
+        ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
+        ship.pos.set(dockPos.x + dockDir.x * out - tmp.x, dockPos.y + dockDir.y * out - tmp.y, dockPos.z + dockDir.z * out - tmp.z)
         ship.vel.set(dockDir).scale(60f)
         touch.throttle = 0.3f
         controls.clearAxes()
@@ -1984,6 +2000,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
         /** No station proximity warning for this long (s) after a launch from a slot. */
         private const val LAUNCH_GRACE = 1.5f
+
+        /** A launch puts the tail this far (m) off the slot entrance. */
+        private const val LAUNCH_CLEAR = 30.0
+
+        /** A parked hull's nose stays this far (m) off the slot's back wall. */
+        private const val PARK_NOSE_GAP = 5f
 
         /** Most target labels the flight HUD places per frame. */
         private const val MAX_LABELS = 32

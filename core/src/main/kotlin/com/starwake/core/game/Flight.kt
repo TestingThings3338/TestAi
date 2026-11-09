@@ -53,6 +53,11 @@ class ShipSpec(
     /** Radius around the origin that holds every probe sphere (broad-phase bound). */
     val reach: Float
 
+    /** Centre of the hull, ship space: the first probe sits there. */
+    val centreX: Float get() = probes[0]
+    val centreY: Float get() = probes[1]
+    val centreZ: Float get() = probes[2]
+
     init {
         require(probes.isNotEmpty() && probes.size % 3 == 0) { "probes are x, y, z triples" }
         var r = 0f
@@ -71,8 +76,8 @@ class ShipSpec(
         /**
          * Spec of a Roblox ship: name, role and price from the shipyard, the collision shape from the
          * model like ShipStation.probeFor: spheres of radius max(2, smallest bounds side / 2) at the
-         * bounds centre and towards both ends (and both sides when the ship is wide), and the ground
-         * clearance RootToGround - SeatOffset.Y.
+         * bounds centre (the first probe, [centreX]) and towards both ends (and both sides when the
+         * ship is wide), and the ground clearance RootToGround - SeatOffset.Y.
          */
         fun fromModel(entry: com.starwake.core.content.ShipCatalog.Entry, m: com.starwake.core.content.ShipModel): ShipSpec {
             val sx = m.rbxBounds[0]
