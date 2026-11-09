@@ -242,6 +242,7 @@ uniform vec4 u_sunGlare;   // x = glare width, y = fade-out angle, z = cos(fade-
 uniform vec3 u_glareColor;
 uniform vec3 u_coronaColor;
 uniform float u_starBehind;  // 1 = the star is drawn behind this sky, 0 = not (the sky draws all of it)
+uniform float u_noSurface;   // 1 = the terrain draws the surface: the disc is black (haze in front kept)
 uniform float u_exposure;
 out vec4 o_color;
 """
@@ -411,7 +412,7 @@ void main() {
         float sq = sqrt(max(disc, 0.0));
         vec3 N = normalize(pca - d * sq);
         float tHit = u_cc / (b + sq);
-        vec3 surf = shadeSurface(N, d, tHit);
+        vec3 surf = u_noSurface > 0.5 ? vec3(0.0) : shadeSurface(N, d, tHit);
         if (atmo && -sq > x0) {
             vec3 T;
             vec3 ins = atmosphere(d, pca, h2, x0, -sq, T);

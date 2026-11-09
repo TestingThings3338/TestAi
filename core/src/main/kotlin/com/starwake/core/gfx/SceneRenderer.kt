@@ -14,6 +14,7 @@ import com.starwake.core.math.Mat4
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.TAU_F
+import com.starwake.core.terrain.TerrainPlanet
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.sin
@@ -56,6 +57,18 @@ class SceneFrame {
     /** Whether the asteroid field is close enough to draw. */
     var drawField = true
     var exposure = 1f
+
+    /**
+     * The seamless terrain of the terrain body (from [SceneRenderer.attachTerrain]), or null. The
+     * game updates the planet before rendering; the scene draws it in depth slices around its own.
+     */
+    var terrain: TerrainGpu? = null
+
+    /** Index of the terrain body in the system's bodies: its impostor stops shading the surface once the terrain covers it. */
+    var terrainBody = -1
+
+    /** Light and air of the terrain (sun direction and colour, profile ambient and haze). */
+    val terrainLight = TerrainLight()
 }
 
 /**
@@ -146,6 +159,23 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     /** Depth slices the last frame used: 1, or 2 when far objects got their own (diagnostics). */
     var depthSlices = 1
         private set
+
+    // the seamless terrain (created on first use)
+    private var terrainRenderer: TerrainRenderer? = null
+
+    /** The projection of the near pass: the camera's, or the terrain's nearest slice when a terrain is drawn. */
+    private var nearVP: Mat4 = Mat4()
+    private val terrainNearProj = Mat4()
+    private val terrainNearVP = Mat4()
+
+    /** The terrain renderer (null until a terrain was attached). */
+    val terrain: TerrainRenderer? get() = terrainRenderer
+
+    /** GPU side of a terrain planet; set the result as [SceneFrame.terrain]. Dispose it when the body changes. */
+    fun attachTerrain(planet: TerrainPlanet): TerrainGpu {
+        val tr = terrainRenderer ?: TerrainRenderer(gl, quality).also { terrainRenderer = it }
+        return tr.attach(planet)
+    }
 
     init {
         // field bounds from the instance data: rocks spin about their centres, so a rock's sphere is
@@ -241,9 +271,24 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         planSlices(f)
         drawBackground(f)
         drawStars(f)
+        val tg = f.terrain
+        if (tg != null && f.terrainBody >= 0) bodies.setSurfaceHidden(f.terrainBody, tg.planet.surfaceReady())
         // star and planets: ray-cast impostors at true scale, drawn back to front without depth
         bodies.render(cam, f.time, f.exposure)
         gl.viewport(0, 0, w, h)
+        nearVP = cam.viewProj
+        var terrainFirstFar = 0f
+        val tr = terrainRenderer
+        if (tg != null && tr != null) {
+            // the near pass ends where the camera's cluster ends (at least TERRAIN_NEAR m); farther
+            // terrain goes into slices of its own, drawn now, behind everything else
+            terrainFirstFar = maxOf(TERRAIN_NEAR, slices.nearEnd * 1.05f).coerceAtMost(cam.far)
+            tr.prepare(tg, cam, cam.near, terrainFirstFar)
+            tr.drawFar(tg, cam, f.terrainLight, f.time)
+            terrainNearProj.perspective(cam.fovY, w.toFloat() / h.coerceAtLeast(1), cam.near, terrainFirstFar, cam.shiftX, cam.shiftY)
+            terrainNearVP.mul(terrainNearProj, cam.view)
+            nearVP = terrainNearVP
+        }
 
         // the near scene draws over the bodies (planets use no depth), so a single clear suffices
         gl.depthMask(true)
@@ -260,6 +305,11 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             gl.depthRange(0f, 0.5f)
         } else {
             gl.depthRange(0f, 1f)
+        }
+        if (tg != null && tr != null && terrainFirstFar > 0f) {
+            tr.drawNear(tg, cam, f.terrainLight, f.time, nearVP)
+            gl.enable(GL.CULL_FACE)
+            gl.cullFace(GL.BACK)
         }
         drawAsteroids(f, false)
         drawStations(f, false)
@@ -370,7 +420,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         field.origin.relativeTo(c.pos, rel)
         val k = if (far) farScale else 1f
         model.setTRS(rel.x * k, rel.y * k, rel.z * k, identityRot, k)
-        litInst.begin(if (far) farViewProj else c.viewProj, model, f, envTex, envLod, rockPalette, rockParams, 0f)
+        litInst.begin(if (far) farViewProj else nearVP, model, f, envTex, envLod, rockPalette, rockParams, 0f)
         // apparent radius (px) of the largest small rock at the field's near edge
         val edge = rel.length() - fieldRadius
         val px = if (edge > 1f) smallRockRadius / edge * c.height / (2f * c.tanHalfY) else Float.MAX_VALUE
@@ -388,7 +438,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         ship.pos.relativeTo(c.pos, rel)
         model.setTRS(rel.x, rel.y, rel.z, ship.rot, 1f)
         val engine = 0.25f + ship.engineOutput * 0.9f
-        lit.begin(c.viewProj, model, f, envTex, envLod, shipPalette, shipParams, engine)
+        lit.begin(nearVP, model, f, envTex, envLod, shipPalette, shipParams, engine)
         shipMesh.draw()
     }
 
@@ -398,7 +448,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.blendFunc(GL.ONE, GL.ONE)
         gl.depthMask(false)
         dust.use()
-        gl.uniformMatrix4fv(dust.u("u_viewProj"), c.viewProj.m, 0)
+        gl.uniformMatrix4fv(dust.u("u_viewProj"), nearVP.m, 0)
         val b = DustField.BOX.toDouble()
         val o = f.dustOrigin
         gl.uniform3f(
@@ -452,7 +502,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.enable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
         glow.use()
-        gl.uniformMatrix4fv(glow.u("u_viewProj"), c.viewProj.m, 0)
+        gl.uniformMatrix4fv(glow.u("u_viewProj"), nearVP.m, 0)
         gl.uniform1f(glow.u("u_time"), t % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
@@ -532,7 +582,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
             st.pos.relativeTo(c.pos, rel)
             model.setTRS(rel.x * k, rel.y * k, rel.z * k, st.rot, k)
             if (!begun) {
-                stationLit.begin(if (far) farViewProj else c.viewProj, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
+                stationLit.begin(if (far) farViewProj else nearVP, model, f, envTex, envLod, StationMesh.palette, StationMesh.params, 1f)
                 begun = true
             } else {
                 stationLit.setModel(model)
@@ -580,7 +630,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         gl.enable(GL.DEPTH_TEST)
         gl.disable(GL.CULL_FACE)
         glow.use()
-        gl.uniformMatrix4fv(glow.u("u_viewProj"), (if (far) farViewProj else c.viewProj).m, 0)
+        gl.uniformMatrix4fv(glow.u("u_viewProj"), (if (far) farViewProj else nearVP).m, 0)
         gl.uniform1f(glow.u("u_time"), f.time % GLOW_PERIOD)
         glowStream.flush()
         gl.enable(GL.CULL_FACE)
@@ -655,6 +705,7 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
         stationLit.dispose()
         for (m in stationMeshes) m.dispose()
         bodies.dispose()
+        terrainRenderer?.dispose()
         fullscreen.dispose(); shipMesh.dispose(); starMesh.dispose(); dustMesh.dispose()
         glowStream.dispose()
         for (m in rockMeshes) m.dispose()
@@ -662,6 +713,9 @@ class SceneRenderer(private val gl: Gl, private val content: Content, quality: I
     }
 
     companion object {
+        /** The near pass reaches at least this far when a terrain is drawn (m): 0.48 m depth steps there. */
+        private const val TERRAIN_NEAR = 2000f
+
         /** Period of the exhaust flicker (sin(t * 61)); the shader only ever sees t modulo this. */
         private const val GLOW_PERIOD = TAU_F / 61f
         private const val STATION_DRAW_RANGE = 3.0e6f
