@@ -17,6 +17,7 @@ import com.starwake.core.math.clamp
 import com.starwake.core.math.expApproach
 import com.starwake.core.math.expoCurve
 import com.starwake.core.ui.UiHost
+import com.starwake.core.world.RingDebris
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -43,15 +44,14 @@ interface SessionHost : UiHost {
  * The flight itself is still the pre-port model ([FlightModel], [StarSystem.locate], the Kotlin
  * landing mode and auto-dock); it sits in its Roblox slots (C13 rotation input, C16 gravity state,
  * C19-C21 limit, C23 the sub-stepped move with its collisions, C28 ground, C30 docking) until the
- * flight, world and station ports replace it.
+ * flight and station ports replace it. The world runs in its slots: C14 moves the bodies on their
+ * orbits, C15 carries the ship with its reference frame (03-world.md 2.9.4, DECISIONS 6).
  *
  * Also here: the key handlers (Roblox `InputBegan` glue: view, Flight Assist, boost, target, land,
  * dock, autopilot) and the frame-local state of 2.1.9. GL thread; the frame performs no allocation.
  */
 class Session(
     val system: StarSystem,
-    /** The asteroid field (null in tests without content). */
-    val field: AsteroidField?,
     private val settings: Settings,
     private val host: SessionHost,
     /** The shown ship's landing-gear rig (shared with the menu backdrop, which keeps it stowed). */
@@ -66,6 +66,21 @@ class Session(
     private val flight = FlightModel(spec)
     private val controls = ControlInput()
     val here = StarSystem.Locality()
+
+    /** Rocks in the ring plane around the ship (C65, 03-world.md 2.12). */
+    val debris = RingDebris()
+
+    /**
+     * Heat brought by ring-debris contacts (`systems:addHeat`). The heat system comes with the
+     * flight port (02); until then it only adds up here (debug read-out `rheat`).
+     */
+    var debrisHeat = 0.0
+        private set
+
+    /** Ring-debris contacts so far, and the cooldown of the hit feedback (`Rings.HitCooldownSeconds`). */
+    var debrisHits = 0
+        private set
+    private var debrisHitCooldown = 0f
 
     /** The Roblox cockpit and external views. */
     val camera = ShipCamera()
@@ -98,10 +113,17 @@ class Session(
     private var lastFlightAssist = true
     private var welcomeIn = -1f
 
-    /** Closest gap (m) between the hull and an asteroid or a station this frame (PROXIMITY warning). */
+    /** Closest gap (m) between the hull and a station this frame (PROXIMITY warning). */
     var proximity = Float.MAX_VALUE
         private set
     private var bumpCooldown = 0f
+
+    // ---- the world's reference frame (03 2.9.4): the station or body the ship is carried by
+    /** Encoded frame ([StarSystem.frameFor]); [StarSystem.FRAME_NONE] in the star's frame. */
+    var refFrame = StarSystem.FRAME_NONE
+        private set
+    private val carry = DVec3()
+    private val frameOrigin = DVec3()
 
     // ---- targets
     var lockKind = LOCK_NONE
@@ -220,8 +242,8 @@ class Session(
     }
 
     /**
-     * The start rule of D13: docked at the home station (in its slot, services after the reveal).
-     * The world port makes the station MERIDIAN; saves (D23) arrive with `08`.
+     * The start rule of D13: docked at MERIDIAN (in its slot, services after the reveal); saves
+     * (D23) arrive with `08`.
      */
     fun startDocked(station: Int = SpawnRules.startStation(system)) {
         resetFlight()
@@ -233,15 +255,16 @@ class Session(
     }
 
     /**
-     * Free flight at the pre-port spawn in front of the home station, moving at 30 % throttle (the
-     * old start; harness scripts that test flying use it through "launch space").
+     * Free flight [StarSystem.SPAWN_DISTANCE] out of the home station's mouth, nose away from it
+     * (towards Earth from MERIDIAN), moving at 30 % throttle (harness scripts that test flying
+     * use it through "launch space").
      */
     fun startInSpace() {
         resetFlight()
-        ship.pos.set(system.home)
+        system.spaceSpawn(SpawnRules.startStation(system), ship.pos, ship.rot)
         throttle = 0.3f
         controls.throttle = 0.3f
-        ship.vel.set(0f, 0f, -0.3f * spec.maxSpeed)
+        ship.rot.rotate(0f, 0f, -0.3f * spec.maxSpeed, ship.vel)
         afterPlacement()
     }
 
@@ -249,6 +272,7 @@ class Session(
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
         gearRig.update(0f, gearWanted(), true)
+        refFrame = if (mode.docked && dockStation >= 0) StarSystem.stationFrame(dockStation) else system.frameFor(ship.pos, StarSystem.FRAME_NONE)
         system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
         zoneLabel = here.zone.label
         updateCamera(0f)
@@ -380,8 +404,10 @@ class Session(
         rotationInput(input)
 
         // ---- C14-C22 world, gravity state and the speed limit
-        mark(FrameStep.C14) // 03: orbits:update
-        mark(FrameStep.C15) // 03/08: frame carry
+        mark(FrameStep.C14)
+        system.advance(dt.toDouble()) // orbits:update on the save-game clock
+        mark(FrameStep.C15)
+        carryWithFrame()
         mark(FrameStep.C16)
         system.locate(ship.pos, ship.vel, spec.maxSpeed, here) // the previous frame's velocity, as Roblox
         mark(FrameStep.C19)
@@ -453,6 +479,7 @@ class Session(
         mark(FrameStep.C64)
         updateVoice(dt)
         mark(FrameStep.C65) // 03: ring debris
+        updateDebris(dt)
         mark(FrameStep.C66)
         updateDustMood(dt)
         mark(FrameStep.C67)
@@ -536,6 +563,10 @@ class Session(
                 mode.landing = true
                 showMessage("LANDING MODE  ·  GEAR DOWN")
             }
+            here.zone == StarSystem.Zone.LOW_ALTITUDE && here.nearestBody >= 0 && system.bodies[here.nearestBody].landingBlocked != null -> {
+                host.haptic(Haptics.BUMP)
+                showMessage(landingBlockedText(system.bodies[here.nearestBody]))
+            }
             else -> host.haptic(Haptics.BUMP)
         }
     }
@@ -569,9 +600,9 @@ class Session(
      * else the nearest one; locked → the next one farther away, round to the nearest again.
      */
     fun cycleTarget() {
-        if (lockKind == LOCK_NONE || lockKind == LOCK_ASTEROID) {
+        if (lockKind == LOCK_NONE) {
             findAimed(LOCK_CONE_COS, LOCK_CONE_SIN)
-            if (aimKind != LOCK_NONE && !(aimKind == lockKind && aimIndex == lockIndex)) {
+            if (aimKind != LOCK_NONE) {
                 lock(aimKind, aimIndex)
                 return
             }
@@ -612,53 +643,46 @@ class Session(
         lockIndex = -1
     }
 
-    /** Locks a target: kind [LOCK_ASTEROID], [LOCK_STATION] or [LOCK_BODY]. */
+    /** Locks a target: kind [LOCK_STATION] or [LOCK_BODY]. */
     fun lock(kind: Int, index: Int) {
         lockKind = kind
         lockIndex = index
         host.haptic(Haptics.TICK)
     }
 
+    /** C47: a lock on something that no longer exists is dropped (every Sol target always exists). */
     private fun validateLock() {
-        if (lockKind == LOCK_ASTEROID) {
-            val f = field
-            if (f == null || !f.active[lockIndex] || targetDistance(LOCK_ASTEROID, lockIndex) > LOCK_RANGE * 1.5f) lockKind = LOCK_NONE
+        val n = when (lockKind) {
+            LOCK_STATION -> system.stations.size
+            LOCK_BODY -> system.bodies.size
+            else -> return
+        }
+        if (lockIndex !in 0 until n) {
+            lockKind = LOCK_NONE
+            lockIndex = -1
         }
     }
 
     /**
-     * Finds the target closest to the nose: asteroids (when near the field), stations and bodies.
-     * Writes [aimKind]/[aimIndex]; the score is the angle off the nose minus the target's angular
-     * radius, so big bodies are easy to pick.
+     * Finds the target closest to the nose: stations and bodies. Writes [aimKind]/[aimIndex]; the
+     * score is the angle off the nose minus the target's angular radius, so big bodies are easy to
+     * pick.
      */
     fun findAimed(maxAngleCos: Float, maxAngleSin: Float) {
         aimKind = LOCK_NONE
         aimIndex = -1
         ship.rot.rotate(0f, 0f, -1f, tmp)
         var bestScore = Float.MAX_VALUE
-        val f = field
-        if (f != null && nearField(ship.pos)) {
-            for (i in 0 until f.total) {
-                if (!f.active[i]) continue
-                val dx = f.origin.x + f.px[i] - ship.pos.x
-                val dy = f.origin.y + f.py[i] - ship.pos.y
-                val dz = f.origin.z + f.pz[i] - ship.pos.z
-                val score = aimScore(dx, dy, dz, f.radius[i].toDouble(), maxAngleCos, maxAngleSin, LOCK_RANGE.toDouble())
-                if (score < bestScore) {
-                    bestScore = score; aimKind = LOCK_ASTEROID; aimIndex = i
-                }
-            }
-        }
         for (i in system.stations.indices) {
             val st = system.stations[i]
-            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
+            val score = aimScore(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z, st.radius, maxAngleCos, maxAngleSin)
             if (score < bestScore) {
                 bestScore = score; aimKind = LOCK_STATION; aimIndex = i
             }
         }
         for (i in system.bodies.indices) {
             val b = system.bodies[i]
-            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, maxAngleSin, Double.MAX_VALUE)
+            val score = aimScore(b.pos.x - ship.pos.x, b.pos.y - ship.pos.y, b.pos.z - ship.pos.z, b.radius, maxAngleCos, maxAngleSin)
             if (score < bestScore) {
                 bestScore = score; aimKind = LOCK_BODY; aimIndex = i
             }
@@ -666,16 +690,9 @@ class Session(
     }
 
     /** Angle (radians) between the nose ([tmp]) and the target's edge; MAX_VALUE if not eligible. */
-    private fun aimScore(
-        dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, maxAngleSin: Float, range: Double,
-    ): Float {
-        if (range < Double.MAX_VALUE) {
-            // cheap box reject before the square root (asteroids: most are out of range)
-            val reach = range + radius
-            if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) return Float.MAX_VALUE
-        }
+    private fun aimScore(dx: Double, dy: Double, dz: Double, radius: Double, maxAngleCos: Float, maxAngleSin: Float): Float {
         val d = sqrt(dx * dx + dy * dy + dz * dz)
-        if (d < 1.0 || d - radius > range) return Float.MAX_VALUE
+        if (d < 1.0) return Float.MAX_VALUE
         val cos = ((dx * tmp.x + dy * tmp.y + dz * tmp.z) / d).toFloat()
         // exact trig-free test for "angle - angular radius > cone": cos(angle) < cos(cone + angRadius)
         // (valid because cone + angRadius < 180°)
@@ -692,62 +709,27 @@ class Session(
     /** Target centre relative to [origin] into [out] (camera-relative when origin = camera). */
     fun targetRel(kind: Int, i: Int, origin: DVec3, out: Vec3) {
         when (kind) {
-            LOCK_ASTEROID -> {
-                val f = field!!
-                out.set(
-                    (f.origin.x + f.px[i] - origin.x).toFloat(),
-                    (f.origin.y + f.py[i] - origin.y).toFloat(),
-                    (f.origin.z + f.pz[i] - origin.z).toFloat(),
-                )
-            }
             LOCK_STATION -> system.stations[i].pos.relativeTo(origin, out)
             else -> system.bodies[i].pos.relativeTo(origin, out)
         }
     }
 
     fun targetRadius(kind: Int, i: Int): Double = when (kind) {
-        LOCK_ASTEROID -> field!!.collisionRadius[i].toDouble()
         LOCK_STATION -> system.stations[i].radius
         else -> system.bodies[i].radius
     }
 
     /** Distance from the ship to the target's surface, in metres (double precision). */
     fun targetDistance(kind: Int, i: Int): Double {
-        val dx: Double
-        val dy: Double
-        val dz: Double
-        when (kind) {
-            LOCK_ASTEROID -> {
-                val f = field!!
-                dx = f.origin.x + f.px[i] - ship.pos.x; dy = f.origin.y + f.py[i] - ship.pos.y; dz = f.origin.z + f.pz[i] - ship.pos.z
-            }
-            LOCK_STATION -> {
-                val p = system.stations[i].pos
-                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
-            }
-            else -> {
-                val p = system.bodies[i].pos
-                dx = p.x - ship.pos.x; dy = p.y - ship.pos.y; dz = p.z - ship.pos.z
-            }
-        }
+        val p = if (kind == LOCK_STATION) system.stations[i].pos else system.bodies[i].pos
+        val dx = p.x - ship.pos.x
+        val dy = p.y - ship.pos.y
+        val dz = p.z - ship.pos.z
         return maxOf(0.0, sqrt(dx * dx + dy * dy + dz * dz) - targetRadius(kind, i))
     }
 
-    fun targetName(kind: Int, i: Int): String = when (kind) {
-        LOCK_STATION -> system.stations[i].name
-        LOCK_BODY -> system.bodies[i].name
-        else -> "ASTEROID"
-    }
-
-    /** True when [p] is close enough to the asteroid field to draw and collide with it. */
-    fun nearField(p: DVec3): Boolean {
-        if (field == null) return false
-        val o = system.fieldOrigin
-        val dx = p.x - o.x
-        val dy = p.y - o.y
-        val dz = p.z - o.z
-        return dx * dx + dy * dy + dz * dz < FIELD_RANGE * FIELD_RANGE
-    }
+    /** The upper-case name a marker shows. */
+    fun targetName(kind: Int, i: Int): String = if (kind == LOCK_STATION) system.stations[i].name else system.bodies[i].displayName
 
     // ================================================================== flight (pre-port model)
 
@@ -772,6 +754,25 @@ class Session(
         } else {
             c.yaw = sx
             c.roll = keys
+        }
+    }
+
+    /**
+     * C15: the reference frame's carry (03-world.md 2.9.4, `ShipStation:getCarry` generalised to
+     * bodies, DECISIONS 6). The ship moves with the displacement its frame made in C14 (a pure
+     * translation: the velocity stays relative to the frame, so nothing jumps), then the frame is
+     * chosen again for the next frame: the docking station while docking or docked, the landed
+     * body, else [StarSystem.frameFor] (stations first, then the innermost body, with hysteresis).
+     */
+    private fun carryWithFrame() {
+        system.frameDelta(refFrame, carry)
+        ship.pos.x += carry.x
+        ship.pos.y += carry.y
+        ship.pos.z += carry.z
+        refFrame = when {
+            (mode.docking || mode.docked) && dockStation >= 0 -> StarSystem.stationFrame(dockStation)
+            mode.landed && landedBody >= 0 -> StarSystem.bodyFrame(landedBody)
+            else -> system.frameFor(ship.pos, refFrame)
         }
     }
 
@@ -805,8 +806,8 @@ class Session(
                 addShake(0.8f)
             }
             controls.boost = false
-            // collide every substep so fast ships can't tunnel through small rocks
-            collideAsteroids(h)
+            bumpCooldown -= h
+            // collide every substep so fast ships can't tunnel through a station's hull
             collideBodies(h)
             collideStation()
         }
@@ -820,44 +821,24 @@ class Session(
         chase.addShake(a * settings.cameraShake)
     }
 
-    private fun collideAsteroids(dt: Float) {
-        val f = field ?: return
-        bumpCooldown -= dt
-        if (!nearField(ship.pos)) {
-            proximity = Float.MAX_VALUE
-            return
+    /**
+     * C65: the ring debris around the ship (`ringDebris:update(dt, shipPos, thrust.velocity)`). The
+     * velocity is relative to the ship's frame, which near a ring is its planet's. A contact plays
+     * the hit (Roblox `audio:playHit`, at most once a second: until the audio port a bump and a
+     * shake as strong as the hit sound would be loud) and brings heat.
+     */
+    private fun updateDebris(dt: Float) {
+        debris.count = if (settings.quality == 0) RingDebris.COUNT_LOW else RingDebris.COUNT
+        if (debrisHitCooldown > 0f) debrisHitCooldown -= dt
+        val hits = debris.update(dt.toDouble(), system, ship.pos, ship.vel)
+        if (hits <= 0) return
+        debrisHits += hits
+        debrisHeat += debris.heat
+        if (debrisHitCooldown <= 0f) {
+            debrisHitCooldown = RingDebris.HIT_COOLDOWN
+            host.haptic(Haptics.BUMP)
+            addShake(0.3f + clamp(ship.speed / 400f, 0f, 1.1f) * 0.5f)
         }
-        var nearest = Float.MAX_VALUE
-        val ox = f.origin.x
-        val oy = f.origin.y
-        val oz = f.origin.z
-        val sx = (ship.pos.x - ox).toFloat()
-        val sy = (ship.pos.y - oy).toFloat()
-        val sz = (ship.pos.z - oz).toFloat()
-        for (i in 0 until f.total) {
-            if (!f.active[i]) continue
-            val dx = f.px[i] - sx
-            val dy = f.py[i] - sy
-            val dz = f.pz[i] - sz
-            val r = f.collisionRadius[i]
-            val reach = r + 400f + spec.reach
-            if (abs(dx) > reach || abs(dy) > reach || abs(dz) > reach) continue
-            // the probes all lie within spec.reach of the origin: a rock this lower bound keeps clear
-            // of every probe, and farther than the nearest one so far, needs no closer look
-            val bound = sqrt(dx * dx + dy * dy + dz * dz) - r - spec.reach
-            if (bound > 0f && bound >= nearest) continue
-            val d = flight.clearance(ship, ox + f.px[i], oy + f.py[i], oz + f.pz[i], r.toDouble()).toFloat()
-            if (d < nearest) nearest = d
-            if (d < 0f) {
-                val hit = flight.collideSphere(ship, ox + f.px[i], oy + f.py[i], oz + f.pz[i], r.toDouble())
-                if (hit > 2f && bumpCooldown <= 0f) {
-                    bumpCooldown = 0.25f
-                    host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
-                    addShake(clamp(hit / 50f, 0.2f, 1.2f))
-                }
-            }
-        }
-        proximity = nearest
     }
 
     /** Station hulls are solid (coarse proxies, see StationCollision). */
@@ -901,7 +882,7 @@ class Session(
                         host.releaseControls()
                         controls.clearAxes()
                         host.haptic(Haptics.BUMP)
-                        showMessage("TOUCHDOWN  ·  " + b.name)
+                        showMessage("TOUCHDOWN  ·  " + b.displayName)
                         return
                     }
                     showMessage(
@@ -915,7 +896,9 @@ class Session(
                 }
             }
         }
+        // the surface, or a giant's barrier at its cloud tops (DECISIONS 11)
         val hit = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius)
+        if (hit > 0f && b.landingBlocked != null && message == null) showMessage(landingBlockedText(b))
         if (hit > 2f && bumpCooldown <= 0f) {
             bumpCooldown = 0.25f
             host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
@@ -925,12 +908,12 @@ class Session(
 
     // ================================================================== landing mode (L), ground (C28)
 
-    /** Solid bodies only: no landing on the star or the gas giant. */
-    fun landable(i: Int): Boolean {
-        if (i < 0) return false
-        val t = system.bodies[i].type
-        return t != StarSystem.BodyType.STAR && t != StarSystem.BodyType.GAS
-    }
+    /** The body's `Landable` (not a star, not a gas or ice giant: Roblox `tagBody`). */
+    fun landable(i: Int): Boolean = i >= 0 && system.bodies[i].landable
+
+    /** "LANDING BLOCKED  ·  NO SOLID SURFACE" (Roblox's approach prompt from `LandingBlocked`). */
+    private fun landingBlockedText(b: StarSystem.Body): String =
+        if (b.landingBlocked == StarSystem.NO_SOLID_SURFACE) LANDING_BLOCKED_GAS else "LANDING BLOCKED  ·  " + b.landingBlocked
 
     private fun takeOff() {
         if (!mode.landed) return
@@ -1117,14 +1100,14 @@ class Session(
         }
     }
 
-    /** C45 (pre-port): the PROXIMITY warning from asteroid and station hull gaps. */
+    /** C45 (pre-port): the PROXIMITY warning from station hull gaps. */
     private fun updateProximity() {
-        // station hulls join the proximity warning. Not while auto-docking (it flies its own clear
+        // station hulls make the proximity warning. Not while auto-docking (it flies its own clear
         // route), docked or landed, nor just after a launch, which starts 30 m off the slot
-        if (mode.docking || mode.docked || mode.landed) {
-            proximity = Float.MAX_VALUE
-        } else if (here.nearestStation >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
-            proximity = minOf(proximity, stationCollision.clearance(ship, system.stations[here.nearestStation]))
+        proximity = Float.MAX_VALUE
+        if (mode.docking || mode.docked || mode.landed) return
+        if (here.nearestStation >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
+            proximity = stationCollision.clearance(ship, system.stations[here.nearestStation])
         }
     }
 
@@ -1146,8 +1129,8 @@ class Session(
     /** C66: dust mood: white in open space, blue in a gravity well, red for danger or heat. */
     private fun updateDustMood(dt: Float) {
         val zone = here.zone
-        val star = here.nearestBody == 0
-        val danger = proximity < 80f || (star && here.altitude < system.bodies[0].radius)
+        val star = here.nearestBody == system.star
+        val danger = proximity < 80f || (star && here.altitude < system.bodies[system.star].radius)
         val well = zone == StarSystem.Zone.GRAVITY_WELL || zone == StarSystem.Zone.LOW_ALTITUDE
         val k = expApproach(4f, dt)
         val tr = if (danger) 1.0f else if (well) 0.40f else 0.66f
@@ -1214,10 +1197,10 @@ class Session(
         f.dustVelocity.set(dustVelocity)
         f.dustIntensity = 0.6f
         f.dustColor.set(dustColor)
-        f.drawField = nearField(cameraPos)
         f.ship = ship
         f.shipView = if (mode.view == ShipView.COCKPIT) ShipModel.VIEW_COCKPIT else ShipModel.VIEW_EXTERIOR
         f.shipReach = shipReach
+        f.debris = debris
     }
 
     // ================================================================== debug (Roblox ShipDebug equivalents)
@@ -1235,17 +1218,24 @@ class Session(
         if (hold) camera.setLook(x, y)
     }
 
+    /** "speed v": the velocity (relative to the ship's frame) set to [v] m/s along the nose; with FA off it holds. */
+    fun debugSpeed(v: Float) {
+        if (mode.docked || mode.docking || mode.landed) return
+        ship.rot.rotate(0f, 0f, -v, ship.vel)
+        ship.speed = abs(v)
+    }
+
     /** "throttle v": the lever. */
     fun setThrottle(v: Float) {
         throttle = clamp(v, -1f, 1f)
         controls.throttle = throttle
     }
 
-    /** "teleport x y z [lx ly lz]": system metres, looking along l (default: keep the rotation); at rest. */
-    fun teleport(x: Double, y: Double, z: Double, lx: Float, ly: Float, lz: Float, look: Boolean) {
+    /** "teleport x y z [lx ly lz [ux uy uz]]": system metres, looking along l with up u (default: keep the rotation; up +Y); at rest. */
+    fun teleport(x: Double, y: Double, z: Double, lx: Float, ly: Float, lz: Float, look: Boolean, ux: Float = 0f, uy: Float = 1f, uz: Float = 0f) {
         undockQuietly()
         ship.pos.set(x, y, z)
-        if (look) ship.rot.lookRotation(lx, ly, lz, 0f, 1f, 0f)
+        if (look) ship.rot.lookRotation(lx, ly, lz, ux, uy, uz)
         ship.vel.zero()
         ship.angVel.zero()
         snapAfterJump()
@@ -1255,7 +1245,7 @@ class Session(
     fun near(i: Int, alt: Double) {
         undockQuietly()
         val b = system.bodies[i]
-        val star = system.bodies[0]
+        val star = system.bodies[system.star]
         var ux = star.pos.x - b.pos.x
         var uy = star.pos.y - b.pos.y
         var uz = star.pos.z - b.pos.z
@@ -1276,14 +1266,47 @@ class Session(
         snapAfterJump()
     }
 
-    /** Harness hook: 20 km above PLANET II's day side, nose a little down, in landing range. */
+    /** "face body": turns the nose onto body [i]'s centre (level with the world's +Y), keeping the position and the velocity's speed along the new nose. */
+    fun debugFace(i: Int) {
+        if (mode.docked || mode.docking || mode.landed) return
+        val b = system.bodies[i]
+        ship.rot.lookRotation((b.pos.x - ship.pos.x).toFloat(), (b.pos.y - ship.pos.y).toFloat(), (b.pos.z - ship.pos.z).toFloat(), 0f, 1f, 0f)
+        val v = ship.vel.length()
+        ship.rot.rotate(0f, 0f, -v, ship.vel)
+        ship.angVel.zero()
+    }
+
+    /**
+     * "clock s": sets the save-game clock (the planets jump to their places for [seconds]); the ship
+     * keeps its place in its reference frame.
+     */
+    fun debugClock(seconds: Double) {
+        system.frameOrigin(refFrame, frameOrigin)
+        val ox = frameOrigin.x
+        val oy = frameOrigin.y
+        val oz = frameOrigin.z
+        system.snapTo(seconds)
+        system.frameOrigin(refFrame, frameOrigin)
+        if (refFrame != StarSystem.FRAME_NONE) {
+            ship.pos.x += frameOrigin.x - ox
+            ship.pos.y += frameOrigin.y - oy
+            ship.pos.z += frameOrigin.z - oz
+        }
+        snapAfterJump()
+    }
+
+    /** Harness hook: 20 km above the home planet's day side (Earth), nose a little down, in landing range. */
     fun debugTeleportLow() {
         undockQuietly()
-        val b = system.bodies.first { it.name == "PLANET II" }
-        val d = sqrt(b.pos.x * b.pos.x + b.pos.y * b.pos.y + b.pos.z * b.pos.z)
-        val ux = -b.pos.x / d
-        val uy = -b.pos.y / d
-        val uz = -b.pos.z / d
+        val b = system.bodies[system.stations[SpawnRules.startStation(system)].parent]
+        val sp = system.bodies[system.star].pos
+        val sx = b.pos.x - sp.x
+        val sy = b.pos.y - sp.y
+        val sz = b.pos.z - sp.z
+        val d = sqrt(sx * sx + sy * sy + sz * sz)
+        val ux = -sx / d
+        val uy = -sy / d
+        val uz = -sz / d
         val alt = b.radius + 20_000.0
         ship.pos.set(b.pos.x + ux * alt, b.pos.y + uy * alt, b.pos.z + uz * alt)
         upV.set(ux.toFloat(), uy.toFloat(), uz.toFloat())
@@ -1366,13 +1389,22 @@ class Session(
         controls.clearAxes()
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
+        // a teleport lands in whatever frame holds the new spot (the docking station forces its own)
+        refFrame = if (mode.docking && dockStation >= 0) StarSystem.stationFrame(dockStation) else system.frameFor(ship.pos, StarSystem.FRAME_NONE)
         system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
         updateCamera(0f)
     }
 
+    /** The ship's position relative to its reference frame's origin into [out] (harness: motion in the frame). */
+    fun framePosition(out: DVec3): DVec3 {
+        system.frameOrigin(refFrame, frameOrigin)
+        return out.set(ship.pos.x - frameOrigin.x, ship.pos.y - frameOrigin.y, ship.pos.z - frameOrigin.z)
+    }
+
     /** Harness read-out (allocates; never per frame). */
-    fun debugState(): String =
-        "branch=${mode.branch} pstate=${mode.state} view=${mode.view} look=${"%.1f".format(camera.lookX)},${"%.1f".format(camera.lookY)} " +
+    fun debugState(): String {
+        val fp = framePosition(DVec3())
+        return "branch=${mode.branch} pstate=${mode.state} view=${mode.view} look=${"%.1f".format(camera.lookX)},${"%.1f".format(camera.lookY)} " +
             "landed=${mode.landed} landing=${mode.landing} docking=${mode.docking} docked=${mode.docked} " +
             "controlled=${mode.controlled} revealed=${mode.revealed} station=$dockStation " +
             "gear=${"%.2f".format(gearRig.downFraction)} stowed=${gearRig.stowed} " +
@@ -1382,13 +1414,20 @@ class Session(
             "hull=${"%.1f".format(stationClearance())} prox=${"%.1f".format(proximity)} " +
             "pos=${"%.1f".format(ship.pos.x)},${"%.1f".format(ship.pos.y)},${"%.1f".format(ship.pos.z)} " +
             "cam=${"%.2f".format(cameraPos.x - ship.pos.x)},${"%.2f".format(cameraPos.y - ship.pos.y)},${"%.2f".format(cameraPos.z - ship.pos.z)} " +
-            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"}"
+            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
+            "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name else "-"} limit=${"%.1f".format(here.speedLimit)} " +
+            "limiter=${if (here.limitingBody >= 0) system.bodies[here.limitingBody].name else "-"} " +
+            "ref=${system.frameName(refFrame).replace(' ', '_')} fpos=${"%.1f".format(fp.x)},${"%.1f".format(fp.y)},${"%.1f".format(fp.z)} " +
+            "clock=${"%.3f".format(system.clock)} rocks=${debris.visible} rhits=$debrisHits rheat=${"%.3f".format(debrisHeat)}"
+    }
 
     companion object {
         const val LOCK_NONE = 0
-        const val LOCK_ASTEROID = 1
         const val LOCK_STATION = 2
         const val LOCK_BODY = 3
+
+        /** Roblox's approach prompt for a giant (`LandingBlocked`, DECISIONS 11). */
+        const val LANDING_BLOCKED_GAS = "LANDING BLOCKED  ·  NO SOLID SURFACE"
 
         /** dt cap per frame (F0, `ShipClient.lua:2324`): tab-outs and load pauses must not throw the ship. */
         const val MAX_DT = 0.1f
@@ -1398,12 +1437,10 @@ class Session(
 
         /** Longest flight sub-step, s (the move and its collisions; 02 section 8). */
         const val MAX_STEP = 1f / 120f
-        const val LOCK_RANGE = 8000f
         const val LOCK_CONE_COS = 0.951f // 18°
         const val LOCK_CONE_SIN = 0.30920f // sqrt(1 - LOCK_CONE_COS²)
         const val AIM_CONE_COS = 0.9986f // 3°
         const val AIM_CONE_SIN = 0.052896f
-        const val FIELD_RANGE = 60_000.0
         const val DUST_VISUAL_SPEED = 400f
         const val LANDING_SPEED = 200f
         const val TOUCHDOWN_SPEED = 8f

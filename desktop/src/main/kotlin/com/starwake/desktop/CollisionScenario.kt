@@ -95,7 +95,6 @@ object CollisionScenario {
             f.quality = 2
             f.pxScale = h / 1080f
             f.dustIntensity = 0f
-            f.drawField = false
             val eye = Vec3()
             val tgt = Vec3()
             val up = Vec3()

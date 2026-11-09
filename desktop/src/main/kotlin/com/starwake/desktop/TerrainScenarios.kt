@@ -87,7 +87,8 @@ object TerrainScenarios {
     /** Everything one planet needs on one GL context. */
     private class Scene(env: ScenarioEnv, gl: Gl, val tp: TestPlanet, quality: Int, pool: TileWorkerPool, bake: Boolean, seam: Boolean = false) {
         val planet = TerrainPlanet.forBody(tp.name, tp.radius, tp.bodyClass, tp.seed, quality, pool, systemName = "Sol", gravityG = tp.gravityG)
-        val system = StarSystem()
+        /** The star and this planet only (the station-depth scene swaps in a copy with its test stations). */
+        var system: StarSystem
         val target = DoubleArray(3)
         val east = DoubleArray(3)
         val north = DoubleArray(3)
@@ -124,8 +125,13 @@ object TerrainScenarios {
             // the star stays at the origin: the planet sits 1.1e9 m from it, opposite the sun direction
             val dist = 1.1e9
             centre.set(-sx * dist, -sy * dist, -sz * dist)
-            system.bodies.removeAll { it.type != StarSystem.BodyType.STAR }
-            system.bodies += StarSystem.Body(tp.name, tp.type, tp.radius, DVec3(centre.x, centre.y, centre.z), Quat(), 0f, false, atmo = tp.atmo, atmoThickness = tp.atmoThickness, seed = tp.seed)
+            val sol = com.starwake.core.world.WorldBuilder.sol()
+            val body = StarSystem.Body(
+                tp.name, tp.bodyClass, tp.type, tp.radius, parent = 0, seed = tp.seed, landable = true,
+                hasAtmosphere = tp.atmoThickness > 0f, atmo = tp.atmo, atmoThickness = tp.atmoThickness,
+            )
+            body.pos.set(centre.x, centre.y, centre.z)
+            system = StarSystem("Sol", 1, listOf(sol.bodies[sol.star], body), emptyList(), sol.edgeRadius, dist)
             bodies = BodyRenderer(gl, system, quality, fullscreen)
             if (bake) {
                 val t0 = System.nanoTime()
@@ -488,18 +494,20 @@ object TerrainScenarios {
         val R = sc.tp.radius
         // the outposts (before the content is built: the renderer sizes its slices by the station count)
         val stationDir = DoubleArray(3)
+        val testStations = ArrayList<StarSystem.Station>()
         for ((dist, bearing) in listOf(1_200.0 to 0.0, 5_000.0 to 0.17)) {
             tangentOffset(u[0], u[1], u[2], bearing, dist / R, stationDir)
             val fl = surf.floorAt(stationDir[0], stationDir[1], stationDir[2]) + 40.0
             // upright (its +Y along the local up), facing north
             val rot = Quat().lookRotation(n[0].toFloat(), n[1].toFloat(), n[2].toFloat(),
                 stationDir[0].toFloat(), stationDir[1].toFloat(), stationDir[2].toFloat())
-            sc.system.stations += StarSystem.Station(
-                "TEST ${dist.toInt()}", com.starwake.core.content.StationMesh.OUTPOST,
-                DVec3(sc.centre.x + stationDir[0] * fl, sc.centre.y + stationDir[1] * fl, sc.centre.z + stationDir[2] * fl),
-                rot, 257.0, 1,
-            )
+            val offset = DVec3(stationDir[0] * fl, stationDir[1] * fl, stationDir[2] * fl)
+            testStations += StarSystem.Station(
+                "TEST-${dist.toInt()}", "TEST ${dist.toInt()}", com.starwake.core.content.StationMesh.OUTPOST,
+                "OutpostStation", rot, 257.0, 1, offset,
+            ).also { it.pos.set(sc.centre.x + offset.x, sc.centre.y + offset.y, sc.centre.z + offset.z) }
         }
+        sc.system = StarSystem(sc.system.name, sc.system.index, sc.system.bodies, testStations, sc.system.edgeRadius, sc.system.lightReferenceDistance)
         val platform = DesktopPlatform(env.opts.assetsDir, null)
         val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"), sc.system)
         val sr = SceneRenderer(gl, content, 2)
@@ -516,7 +524,6 @@ object TerrainScenarios {
         f.terrainBody = 1
         f.terrainLight.setAir(sc.planet.profile, sc.tp.radius)
         f.sunDir.set(sc.sunDir)
-        f.drawField = false
 
         for (alt in doubleArrayOf(20_000_000.0, 2_000_000.0)) handOver(env, s, sc, sr, gpu, f, alt, w, h)
 

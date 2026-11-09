@@ -2,7 +2,7 @@
 
 A native Android version of **Untitled Space Exploration**, a game by AFloidDEV originally built on Roblox. It is single-player for now. The goal is a 1:1 port of the Roblox game: its ships, cockpits, flight feel, HUD and look. It runs at 60 fps by default, and smoothly up to 120 Hz (Settings) on phones such as the Xiaomi 15.
 
-**Status:** port milestone 1. It has the engine, the main menu, the flight model and touch controls, in an asteroid field next to a ringed gas giant.
+**Status:** port milestone 1. It has the engine, the main menu, the flight model and touch controls, in the Sol system of the Roblox game at real size: the Sun, the eight planets, nine moons (Luna, Phobos, Deimos, the four Galilean moons, Titan, Triton) and six stations. The planets move on their orbits, and a ship near a planet or station is carried along with it. Neighbouring planets are about a minute apart at full throttle (the cruise tops out at half the speed of light).
 
 You fly the real ships of the Roblox game: VARROW (the starter ship), TORRIN, CALDER, LOCHRAN, BRANNOCK, KESSOCK, DORNOCH and MORVEN, with their 3D cockpits, canopy glass, engine glow and animated landing gear. Pick one with the arrows on the ship card in the main menu. For now they all share one flight model; each ship's own handling comes with the flight-model port.
 
@@ -18,7 +18,9 @@ Every push builds a signed release APK on GitHub Actions and publishes it as the
 
 The game is played in landscape with two thumbs.
 
-A flight starts **docked at the home station**: tap **LAUNCH** on the station screen to fly out. The default view is the **cockpit**.
+A flight starts **docked at MERIDIAN STATION**, 13,440 km above Earth: tap **LAUNCH** on the station screen to fly out. The default view is the **cockpit**.
+
+You can land on the rocky planets and moons. Jupiter, Saturn, Uranus and Neptune have no solid surface: their cloud tops stop the ship (**LANDING BLOCKED · NO SOLID SURFACE**).
 
 | Control | Action |
 |---|---|
@@ -68,10 +70,10 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
 ## How it is optimized for phones
 
 - **Custom OpenGL ES 3.0 renderer, with no game-engine overhead.** The APK is about 3 MB, 2.8 MB of it the eight ships.
-  - The scene is drawn in about 15 draw calls. The asteroid field uses instanced rendering: one draw call per rock shape.
+  - The scene is drawn in about 15 draw calls. Planets, moons and the Sun are ray-cast spheres drawn on screen-space quads (no meshes); the atmosphere is computed in the same pass, and a ring is one more quad.
   - A ship is 25,000–60,000 triangles in two meshes (hull, cockpit), drawn in one call per mesh for the solid parts and one for the glass. The landing gear moves in the vertex shader (one matrix per gear joint), so nothing is re-uploaded while it folds.
   - There are no post-processing passes. Tone mapping and gamma are done inside each shader, so no extra full-screen framebuffer traffic is needed.
-  - The space background (nebula) and the gas giant's surface are baked into textures once at startup.
+  - The space background (nebula) and the surface of every planet and moon are baked into textures once at startup.
   - Text uses one signed-distance-field font atlas containing the game's fonts (Titillium Web, Sarpanch, Roboto Mono), which stays sharp at any size.
 - **Mobile GPU friendly.**
   - It uses 4× MSAA where supported; tile-based mobile GPUs do this almost for free.

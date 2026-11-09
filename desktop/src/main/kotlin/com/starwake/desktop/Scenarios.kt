@@ -1,6 +1,7 @@
 package com.starwake.desktop
 
 import com.starwake.core.Game
+import com.starwake.core.game.Session
 
 /** A named, runnable check. Add new ones to [Scenarios.registry]; "all" runs them in order. */
 class Scenario(val name: String, val description: String, val body: (ScenarioEnv) -> Unit)
@@ -49,7 +50,7 @@ object Scenarios {
 
         "bodies" to Scenario(
             "bodies",
-            "Real-scale BodyRenderer without Game: gas giant from home, PLANET II from orbit and 20 km, the star, dots, all surface types",
+            "Sol at S = 3000 through BodyRenderer without Game: measured angular sizes (Luna 0.53 deg from Earth, Earth 37.5 deg from MERIDIAN, ...), every body from 3.5 radii, the hosts from their stations, Earth's limb and 20 km horizon, Saturn's rings and Cassini division, Uranus's ring at 82 deg, an occluded moon, the bakes",
         ) { Bodies.run(it) },
 
         "stations-real" to Scenario(
@@ -69,17 +70,17 @@ object Scenarios {
 
         "station-depth" to Scenario(
             "station-depth",
-            "HOME STATION at 1-200 km (oblique front, telephoto) vs a fitted-depth reference: depth precision of far stations",
+            "MERIDIAN STATION at 1-200 km (oblique front, telephoto) vs a fitted-depth reference: depth precision of far stations",
         ) { RenderProbe.stationDepth(it) },
 
         "render-probe" to Scenario(
             "render-probe",
-            "Draw calls, depth slices, body full-screen passes per frame: spawn, 30 km out, deep space, field 40/55 km, star behind/ahead",
+            "Draw calls, depth slices, body full-screen passes per frame: MERIDIAN spawn, 30 km out, deep space, star behind/ahead",
         ) { RenderProbe.passes(it) },
 
         "ships" to Scenario(
             "ships",
-            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: cockpit, external, chase, gear in flight, menu backdrop per ship; every hull docks at OUTPOST II and HOME STATION, the MORVEN flies the whole route into OUTPOST II",
+            "The 8 Roblox ships: 3/4 front + side views, VARROW gear down/half/stowed (no Game); then in Game: cockpit, external, chase, gear in flight, menu backdrop per ship; every hull docks at TRANQUILITY YARDS (outpost stand-in) and MERIDIAN STATION (ring stand-in), the MORVEN flies the whole route into TRANQUILITY",
         ) { ShipsScenario.run(it) },
 
         "holograms" to Scenario(
@@ -89,7 +90,7 @@ object Scenarios {
 
         "map" to Scenario(
             "map",
-            "System map without Game: opening view (none / OUTPOST II / PLANET III selected), pinch on PLANET II, two-finger pan, tap-select, ship close-ups, no per-frame allocation",
+            "Sol system map without Game: opening view (none / MERIDIAN / Saturn selected), pinch on Earth, zoomed to Earth's moons and stations, tap-select Jupiter, ship close-ups, no per-frame allocation",
         ) { MapScenario.run(it) },
 
         "menu" to gameScenario("menu", "Main menu after 2 s") {
@@ -159,16 +160,20 @@ object Scenarios {
             shot("sys-docked")
         },
 
-        "gameplay" to gameScenario("gameplay", "Checks: land, touch down, take off; Back twice while docked; boost during auto-dock; off-screen lock arrow") {
+        "gameplay" to gameScenario("gameplay", "Checks: off-screen lock arrow (MERIDIAN behind the spawn); land, touch down, take off; Back twice while docked; boost during auto-dock") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
-            // off-screen lock: OUTPOST II is far away and not in view at spawn -> edge arrow
-            cmd("lock-outpost")
+            // off-screen lock: the free-flight spawn is 3 km out of MERIDIAN's mouth with the nose
+            // straight away from the station, so MERIDIAN is behind the ship -> the edge arrow
+            cmd("lock-station meridian")
             frames(10)
+            info()
+            check(field("lock") == "${Session.LOCK_STATION}:0") { "MERIDIAN is not locked: ${info()}" }
+            check(field("lockArrow") == "true") { "no edge arrow for MERIDIAN behind the ship: ${info()}" }
             shot("gp-lock-arrow")
-            cmd("lock-outpost")
-            // --- landing: 60 m above PLANET II, LAND, hold the down thruster until touchdown
+            cmd("lock clear")
+            // --- landing: 60 m above Earth, LAND, hold the down thruster until touchdown
             cmd("teleport-surface")
             frames(2)
             cmd("action")
@@ -210,7 +215,7 @@ object Scenarios {
             shot("gp-launched")
         },
 
-        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind HOME STATION routes round the hull; ramming the hull stops at it") {
+        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; ramming the hull stops at it") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
@@ -325,7 +330,7 @@ object Scenarios {
 
         "start-docked" to Scenario(
             "start-docked",
-            "D13: a fresh start (real LAUNCH tap) parks the ship docked in HOME STATION's slot, services after the reveal, the welcome lines over them 5 s later; LAUNCH on the services flies out with the first-flight hints unspent (30 s docked, no-op GL) and clear of BOOST",
+            "D13: a fresh start (real LAUNCH tap) parks the ship docked in MERIDIAN STATION's slot above Earth, in the station's frame, services after the reveal, the welcome lines over them 5 s later; LAUNCH on the services flies out with the first-flight hints unspent (30 s docked, no-op GL) and clear of BOOST",
         ) { SessionScenarios.startDocked(it) },
 
         "camera-views" to Scenario(
@@ -337,6 +342,41 @@ object Scenarios {
             "map-nonpausing",
             "DECISIONS 21: the ship flies on under the map (position advances by v·3 s), the stick is released and recentred, PAUSE freezes",
         ) { SessionScenarios.mapNonPausing(it) },
+
+        "sol-start" to Scenario(
+            "sol-start",
+            "Sol: docked at MERIDIAN in the station's frame while Earth carries it (11.16 km/s, the slot holds still), LAUNCH into Earth's frame, a lock on Earth, the map, the save-game clock a day on",
+        ) { SolScenarios.start(it) },
+
+        "sol-views" to Scenario(
+            "sol-views",
+            "Sol from the cockpit: Earth, Luna, Mars, Jupiter and Saturn from a few radii with their locks, Earth from Luna; Jupiter offers no LAND, answers L with LANDING BLOCKED and holds a dive at its cloud tops",
+        ) { SolScenarios.views(it) },
+
+        "sol-trip" to Scenario(
+            "sol-trip",
+            "Sol: MERIDIAN to Mars at full throttle with the nose on Mars, timed to Mars's mass-shadow edge (about a minute) and to 60 km; peak speed at most 0.5 c; shots on the way",
+        ) { SolScenarios.trip(it) },
+
+        "sol-moon" to Scenario(
+            "sol-moon",
+            "Sol: GALILEAN REFINERY to Io at full throttle with the nose on Io; Io limits the speed while Jupiter is the nearest body (the limit is the minimum over all bodies), so the ship comes within 1 km of Io at landing speeds (at most 400 m/s) and the zone 12 radii out is an APPROACH (to Io); shots on the way",
+        ) { SolScenarios.moon(it) },
+
+        "sol-docking" to Scenario(
+            "sol-docking",
+            "Sol: the real auto-dock from 1.5 km behind each of the six stations (no-op GL), in its frame, clear of the hull in and out; then each station on approach (GL)",
+        ) { SolScenarios.docking(it) },
+
+        "orbits" to Scenario(
+            "orbits",
+            "03 9.5: a ship parked over Phobos rides a 6 h clock jump (Phobos turns 1.05 times, 18.2 deg net) and over Earth 4 days (88.9 deg round the Sun), keeping its spot in the frame; the map at t0, 6 h and 4 days on",
+        ) { SolScenarios.orbits(it) },
+
+        "ring-debris" to Scenario(
+            "ring-debris",
+            "03 9.5: flying through Saturn's ring at 300 m/s (FA off), half resolution: many rocks in the B ring (f 0.75), almost none in the Cassini division (the profile's gap, f 0.863), the hit and heat log; none away from rings; a quit to the menu from the B ring leaves no rocks in the menu scene",
+        ) { SolScenarios.ringDebris(it) },
 
         "perf" to Scenario(
             "perf",

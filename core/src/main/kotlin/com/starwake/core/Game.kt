@@ -3,7 +3,6 @@ package com.starwake.core
 import com.starwake.core.content.Content
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
-import com.starwake.core.game.AsteroidField
 import com.starwake.core.game.Branch
 import com.starwake.core.game.FrameTrace
 import com.starwake.core.game.GearRig
@@ -14,7 +13,9 @@ import com.starwake.core.game.SessionHost
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
 import com.starwake.core.game.ShipView
+import com.starwake.core.game.SpawnRules
 import com.starwake.core.game.StarSystem
+import com.starwake.core.world.WorldBuilder
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
@@ -90,6 +91,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         get() = "state=$stateName phase=${PHASE_NAMES[phase]} curtain=${"%.3f".format(fade)} frame=$frameCount " +
             "build=$buildFrame safety=$revealTimedOut ship=${model?.id} " +
             "aim=${"%.2f".format(inputFrame.aimX)},${"%.2f".format(inputFrame.aimY)} hints=${"%.2f".format(hud.hints)} " +
+            "lockArrow=${hud.lockArrowShown} " +
+            "sceneRocks=${sceneFrame.debris?.visible ?: 0} " +
             (session?.debugState() ?: "menu")
 
     /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
@@ -153,7 +156,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val models = arrayOfNulls<ShipModel>(ShipCatalog.all.size)
     private var shipIndex = -1
     private val gearRig = GearRig()
-    private val system = StarSystem()
+    /** The world: Sol at S = 3000 (03-world.md), its save-game clock run by the session (C14). */
+    private val system = WorldBuilder.sol()
     private val menuShip = ShipState()
     private val orbit = OrbitCamera()
     private val touch = TouchFlightControls(settings, this)
@@ -191,21 +195,54 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     private val menuShipRot = Quat()
     private val menuCentre = com.starwake.core.math.DVec3()
 
+    /** Where the menu's showcase ship floats (see [placeMenuBackdrop]). */
+    private val menuAnchor = com.starwake.core.math.DVec3()
+
     init {
+        placeMenuBackdrop()
+        menuShip.engineOutput = 0.15f
+        sceneFrame.gear = gearRig
+    }
+
+    /**
+     * The menu backdrop (01 / 07 menu): the showcase ship high above Earth near MERIDIAN, the
+     * planet's sunlit crescent with its limb glow behind the ship at the first frame, the Sun to the
+     * side. The orbit camera then circles slowly. Static: the world's clock does not run in the
+     * menu, so the backdrop is computed again only when the menu (re)opens.
+     */
+    private fun placeMenuBackdrop() {
+        val station = system.stations[SpawnRules.startStation(system)]
+        val earth = system.bodies[station.parent]
+        val sun = system.bodies[system.star].pos
+        // Earth's side away from the Sun, in the orbit plane, then a quarter turn: the Sun 90-110
+        // degrees off the view, so Earth shows as a lit crescent with a bright limb
+        val sx = sun.x - earth.pos.x
+        val sz = sun.z - earth.pos.z
+        val sl = sqrt(sx * sx + sz * sz)
+        val ax = sz / sl
+        val az = -sx / sl
+        val c = cos(MENU_SUN_TURN)
+        val sn = sin(MENU_SUN_TURN)
+        // direction from Earth to the anchor: mostly sideways to the Sun, a little away from it, raised
+        var dx = ax * c - sx / sl * sn
+        var dz = az * c - sz / sl * sn
+        val el = MENU_ELEVATION
+        val dy = sin(el)
+        dx *= cos(el)
+        dz *= cos(el)
+        val d = earth.radius * MENU_EARTH_DISTANCE
+        menuAnchor.set(earth.pos.x + dx * d, earth.pos.y + dy * d, earth.pos.z + dz * d)
         // nose towards the menu column, the sunlit flank and top towards the camera
-        menuShipRot.setAxisAngle(0f, 1f, 0f, 1.25f)
+        val yaw = kotlin.math.atan2(-dx, -dz).toFloat()
+        menuShipRot.setAxisAngle(0f, 1f, 0f, yaw + 1.25f)
         val roll = Quat().setAxisAngle(0f, 0f, 1f, 0.3f)
         val pitch = Quat().setAxisAngle(1f, 0f, 0f, 0.06f)
         menuShipRot.mul(menuShipRot, pitch).mul(menuShipRot, roll)
-        menuShip.pos.set(
-            system.home.x + AsteroidField.SHOWCASE_X,
-            system.home.y + AsteroidField.SHOWCASE_Y,
-            system.home.z + AsteroidField.SHOWCASE_Z,
-        )
         menuShip.rot.set(menuShipRot)
-        menuShip.engineOutput = 0.15f
-        orbit.yaw = 0.18f
-        sceneFrame.gear = gearRig
+        menuShip.pos.set(menuAnchor)
+        menuCentre.set(menuAnchor)
+        // the camera looks from the far side of the ship towards Earth: yaw so that -offset is Earth
+        orbit.yaw = kotlin.math.atan2(dx, dz).toFloat() + MENU_YAW_OFFSET
     }
 
     /**
@@ -240,7 +277,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             system,
         ).also { content = it }
         if (savedSettings == null && appliedQuality < 0) pickDefaultQuality(gl.getString(GL.RENDERER) ?: "")
-        c.field.setQuality(settings.quality)
         scene = SceneRenderer(gl, c, settings.quality)
         appliedQuality = settings.quality
         // the hull: loaded once, uploaded again with every new GL context
@@ -310,13 +346,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      *
      * Screens: `launch [space|fade]` (instant docked start / instant free-flight start / the real
      * LAUNCH with fade, LOADING and reveal), `menu`, `settings`, `pause`, `resume`, `map`, `reveal`.
-     * Flight: `fa [on|off]`, `boost`, `throttle v`, `stick x y` / `stick off` (held cursor, radius
+     * Flight: `fa [on|off]`, `boost`, `throttle v`, `speed v` (velocity along the nose; with FA off it
+     * holds), `stick x y` / `stick off` (held cursor, radius
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
-     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz]`,
-     * `near <body> [alt]`, `teleport-low`, `teleport-surface`, `lock-outpost`, `dock [i]`, `docked [i]`,
-     * `behind-station [i]`, `ram-station`. Diagnostics: `state` (see [debugInfo]), `trace` (the next
-     * frame's step order into [frameTrace]), `branch deck|destroyed|flight`.
+     * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz [ux uy uz]]`,
+     * `near <body> [alt]`, `face <body>` (nose on a body), `teleport-low`, `teleport-surface`,
+     * `lock-station [s]` (locks a station, TRANQUILITY by default), `lock-body <body>`, `dock [s]`, `docked [s]`,
+     * `behind-station [s]`, `ram-station [s]`; a station [s] is its index, id or name (`ares`,
+     * `SOL-ARES`), MERIDIAN when left out.
+     * World: `clock <s>` (the save-game clock; the ship moves with its frame). Diagnostics: `state`
+     * (see [debugInfo]), `trace` (the next frame's step order into [frameTrace]),
+     * `branch deck|destroyed|flight`.
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
@@ -340,7 +381,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             rebuildScene = false
             val c = content!!
             val q = settings.quality
-            c.field.setQuality(q)
             val sc = scene
             if (sc != null && !sc.needsRebake(q)) {
                 sc.setQuality(q)
@@ -592,12 +632,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     /**
      * Builds the flight (Roblox: modules built, profile fetched, system built, ship placed): one
-     * [Session], placed by the start rule. [space] starts in free flight at the pre-port spawn (the
-     * harness' "launch space"); otherwise docked at the home station (D13).
+     * [Session], placed by the start rule. [space] starts in free flight 3 km off MERIDIAN's mouth
+     * (the harness' "launch space"); otherwise docked at MERIDIAN (D13).
      */
     private fun buildSession(space: Boolean): Session {
-        val c = content
-        val s = Session(system, c?.field, settings, this, gearRig)
+        val s = Session(system, settings, this, gearRig)
         s.setShip(ShipCatalog.get(shipIndex.coerceAtLeast(0)), spec, model)
         if (space) s.startInSpace() else s.startDocked()
         session = s
@@ -643,6 +682,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         menuTime = 0f
         overlay = Overlay.NONE
         touch.releaseAll()
+        // the planets moved on during the flight: the backdrop follows Earth
+        placeMenuBackdrop()
         orbit.idle = 10f
         gearRig.update(0f, false, true)
         screenChanged()
@@ -766,11 +807,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // the hull's centre floats at the showcase point, bobbing gently; the orbit circles it
         val m = model
         val size = (m?.radius ?: 8f) / 8f
-        menuCentre.set(
-            system.home.x + AsteroidField.SHOWCASE_X,
-            system.home.y + AsteroidField.SHOWCASE_Y + sin(time * 0.7f) * 0.35 * size,
-            system.home.z + AsteroidField.SHOWCASE_Z,
-        )
+        menuCentre.set(menuAnchor.x, menuAnchor.y + sin(time * 0.7f) * 0.35 * size, menuAnchor.z)
         if (m != null) menuShip.rot.rotate(m.centreX, m.centreY, m.centreZ, tmp) else tmp.zero()
         menuShip.pos.set(menuCentre.x - tmp.x, menuCentre.y - tmp.y, menuCentre.z - tmp.z)
         menuShip.engineOutput = 0.12f + 0.03f * sin(time * 3f)
@@ -789,10 +826,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         sceneFrame.dustVelocity.zero()
         sceneFrame.dustIntensity = 0.35f
         sceneFrame.dustOrigin.set(cam.pos)
-        sceneFrame.drawField = true
         sceneFrame.ship = menuShip
         sceneFrame.shipView = ShipModel.VIEW_EXTERIOR
         sceneFrame.shipReach = orbit.distance + (m?.radius ?: 0f)
+        // the ring debris belongs to a flight: after a quit from inside a ring the menu must neither
+        // draw the last session's rocks nor keep them alive
+        sceneFrame.debris = null
         updateLighting(menuShip.pos)
     }
 
@@ -869,11 +908,12 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     /** Commands that need a flight. */
     private fun flightCommand(s: Session, name: String, arg: String?, words: List<String>) {
         fun num(i: Int): Double? = words.getOrNull(i)?.toDoubleOrNull()
-        val station = arg?.toIntOrNull()?.takeIf { it in system.stations.indices }
+        val station = stationTarget(arg, system)
         when (name) {
             "fa" -> if (arg == null || (arg == "on") != s.ship.flightAssist) s.toggleFlightAssist()
             "boost" -> s.requestBoost()
             "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
+            "speed" -> num(1)?.let { s.debugSpeed(it.toFloat()) }
             "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
             "look" -> if (arg == "off" || arg == null) s.debugLook(false, 0f, 0f) else s.debugLook(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
             "view" -> when (arg) {
@@ -900,20 +940,31 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
                     val ly = num(5)
                     val lz = num(6)
                     val look = lx != null && ly != null && lz != null
-                    s.teleport(x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look)
+                    // an optional up vector after the look direction (world +Y by default)
+                    val ux = num(7)
+                    val uy = num(8)
+                    val uz = num(9)
+                    val up = ux != null && uy != null && uz != null
+                    s.teleport(
+                        x, y, z, (lx ?: 0.0).toFloat(), (ly ?: 0.0).toFloat(), (lz ?: -1.0).toFloat(), look,
+                        if (up) ux!!.toFloat() else 0f, if (up) uy!!.toFloat() else 1f, if (up) uz!!.toFloat() else 0f,
+                    )
                 }
             }
             "near" -> nearTarget(words, system)?.let { (i, alt) -> s.near(i, alt) }
+            "face" -> nearTarget(words, system)?.let { (i, _) -> s.debugFace(i) }
+            "clock" -> num(1)?.let { s.debugClock(it) }
             "teleport-low" -> s.debugTeleportLow()
             "teleport-surface" -> {
                 s.debugTeleportLow()
                 s.debugDrop(60.0)
             }
-            "lock-outpost" -> s.lock(Session.LOCK_STATION, 1)
+            "lock-station" -> s.lock(Session.LOCK_STATION, station ?: 1)
+            "lock-body" -> nearTarget(words, system)?.let { (i, _) -> s.lock(Session.LOCK_BODY, i) }
             "dock" -> s.requestDocking(station ?: 0)
             "docked" -> s.debugDocked(station ?: 0)
             "behind-station" -> s.debugBehindStation(station ?: 0, 1500.0, 0f)
-            "ram-station" -> s.debugBehindStation(0, 400.0, 120f)
+            "ram-station" -> s.debugBehindStation(station ?: 0, 400.0, 120f)
         }
     }
 
@@ -977,7 +1028,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         f.sunVisibility = system.sunlight(at, f.sunDir)
         var best = -1
         var bestScore = Double.MAX_VALUE
-        for (i in 1 until system.bodies.size) {
+        for (i in system.bodies.indices) {
+            if (i == system.star) continue
             val b = system.bodies[i]
             val dx = b.pos.x - at.x
             val dy = b.pos.y - at.y
@@ -1052,6 +1104,18 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             return if (i in system.bodies.indices) i to (alt ?: NEAR_ALTITUDE) else null
         }
 
+        /** A station named by a debug command: its index, id (`SOL-ARES`) or name (`ares`); null if none matches. */
+        internal fun stationTarget(arg: String?, system: StarSystem): Int? {
+            if (arg == null) return null
+            arg.toIntOrNull()?.let { return it.takeIf { i -> i in system.stations.indices } }
+            val key = arg.replace('-', ' ')
+            val i = system.stations.indexOfFirst {
+                it.id.equals(arg, ignoreCase = true) || it.name.equals(key, ignoreCase = true) ||
+                    it.name.substringBefore(' ').equals(key, ignoreCase = true)
+            }
+            return if (i >= 0) i else null
+        }
+
         /** Altitude of "near <body>" without one, m. */
         const val NEAR_ALTITUDE = 20_000.0
 
@@ -1091,5 +1155,17 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
         /** Menu orbit distance relative to the hull's bounding radius. */
         private const val MENU_ORBIT = 3.6f
+
+        /** Menu backdrop: the anchor's turn from sideways-to-the-Sun towards Earth's night side (rad). */
+        private const val MENU_SUN_TURN = 0.35
+
+        /** Menu backdrop: the anchor's height above Earth's orbit plane (rad): Earth's limb crosses the lower frame. */
+        private const val MENU_ELEVATION = 0.6
+
+        /** Menu backdrop: distance from Earth's centre in Earth radii. */
+        private const val MENU_EARTH_DISTANCE = 2.4
+
+        /** Menu backdrop: the camera's first yaw off the Earth direction (rad). */
+        private const val MENU_YAW_OFFSET = 0.35f
     }
 }

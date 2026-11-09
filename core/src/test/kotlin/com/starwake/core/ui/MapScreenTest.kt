@@ -1,7 +1,9 @@
 package com.starwake.core.ui
 
 import com.starwake.core.Haptics
-import com.starwake.core.game.StarSystem
+import com.starwake.core.math.DVec3
+import com.starwake.core.math.Quat
+import com.starwake.core.world.WorldBuilder
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -11,7 +13,7 @@ import kotlin.test.fail
 
 /** System map gestures (no GL: only the touch handlers and the view transform are exercised). */
 class MapScreenTest {
-    private val system = StarSystem()
+    private val system = WorldBuilder.sol()
     private val haptics = ArrayList<Int>()
 
     private val host = object : MapHost {
@@ -23,11 +25,13 @@ class MapScreenTest {
         override fun lockFromMap(kind: Int, index: Int) {}
     }
 
-    /** A 20:9 phone map, opened at the spawn point like Game.openMap does. */
+    /** A 20:9 phone map, opened at the free-flight spawn off MERIDIAN like Game.openMap does. */
     private fun map(w: Float = 2400f, h: Float = 1080f): MapScreen {
         val m = MapScreen(host, system)
         m.layout(Frame().also { it.w = w; it.h = h; it.u = 2.75f })
-        m.open(system.home, 0, -1)
+        val spawn = DVec3()
+        system.spaceSpawn(0, spawn, Quat())
+        m.open(spawn, 0, -1)
         return m
     }
 
@@ -68,11 +72,11 @@ class MapScreenTest {
     @Test
     fun pinchZoomsAboutTheFingersNotTheScreenCentre() {
         val m = map()
-        // pinch on PLANET II, well away from the screen centre
-        val p2 = body("PLANET II")
+        // pinch on Saturn, well away from the screen centre (the map opens on the ship at Earth)
+        val p2 = body("Saturn")
         val cx = m.screenX(p2.pos.x)
         val cy = m.screenY(p2.pos.z)
-        assertTrue(abs(cx - 1200f) > 150f || abs(cy - 540f) > 150f, "PLANET II should open off-centre: ($cx, $cy)")
+        assertTrue(abs(cx - 1200f) > 150f || abs(cy - 540f) > 150f, "Saturn should open off-centre: ($cx, $cy)")
         val mpp0 = m.metresPerPixel
         val p = Pinch(m, cx - 30f, cy, cx + 30f, cy)
         val wx = m.worldX(p.midX)
@@ -145,7 +149,7 @@ class MapScreenTest {
         }
         assertEquals(50.0, m.metresPerPixel, 1e-3)
 
-        // and out again past the 3e7 m/px limit (x10 per pinch), fingers drifting sideways as they close
+        // and out again past the zoom-out limit (x10 per pinch), fingers drifting sideways as they close
         for (round in 0 until 7) {
             val p = Pinch(m, 200f, 300f, 2200f, 800f)
             val wx = m.worldX(p.midX)
@@ -157,7 +161,7 @@ class MapScreenTest {
             }
             p.up()
         }
-        assertEquals(3.0e7, m.metresPerPixel, 1.0)
+        assertEquals(MapScreen.MAX_MPP.toDouble(), m.metresPerPixel, 1.0)
     }
 
     @Test
@@ -178,7 +182,7 @@ class MapScreenTest {
     @Test
     fun tapSelectsButAPinchReleaseDoesNot() {
         val m = map()
-        val p1 = body("PLANET I")
+        val p1 = body("Jupiter")
         val x = m.screenX(p1.pos.x)
         val y = m.screenY(p1.pos.z)
         haptics.clear()
@@ -190,7 +194,7 @@ class MapScreenTest {
         val y2 = m.screenY(p1.pos.z)
         m.down(5, x2, y2)
         m.up(5, x2, y2, false)
-        assertTrue(Haptics.TICK in haptics, "a tap on PLANET I selects it")
+        assertTrue(Haptics.TICK in haptics, "a tap on Jupiter selects it")
     }
 
     @Test

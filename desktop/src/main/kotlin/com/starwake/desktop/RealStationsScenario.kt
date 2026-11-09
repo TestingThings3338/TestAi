@@ -89,10 +89,9 @@ object RealStationsScenario {
             f.quality = 2
             f.pxScale = h / 1080f
             f.dustIntensity = 0f
-            f.drawField = false
-            val home = content.system.home
-            // 5,000 km from the old home position: no stand-in station or rock field in the frame,
-            // the ringed giant in the sky behind some of the views
+            // 5,000 km above MERIDIAN: no stand-in station in the frame, Earth in the sky behind some
+            // of the views
+            val home = content.system.stations[0].pos
             val stationPos = DVec3(home.x, home.y + 5.0e6, home.z)
             // the mouth (-Z) turned towards the sun, 35 degrees off, so faces read in light and shade
             val sun = Vec3().set(f.sunDir)

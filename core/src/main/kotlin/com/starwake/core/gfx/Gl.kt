@@ -130,6 +130,7 @@ object GL {
     const val TEXTURE_CUBE_MAP = 0x8513
     const val TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515
     const val TEXTURE0 = 0x84C0
+    const val TEXTURE1 = 0x84C1
     const val TEXTURE_MAG_FILTER = 0x2800
     const val TEXTURE_MIN_FILTER = 0x2801
     const val TEXTURE_WRAP_S = 0x2802

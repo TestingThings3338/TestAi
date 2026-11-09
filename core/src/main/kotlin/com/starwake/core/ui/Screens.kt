@@ -201,7 +201,7 @@ class SettingsScreen(private val game: GameActions) {
         ui.text("CONTROLS", p.x + pad * 2f + colW, p.y + 60f * u, 10f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
         group.draw(ui, u, a)
         ui.text(game.deviceInfo, infoX, infoY, 9.5f * u, withAlpha(Theme.TEXT_DIM, a), tracking = 0.05f)
-        ui.text("QUALITY sets resolution, stars, dust and asteroid count.", infoX, infoY + 15f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
+        ui.text("QUALITY sets resolution, stars, dust and ring rocks.", infoX, infoY + 15f * u, 9f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
     }
 }
 

@@ -1,6 +1,8 @@
 package com.starwake.desktop
 
 import com.starwake.core.game.StarSystem
+import com.starwake.core.math.DVec3
+import com.starwake.core.world.WorldBuilder
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.UiRenderer
@@ -13,11 +15,11 @@ import kotlin.math.hypot
 import kotlin.math.min
 
 /**
- * The system map on its own (no Game, no scene behind it), driven through MapScreen's real touch
- * handlers: the opening view with nothing, OUTPOST II and PLANET III selected (label overlap
- * checks), a pinch on PLANET II that must keep the planet under the fingers, a two-finger pan, a
- * tap that selects PLANET I, close-ups around the ship (YOU, PLANET III, HOME STATION), and a
- * zero-allocation check of MapScreen.move + draw. Finger positions are drawn as magenta rings,
+ * The system map of Sol on its own (no Game, no scene behind it), driven through MapScreen's real
+ * touch handlers: the opening view with nothing, MERIDIAN and Saturn selected (label overlap
+ * checks), a pinch on Earth that must keep the planet under the fingers, a two-finger pan, a closer
+ * pinch where Luna and MERIDIAN come clear of Earth, a tap that selects Jupiter, close-ups around
+ * the ship (YOU, MERIDIAN), and a zero-allocation check of MapScreen.move + draw. Finger positions are drawn as magenta rings,
  * their midpoint as a cross, so the pinch anchoring can be checked by eye; the drift of the pinched
  * point from the midpoint is logged.
  */
@@ -53,11 +55,13 @@ object MapScenario {
                 u = d * min(1f, min(h / d / 380f, w / d / 720f))
                 sl = opts.insets[0]; st = opts.insets[1]; sr = opts.insets[2]; sb = opts.insets[3]
             }
-            val system = StarSystem()
+            val system = WorldBuilder.sol()
             val host = Host()
             val map = MapScreen(host, system)
             map.layout(f)
-            val ship = system.home
+            // the free-flight spawn off MERIDIAN
+            val ship = DVec3()
+            system.spaceSpawn(0, ship, Quat())
             // any heading: the arrow just has to point somewhere
             val rot = Quat().setAxisAngle(0f, 1f, 0f, 2.2f)
             var frame = 0L
@@ -129,18 +133,18 @@ object MapScenario {
                 fingers = 0
             }
 
-            // 1. opening views: nothing selected, OUTPOST II locked (the review's case), PLANET III locked
+            // 1. opening views: nothing selected, MERIDIAN locked (a station over its planet), Saturn locked
             map.open(ship, 0, -1)
             draw("map-open")
-            map.open(ship, 2, 1)
-            draw("map-outpost")
-            map.open(ship, 3, 1)
-            draw("map-planet3")
+            map.open(ship, 2, 0)
+            draw("map-meridian")
+            map.open(ship, 3, system.bodyIndex("Saturn"))
+            draw("map-saturn")
 
-            // 2. pinch on PLANET II, zooming in x10: it has to stay under the fingers
-            map.open(ship, 2, 1)
+            // 2. pinch on Earth, zooming in x10: it has to stay under the fingers
+            map.open(ship, 2, 0)
             draw(null)
-            val p2 = bodyAt("PLANET II")
+            val p2 = bodyAt("Earth")
             val px = map.screenX(p2.pos.x)
             val py = map.screenY(p2.pos.z)
             val spread = 0.04f * w
@@ -151,7 +155,7 @@ object MapScenario {
             draw("map-pinch")
 
             // 3. keep both fingers down: drag them towards the screen centre (two-finger pan) while
-            // spreading a little more (x2), so OUTPOST II separates from the planet
+            // spreading a little more (x2)
             val cx = w * 0.45f
             val cy = h * 0.5f
             pinchTo(cx - spread * 10f, cy - 0.05f * h, cx + spread * 10f, cy + 0.05f * h, 30)
@@ -159,19 +163,21 @@ object MapScenario {
             draw("map-pinch-pan")
             pinchUp()
 
-            // 4. one more pinch in, until station labels show up (below 2 Mm/px)
-            val qx = map.screenX(p2.pos.x)
-            val qy = map.screenY(p2.pos.z)
-            pinchDown(qx, qy, spread)
-            pinchTo(qx - spread * 4f, qy, qx + spread * 4f, qy, 20)
-            anchor("after x8 pinch", p2)
-            pinchUp()
-            draw("map-zoomed")
+            // 4. pinch in further, x8 and x16: Luna comes clear of Earth, then MERIDIAN with its name
+            for ((n, k) in listOf("map-zoomed" to 4f, "map-zoomed-meridian" to 8f)) {
+                val qx = map.screenX(p2.pos.x)
+                val qy = map.screenY(p2.pos.z)
+                pinchDown(qx, qy, spread)
+                pinchTo(qx - spread * k, qy, qx + spread * k, qy, 20)
+                anchor("after x${(k * 2).toInt()} pinch", p2)
+                pinchUp()
+                draw(n)
+            }
 
-            // 5. back to the opening view and tap PLANET I: it becomes the selection
+            // 5. back to the opening view and tap Jupiter: it becomes the selection
             map.open(ship, 0, -1)
             draw(null)
-            val p1 = bodyAt("PLANET I")
+            val p1 = bodyAt("Jupiter")
             val tx = map.screenX(p1.pos.x)
             val ty = map.screenY(p1.pos.z)
             map.down(12, tx, ty)
@@ -182,12 +188,12 @@ object MapScenario {
             val lockY = h - f.sb - 18f * f.u - 22f * f.u
             map.down(13, lockX, lockY)
             map.up(13, lockX, lockY, false)
-            val ok = host.lockedKind == 3 && system.bodies[host.lockedIndex].name == "PLANET I"
-            r.note("tap PLANET I at (%.0f, %.0f) then LOCK TARGET: lockFromMap(%d, %d) -> %s".format(tx, ty, host.lockedKind, host.lockedIndex, if (ok) "OK" else "WRONG"))
-            if (!ok) r.failure = IllegalStateException("tap-select on the map did not select PLANET I")
+            val ok = host.lockedKind == 3 && system.bodies[host.lockedIndex].name == "Jupiter"
+            r.note("tap Jupiter at (%.0f, %.0f) then LOCK TARGET: lockFromMap(%d, %d) -> %s".format(tx, ty, host.lockedKind, host.lockedIndex, if (ok) "OK" else "WRONG"))
+            if (!ok) r.failure = IllegalStateException("tap-select on the map did not select Jupiter")
 
-            // 6. around the ship: pinch on it until the stations are labelled (YOU, PLANET III and
-            // HOME STATION crowd each other), then much closer, where the station sits under the arrow
+            // 6. around the ship: pinch on it until Earth, Luna and MERIDIAN are labelled (YOU and
+            // MERIDIAN crowd each other), then much closer, where the station sits under the arrow
             map.open(ship, 0, -1)
             draw(null)
             val sx = map.screenX(ship.x)
@@ -203,13 +209,13 @@ object MapScenario {
             draw("map-home-close")
             r.note("home close-up at %.3g m/px".format(map.metresPerPixel))
 
-            // 7. the per-frame path must not allocate: pinch in and out over PLANET II (labels placed,
-            // stations labelled part of the time, OUTPOST II selected) and count heap bytes on this
+            // 7. the per-frame path must not allocate: pinch in and out over Earth (labels placed,
+            // stations labelled part of the time, MERIDIAN selected) and count heap bytes on this
             // thread around MapScreen.move + draw only, after a warm-up
             val meter = PerfMeter(1, null) // enables the counter and measures its own overhead
             val mx = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
             val overhead = meter.overhead
-            map.open(ship, 2, 1)
+            map.open(ship, 2, 0)
             val ax = map.screenX(p2.pos.x)
             val ay = map.screenY(p2.pos.z)
             map.down(20, ax - 40f, ay)
