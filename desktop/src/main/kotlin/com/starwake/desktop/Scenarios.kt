@@ -66,6 +66,11 @@ object Scenarios {
             "Draw calls, depth slices, body full-screen passes per frame: spawn, 30 km out, deep space, field 40/55 km, star behind/ahead",
         ) { RenderProbe.passes(it) },
 
+        "map" to Scenario(
+            "map",
+            "System map without Game: opening view (none / OUTPOST II / PLANET III selected), pinch on PLANET II, two-finger pan, tap-select, ship close-ups, no per-frame allocation",
+        ) { MapScenario.run(it) },
+
         "menu" to gameScenario("menu", "Main menu after 2 s") {
             frames(120)
             shot("menu")
