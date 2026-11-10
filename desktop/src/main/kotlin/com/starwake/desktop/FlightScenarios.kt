@@ -28,7 +28,11 @@ import kotlin.math.sqrt
  *  - "flight-star": into the star at full throttle: HEAT ZONE at the scaled floor, the approach zone,
  *    scooping, the heat timeline and heat death (the crash contract's HEAT);
  *  - "flight-autopilot": AUTO on a locked Luna from the MERIDIAN spawn: ALIGNING, CRUISING, BRAKING,
- *    ARRIVED with their times;
+ *    ARRIVED with their times, and the HUD's autopilot line at the 10 Hz text cadence;
+ *  - "flight-dock-load": a boost and a hard pull, then the auto-dock: no G load from the first
+ *    docking frame, the boost cooldown runs on (review fix);
+ *  - "flight-sensitivity": SENSITIVITY 0.5 and a real thumb: the full stick is the whole cursor and
+ *    takes the ship back from the autopilot and the docking computer (review fix);
  *  - "flight-arrow": the Roblox flight arrow for stick deflections 0, 0.1, 0.5 and 1 and with the
  *    head turned; the 8 directions steer the right way;
  *  - "flight-alloc": every flight path with its instruments, measured on the no-op GL: no frame
@@ -694,6 +698,13 @@ object FlightScenarios {
             cmd("autopilot")
             frame()
             expect(field("apOn") == "true") { "AUTO did not engage on a locked Luna" }
+            // the HUD's line (and AUTO's sub-label) shows in the frame it engaged, then reads the
+            // status at Roblox's 10 Hz text cadence (ShipHud's TextUpdateInterval, 02 9.6)
+            var hudShown = game.hudAutopilot
+            expect(hudShown == field("ap")?.replace('_', ' ')) { "the HUD shows '$hudShown' in the frame AUTO engaged" }
+            var hudChanges = 0
+            var hudLastChange = frame
+            var hudMinGap = Long.MAX_VALUE
             val start = frame
             val luna = w.bodyIndex("Luna")
             val r = w.bodies[luna].radius
@@ -704,6 +715,18 @@ object FlightScenarios {
                 frame()
                 val t = (frame - start) / 60.0
                 val st = field("ap") ?: ""
+                val hudNow = game.hudAutopilot
+                if (field("apOn") == "true") {
+                    expect(hudNow.isNotEmpty()) { "the HUD dropped the autopilot line while it flies" }
+                    if (hudNow != hudShown) {
+                        hudChanges++
+                        hudMinGap = minOf(hudMinGap, frame - hudLastChange)
+                        hudLastChange = frame
+                        hudShown = hudNow
+                    }
+                } else {
+                    expect(hudNow.isEmpty()) { "the HUD still shows '$hudNow' after the autopilot went off" }
+                }
                 // the first braking (the status is re-evaluated every frame, as in Roblox: near 1.05 x
                 // the desired speed it flips between CRUISING and BRAKING); re-staged 20 % faster so
                 // the shot shows a clear BRAKING
@@ -743,6 +766,13 @@ object FlightScenarios {
             val alt = distTo(w, luna) - r
             expect(alt <= r * 0.35 + 1000.0 && num("speed") <= 25.5) { "ARRIVED ${f1(alt)} m above Luna at ${field("speed")} m/s" }
             expect(num("crashes") == 0.0) { "crashed" }
+            val flown = (frame - start) / 60.0
+            val row = "HUD line: the live status changed %d times in %s s, the HUD's line %d times (%s per s, closest %d frames apart)"
+                .format(changes, f1(flown), hudChanges, f2(hudChanges / flown), hudMinGap)
+            log(row)
+            report.note(row)
+            expect(hudMinGap >= 6) { "the HUD's autopilot line changed twice within $hudMinGap frames (10 Hz: 6 frames)" }
+            expect(hudChanges <= flown * 10.0 + 1.0) { "the HUD's autopilot line changed $hudChanges times in ${f1(flown)} s" }
         }
         run(half(env)) {
             val w = WorldBuilder.sol()
@@ -964,5 +994,124 @@ object FlightScenarios {
         }
         cmd("gear auto")
         cmd("look off")
+    }
+
+    // ------------------------------------------------------------------ flight-dock-load
+
+    /**
+     * A boost and a hard pull at TopSpeed inside MERIDIAN's lock, then K: the G load of [pull] frames
+     * of full stick (the boost still burning) before the docking computer takes the ship.
+     */
+    private fun GameDriver.pullThenDock(pull: Int) {
+        flying()
+        cmd("view cockpit")
+        cmd("throttle 1")
+        frames(180)
+        cmd("boost")
+        frames(2)
+        cmd("stick 1 -1")
+        frames(pull)
+    }
+
+    /**
+     * The docking computer flies without the last flown frame's load (review fix, C23's idle thrust
+     * step): after the pull the G meter falls from the first docking frame with its own smoothing
+     * (τ 0.12 s: 1.6 % left after 0.5 s), reads zero through the auto-dock and docked, and the boost's
+     * cooldown runs down meanwhile. Before, the meter held the pull's value all the way in.
+     */
+    fun dockLoad(env: ScenarioEnv) {
+        noop(env) {
+            pullThenDock(30)
+            val pulled = num("g")
+            val cooldown = num("cooldown")
+            expect(pulled > 2.0) { "the pull did not load the pilot: $pulled g" }
+            cmd("stick off")
+            cmd("dock")
+            frames(30) // the commands run in the first of these frames: 0.5 s of docking computer
+            expect(field("docking") == "true") { "the docking computer did not take the ship" }
+            val g30 = num("g")
+            frames(60)
+            val g90 = num("g")
+            val cooldown90 = num("cooldown")
+            val row = "dock after a %s g pull: %s g 0.5 s in, %s g 1.5 s in (dark %s); boost cooldown %s s -> %s s"
+                .format(f2(pulled), f2(g30), f2(g90), field("dark"), f2(cooldown), f2(cooldown90))
+            log(row)
+            report.note(row)
+            expect(g30 <= pulled * 0.03 + 0.01) { "0.5 s into the auto-dock the G meter reads $g30 (was $pulled)" }
+            // the overlay fades with its own 0.35 s
+            expect(g90 == 0.0 && num("dark") < 0.03) { "1.5 s into the auto-dock: $g90 g, darkness ${field("dark")}" }
+            expect(abs(cooldown90 - (cooldown - 1.5)) < 0.03) { "the boost cooldown stood still while docking: $cooldown -> $cooldown90" }
+            frames(30)
+            expect(field("boosting") == "false") { "the 2 s burn did not end in the auto-dock" }
+            var maxG = 0.0
+            var n = 0
+            while (field("docked") != "true" && n < 60 * 90) {
+                frame()
+                maxG = maxOf(maxG, num("g"))
+                n++
+            }
+            report.note("docked %s s later, at most %s g on the way, darkness %s".format(f1(n / 60.0), f2(maxG), field("dark")))
+            expect(field("docked") == "true") { "never docked" }
+            expect(maxG == 0.0 && num("dark") == 0.0) { "the docking computer's flight loaded the pilot: $maxG g, darkness ${field("dark")}" }
+        }
+        run(half(env)) {
+            pullThenDock(30)
+            log("pull: ${field("g")} g, strain ${field("strain")}, dark ${field("dark")}")
+            shot("flight-dock-pull")
+            cmd("stick off")
+            cmd("dock")
+            frames(90)
+            log("auto-dock 1.5 s: ${field("g")} g, dark ${field("dark")}, docking ${field("docking")}")
+            expect(num("g") < 0.5) { "the HUD would show a G load during the auto-dock" }
+            shot("flight-dock-auto")
+        }
+    }
+
+    // ------------------------------------------------------------------ flight-sensitivity
+
+    /**
+     * SENSITIVITY at its lowest (0.5) with a real thumb on the touch stick (review fix): a drag past
+     * the stick's rim is the whole cursor (the flight arrow's full length) and takes the ship back
+     * from the autopilot (MANUAL OVERRIDE) and from the docking computer, as at every setting. Before,
+     * 0.5 halved the deflection: never past the 0.5 override, 19 % of the turn rate at most.
+     */
+    fun sensitivity(env: ScenarioEnv) = run(half(env)) {
+        game.settings.sensitivity = 0.5f
+        flying()
+        cmd("view cockpit")
+        cmd("throttle 0.2")
+        cmd("lock-body luna")
+        cmd("autopilot")
+        frames(10)
+        expect(field("apOn") == "true") { "AUTO did not engage on a locked Luna" }
+        val thumb = pointer(1)
+        val cx = 0.72f * w
+        val cy = 0.62f * h
+        fun push(dx: Float, dy: Float) {
+            thumb.down(cx, cy)
+            frames(2)
+            thumb.dragTo(cx + dx * h, cy + dy * h, 10)
+            frames(3)
+        }
+        // straight up past the rim (the floating base follows the thumb)
+        push(0f, -0.25f)
+        val aim = vec("aimArrow")
+        val m = sqrt(aim[0] * aim[0] + aim[1] * aim[1])
+        log("sensitivity 0.5, full stick: arrow ${field("aimArrow")}, autopilot ${field("ap")}, rates ${field("rates")}")
+        expect(abs(m - 1.0) < 0.01 && aim[1] < -0.99) { "the full stick is ${field("aimArrow")} at sensitivity 0.5" }
+        expect(field("ap") == "MANUAL_OVERRIDE" && field("apOn") == "false") { "the full stick did not take the ship back from the autopilot" }
+        shot("flight-sens-full")
+        thumb.up()
+        frames(30)
+        // the docking computer hands over the same way
+        cmd("dock")
+        frames(20)
+        expect(field("docking") == "true") { "the docking computer did not take the ship" }
+        push(-0.25f, 0f)
+        log("sensitivity 0.5, full stick in the auto-dock: docking ${field("docking")}, message '${game.messageLine}'")
+        expect(field("docking") == "false" && game.messageLine == "DOCKING CANCELLED") { "the full stick did not cancel the auto-dock" }
+        thumb.up()
+        frames(5)
+        report.note("sensitivity 0.5: the full stick is the whole cursor (|aim| ${f3(m)}), MANUAL OVERRIDE and DOCKING CANCELLED")
     }
 }

@@ -415,8 +415,18 @@ object Scenarios {
 
         "flight-autopilot" to Scenario(
             "flight-autopilot",
-            "02 10.5: AUTO on a locked Luna from the MERIDIAN spawn: ALIGNING -> CRUISING -> BRAKING -> ARRIVED (within 0.35 R at 25 m/s at most) with times; shots of each phase",
+            "02 10.5: AUTO on a locked Luna from the MERIDIAN spawn: ALIGNING -> CRUISING -> BRAKING -> ARRIVED (within 0.35 R at 25 m/s at most) with times; the HUD's autopilot line at Roblox's 10 Hz text cadence (shown in the frame it engages, gone in the frame it arrives, changes at least 6 frames apart while the live status flips every frame near 1.05 x the desired speed); shots of each phase",
         ) { FlightScenarios.autopilot(it) },
+
+        "flight-dock-load" to Scenario(
+            "flight-dock-load",
+            "Flight review: a boost and a hard pull at TopSpeed by MERIDIAN, then K: the G meter falls from the first docking frame (1.6 % left after 0.5 s), zero through the auto-dock and docked, the boost cooldown runs down meanwhile; shots of the pull and of the auto-dock (no G line)",
+        ) { FlightScenarios.dockLoad(it) },
+
+        "flight-sensitivity" to Scenario(
+            "flight-sensitivity",
+            "Flight review: SENSITIVITY 0.5 with a real thumb on the touch stick: a drag past the rim is the whole cursor (full arrow), takes the ship back from the autopilot (MANUAL OVERRIDE) and from the docking computer (DOCKING CANCELLED); shot of the full arrow",
+        ) { FlightScenarios.sensitivity(it) },
 
         "flight-arrow" to Scenario(
             "flight-arrow",
