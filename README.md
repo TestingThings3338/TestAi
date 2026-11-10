@@ -37,7 +37,9 @@ Every push builds a signed release APK on GitHub Actions and publishes it as the
 
 The game is played in landscape with two thumbs.
 
-A flight starts **docked at the home station**: tap **LAUNCH** on the station screen to fly out. The default view is the **cockpit**.
+A flight starts **docked at MERIDIAN STATION**, 13,440 km above Earth: tap **LAUNCH** on the station screen to fly out. The default view is the **cockpit**.
+
+You can land on the rocky planets and moons. Jupiter, Saturn, Uranus and Neptune have no solid surface: their cloud tops stop the ship (**LANDING BLOCKED · NO SOLID SURFACE**).
 
 | Control | Action |
 |---|---|
@@ -89,10 +91,10 @@ A flight starts **docked at the home station**: tap **LAUNCH** on the station sc
 ## How it is optimized for phones
 
 - **Custom OpenGL ES 3.0 renderer, with no game-engine overhead.** The APK is about 3 MB, 2.8 MB of it the eight ships.
-  - The scene is drawn in about 15 draw calls. The asteroid field uses instanced rendering: one draw call per rock shape.
+  - The scene is drawn in about 15 draw calls. Planets, moons and the Sun are ray-cast spheres drawn on screen-space quads (no meshes); the atmosphere is computed in the same pass, and a ring is one more quad.
   - A ship is 25,000–60,000 triangles in two meshes (hull, cockpit), drawn in one call per mesh for the solid parts and one for the glass. The landing gear moves in the vertex shader (one matrix per gear joint), so nothing is re-uploaded while it folds.
   - There are no post-processing passes. Tone mapping and gamma are done inside each shader, so no extra full-screen framebuffer traffic is needed.
-  - The space background (nebula) and the gas giant's surface are baked into textures once at startup.
+  - The space background (nebula) and the surface of every planet and moon are baked into textures once at startup.
   - Text uses one signed-distance-field font atlas containing the game's fonts (Titillium Web, Sarpanch, Roboto Mono), which stays sharp at any size.
 - **Mobile GPU friendly.**
   - It uses 4× MSAA where supported; tile-based mobile GPUs do this almost for free.
@@ -125,7 +127,7 @@ The script header documents the binary format: quantised vertices, the view clas
 
 ```
 core/     Engine and game in pure Kotlin. No Android dependencies, so it can be unit tested.
-          game/SolData.kt is the star system, game/WorldTerrain.kt the terrain body and the
+          world/ is the star system (Sol), game/WorldTerrain.kt the terrain body and the
           planets' far looks, terrain/ the height functions and the tile quadtree,
           gfx/CloudField.kt the weather.
 app/      Android shell: Activity, GLSurfaceView, GLES30 binding, touch and gamepad,
@@ -145,10 +147,9 @@ You need JDK 17 or newer and an Android SDK with platform 36 (set it in `local.p
 ./gradlew :core:test                 # engine unit tests
 ./gradlew :app:assembleRelease       # app/build/outputs/apk/release/app-release.apk
 ./gradlew :desktop:run --args="--scenario all"   # render preview screenshots to desktop/out
-./gradlew :desktop:run --args="--scenario sol,sol-entry"   # MERIDIAN to the ground of the Earth; a real-time entry
+./gradlew :desktop:run --args="--scenario earth,earth-entry"   # MERIDIAN to the ground of the Earth; a real-time entry
 ```
 
-The harness scenes written for the flight mechanics (`flight`, `gameplay`, `station-game` and others) run on a small test range (`StarSystem()`: a gas giant, smooth planets, an asteroid field). The game itself and the `sol` scenes run in Sol (`StarSystem.sol()`).
 
 The keystore in `keystore/` is a **development key**, committed so that test builds install over each other. Create a private key before publishing anywhere.
 

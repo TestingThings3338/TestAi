@@ -11,9 +11,9 @@ import kotlin.math.sqrt
  * the start rules and the crash recovery; 01-core-loop.md 2.1.4, 2.1.5, 4.6). Pure functions over
  * the [StarSystem]; results go into caller-owned vectors.
  *
- * Start (D13): a new pilot starts docked at the home station; the world port makes that MERIDIAN.
- * Saves (D23: docked at the station the pilot left, or the exact flight pose at rest) arrive with
- * the save manager of `08`.
+ * Start (D13): a new pilot starts docked at MERIDIAN (`ShipStations.HomeStation`). Saves (D23:
+ * docked at the station the pilot left, or the exact flight pose at rest) arrive with the save
+ * manager of `08`.
  */
 object SpawnRules {
     /** Warp.ArrivalMargin: the arrival point lies this factor outside the star's danger radius. */
@@ -36,12 +36,13 @@ object SpawnRules {
     }
 
     /**
-     * The arrival pose of [system] "as after a jump": [arrivalPoint] with the Roblox defaults for a
-     * star without its own radii (heat 1.6 r, mass shadow 4 r), pushed out of bodies, facing the star.
+     * The arrival pose of [system] "as after a jump": [arrivalPoint] from the star's heat and
+     * mass-shadow radii (the builder fills in the Roblox defaults, 1.6 r and 4 r), pushed out of
+     * bodies, facing the star.
      */
     fun starArrival(system: StarSystem, outPos: DVec3, outRot: Quat) {
-        val star = system.bodies[0]
-        arrivalPoint(1.6 * star.radius, 4.0 * star.radius, outPos)
+        val star = system.bodies[system.star]
+        arrivalPoint(star.heatRadius, star.massShadowRadius, outPos)
         outPos.x += star.pos.x; outPos.y += star.pos.y; outPos.z += star.pos.z
         clearOfBodies(system, outPos)
         lookAt(outPos, star.pos, outRot)
@@ -125,8 +126,8 @@ object SpawnRules {
         outPos.set(outPos.x - dir.x * depth - tmp.x, outPos.y - dir.y * depth - tmp.y, outPos.z - dir.z * depth - tmp.z)
     }
 
-    /** The station a new pilot starts docked at (D13: MERIDIAN once the world is ported; the home station now). */
-    fun startStation(system: StarSystem): Int = system.stations.indexOfFirst { it.name == system.homeStation }.coerceAtLeast(0)
+    /** The station a new pilot starts docked at (D13: MERIDIAN), the first station when a system has none of that id. */
+    fun startStation(system: StarSystem): Int = system.stationIndex(HOME_STATION).coerceAtLeast(0)
 
     /** Index of the station nearest to [p] (crash recovery, `nearestStation`), or -1. */
     fun nearestStation(system: StarSystem, p: DVec3): Int {
@@ -160,6 +161,6 @@ object SpawnRules {
     fun lookAt(from: DVec3, to: DVec3, out: Quat): Quat =
         out.lookRotation((to.x - from.x).toFloat(), (to.y - from.y).toFloat(), (to.z - from.z).toFloat(), 0f, 1f, 0f)
 
-    /** Name of the test range's home station (Sol's is MERIDIAN STATION: [StarSystem.homeStation]). */
-    const val HOME_STATION = "HOME STATION"
+    /** Catalog id of the home station (`ShipStations.HomeStation`). */
+    const val HOME_STATION = com.starwake.core.world.StationDirectory.HOME_STATION
 }

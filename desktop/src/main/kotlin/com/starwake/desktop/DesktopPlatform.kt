@@ -2,13 +2,24 @@ package com.starwake.desktop
 
 import com.starwake.core.Haptics
 import com.starwake.core.Platform
+import com.starwake.core.audio.AudioOut
+import com.starwake.core.save.FileSaveStorage
+import com.starwake.core.save.MemorySaveStorage
+import com.starwake.core.save.SaveStorage
 import java.io.File
 
 /**
  * [Platform] for the harness: assets straight from the app module's source tree, settings kept in
  * memory, side effects only logged. Logging is suppressed while [quiet] (allocation measurement).
  */
-class DesktopPlatform(private val assetsDir: File, initialSettings: String? = null) : Platform {
+class DesktopPlatform(
+    private val assetsDir: File,
+    initialSettings: String? = null,
+    /** Decode every sound for real (ffmpeg) and mix; else silent stand-ins of the right lengths. */
+    audioDecode: Boolean = false,
+    /** Write the mix to this 48 kHz stereo WAV (needs [audioDecode] to be audible). */
+    audioWav: File? = null,
+) : Platform {
     private var settings: String? = initialSettings
     @Volatile var quiet = false
 
@@ -63,6 +74,33 @@ class DesktopPlatform(private val assetsDir: File, initialSettings: String? = nu
     }
 
     override val deviceInfo: String = "Desktop preview (Mesa llvmpipe)"
+
+    /** The sound output: the core mixer run in step with the harness frames, with an event log. */
+    val recorder = RecordingAudioOut(assetsDir, audioDecode, audioWav)
+
+    override val audio: AudioOut get() = recorder
+
+    /**
+     * Save files (profile.json, galaxy.json): in this directory when set (atomic files with .bak, as
+     * on the phone), else in memory so harness runs stay hermetic.
+     */
+    var saveDir: File? = null
+        set(value) {
+            field = value
+            saves = if (value == null) MemorySaveStorage() else FileSaveStorage(value)
+        }
+    private var saves: SaveStorage = MemorySaveStorage()
+
+    override fun readSave(name: String): ByteArray? = saves.readSave(name)
+
+    override fun writeSave(name: String, data: ByteArray): Boolean {
+        log { "[platform] writeSave($name, ${data.size} B)" }
+        return saves.writeSave(name, data)
+    }
+
+    override val finishedWrites: Int get() = saves.finishedWrites
+
+    override fun writeState(name: String): Int = saves.writeState(name)
 
     private inline fun log(msg: () -> String) {
         if (!quiet) println(msg())

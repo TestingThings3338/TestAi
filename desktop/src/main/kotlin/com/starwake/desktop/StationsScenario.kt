@@ -52,8 +52,11 @@ object StationsScenario {
         View("station-outpost-approach", 1, 0.4f, -90f, 30f, -420f, 0f, 0f, -140f),
     )
 
-    /** Far from the asteroid field (which sits near the world origin). */
-    private val stationPos = DVec3(4.0e5, 0.0, 0.0)
+    /**
+     * Where the models are shown: 4 km up and 40 km on from MERIDIAN's free-flight spawn, far from
+     * every Sol station and body (the origin is inside the Sun), Earth in the sky.
+     */
+    private val stationPos = DVec3()
 
     fun run(env: ScenarioEnv) {
         val opts = env.opts
@@ -64,6 +67,8 @@ object StationsScenario {
             val h = opts.height
             val platform = DesktopPlatform(opts.assetsDir)
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
+            content.system.spaceSpawn(0, stationPos, com.starwake.core.math.Quat())
+            stationPos.set(stationPos.x, stationPos.y + 4000.0, stationPos.z + 40_000.0)
             val scene = SceneRenderer(gl, content, 2)
             val lit = ShaderProgram(gl, "station-lit", Shaders.litVs(false), Shaders.litFs)
             val glow = ShaderProgram(gl, "station-glow", Shaders.glowVs, Shaders.glowFs)

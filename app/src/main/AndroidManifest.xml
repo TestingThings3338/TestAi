@@ -12,6 +12,14 @@
 
     <!-- Haptics go through View.performHapticFeedback, so no VIBRATE permission is needed. -->
 
+    <!-- The announcer speaks through the device's text-to-speech engine until recordings exist
+         (DECISIONS 38); from Android 11 the engines are only visible with this query. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:appCategory="game"

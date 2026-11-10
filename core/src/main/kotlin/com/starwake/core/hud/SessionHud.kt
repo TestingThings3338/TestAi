@@ -44,6 +44,10 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     var hintTime = 0f
         private set
 
+    /** The last [draw] showed the locked target, off screen, with the edge arrow (harness read-out). */
+    var lockArrowShown = false
+        private set
+
     /** A new flight: the hints show again, for [HINT_TIME] of their own screen time. */
     fun resetHints() {
         hints = 1f
@@ -66,6 +70,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val u = frame.u
         val a = alpha
         val ship = s.ship
+        lockArrowShown = false
         // reticle where the nose points (800 m ahead) and the velocity vector marker
         ship.rot.rotate(0f, 0f, -800f, tmp)
         relToCam(s, cam, tmp)
@@ -122,10 +127,10 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val here = s.here
         val system = s.system
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
-        var warnY = frame.st + 52f * u
-        // under the look strip's first-flight hint
-        if (drawFlightData(ui, s, cx, warnY + 16f * u, a, time)) warnY += 54f * u
-        if (here.nearestBody == 0 && here.altitude < system.bodies[0].radius * 0.5) {
+        // below the first flight's "DRAG HERE TO LOOK AROUND" while it shows (it sits at the look strip's foot)
+        var warnY = frame.st + 52f * u + if (hints > 0.01f && touch.lookEnabled) 16f * u else 0f
+        if (drawFlightData(ui, s, cx, warnY, a, time)) warnY += 38f * u
+        if (here.nearestBody == system.star && here.altitude < system.bodies[system.star].radius * 0.5) {
             val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
             ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
             warnY += 20f * u
@@ -134,6 +139,13 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             val blink = if ((time * 5f).toInt() % 2 == 0) 1f else 0.35f
             ui.textCentered("PULL UP", cx, warnY, 15f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
             warnY += 22f * u
+        }
+        // the approach prompt of a giant (Roblox ShipAtmosphere reads LandingBlocked, DECISIONS 11)
+        if (here.zone == com.starwake.core.game.StarSystem.Zone.LOW_ALTITUDE && here.nearestBody >= 0 &&
+            system.bodies[here.nearestBody].landingBlocked != null
+        ) {
+            ui.textCentered(Session.LANDING_BLOCKED_GAS, cx, warnY, 11f * u, withAlpha(Theme.WARN, a), tracking = 0.2f, shadow = 0.7f)
+            warnY += 20f * u
         }
         if (!ship.flightAssist) {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
@@ -336,7 +348,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             }
             val ly = minOf(y + half + 16f * u, frame.h - frame.sb - 64f * u)
             labelAndDistance(ui, s, a, kind, i, x, ly, col, true, dist)
-        } else if (kind != Session.LOCK_ASTEROID) {
+        } else {
             val col = withAlpha(if (kind == Session.LOCK_STATION) Theme.ACCENT else Theme.TEXT, a * 0.85f)
             val r = maxOf(screenR, 5f * u)
             ui.circle(x, y, r, col, 1.2f * u)
@@ -350,6 +362,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
      */
     private fun drawLockArrow(ui: UiRenderer, s: Session, cam: Camera, a: Float, kind: Int, i: Int) {
         val u = frame.u
+        lockArrowShown = true
         // view-space direction (camera looks down -Z, +Y up); screen y grows downwards
         cam.rot.rotateInverse(tmp, tmp2)
         var dx = tmp2.x

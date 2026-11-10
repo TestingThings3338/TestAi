@@ -58,7 +58,7 @@ class WorldTerrain(val system: StarSystem, quality: Int) : Ground {
     var generation = 0
         private set
 
-    val looks = BodyLooks(system)
+    val looks = FarLooks(system)
 
     /** The surface profile (sky, clouds, entry glow) of body [i]; null for a body without terrain. */
     fun profile(i: Int): SurfaceProfile? = profiles[i]
@@ -96,7 +96,11 @@ class WorldTerrain(val system: StarSystem, quality: Int) : Ground {
             best == body -> if (bestScore < RELEASE_RADII) best else -1
             else -> if (bestScore < ACTIVATE_RADII) best else if (body >= 0 && stillInRange(shipPos)) body else -1
         }
-        if (want == body) return false
+        if (want == body) {
+            // the body moves on its orbit: the terrain rides with it
+            if (body >= 0) planet?.setBodyPose(bodies[body].pos, bodies[body].rot)
+            return false
+        }
         activate(want)
         return true
     }
@@ -180,12 +184,8 @@ class WorldTerrain(val system: StarSystem, quality: Int) : Ground {
         const val RELEASE_RADII = 20.0
 
         /** The surface profile of [b]: the Sol profiles by name in Sol, else by class and seed. */
-        fun profileOf(system: StarSystem, b: StarSystem.Body): SurfaceProfile {
-            // the profiles and styles are keyed by the Roblox names ("Earth"); the system shows them in capitals
-            val name = b.name.lowercase().replaceFirstChar { it.uppercase() }
-            val sol = system.layout == StarSystem.Layout.SOL
-            return SurfaceProfiles.forBody(name, b.bodyClass, b.seed, if (sol) "Sol" else system.name, b.airDensity > 0.0)
-        }
+        fun profileOf(system: StarSystem, b: StarSystem.Body): SurfaceProfile =
+            SurfaceProfiles.forBody(b.name, b.cls, b.seed, system.name, b.airDensity > 0.0)
     }
 }
 
@@ -196,7 +196,7 @@ class WorldTerrain(val system: StarSystem, quality: Int) : Ground {
  * first; the terrain body a detailed one. The game takes finished images with [poll] on the GL
  * thread and uploads them; [images] keeps the best of each for a rebuilt renderer.
  */
-class BodyLooks(private val system: StarSystem) {
+class FarLooks(private val system: StarSystem) {
     class Image(val body: Int, val pixels: ByteBuffer, val width: Int, val height: Int, val detailed: Boolean)
 
     @Volatile var quality = 2

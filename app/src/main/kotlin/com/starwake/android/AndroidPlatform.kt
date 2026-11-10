@@ -11,6 +11,10 @@ import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import com.starwake.core.Haptics
 import com.starwake.core.Platform
+import com.starwake.core.audio.AudioOut
+import com.starwake.core.save.AsyncSaveStorage
+import com.starwake.core.save.FileSaveStorage
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -56,6 +60,11 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     private val hapticHeavy = HapticRunnable(HapticFeedbackConstants.LONG_PRESS)
 
     override val deviceInfo: String = buildDeviceInfo()
+
+    /** The sound: AudioTrack mixer, decoded effects, streamed music, the device's voice (`09` 8.4). */
+    private val sound = AndroidAudio(activity)
+
+    override val audio: AudioOut get() = sound
 
     /** Must be called (UI thread) before the GL thread starts. */
     fun attach(view: GameSurfaceView) {
@@ -110,15 +119,38 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
         mainHandler.post(exitRunnable)
     }
 
+    // ================================================================ saves (core/save: profile.json, galaxy.json)
+
+    /**
+     * <filesDir>/saves: each file replaced atomically (temp + rename, previous kept as .bak), written
+     * off the GL thread. writeSave answers once a write is queued; its outcome reaches the save
+     * manager through [finishedWrites] and [writeState].
+     */
+    private val saves by lazy { AsyncSaveStorage(FileSaveStorage(File(activity.filesDir, "saves"))) }
+
+    override fun readSave(name: String): ByteArray? = saves.readSave(name)
+
+    override fun writeSave(name: String, data: ByteArray): Boolean = saves.writeSave(name, data)
+
+    override val finishedWrites: Int get() = saves.finishedWrites
+
+    override fun writeState(name: String): Int = saves.writeState(name)
+
     // ================================================================ lifecycle hooks (UI thread)
 
     fun onResume() {
         displayManager?.registerDisplayListener(this, mainHandler)
         applyDisplayOnUiThread(force = true) // the display may have changed while we were away
+        sound.onResume()
     }
 
     fun onPause() {
         displayManager?.unregisterDisplayListener(this)
+        sound.onPause() // every sound holds where it is
+    }
+
+    fun onDestroy() {
+        sound.release()
     }
 
     fun onConfigurationChanged() {

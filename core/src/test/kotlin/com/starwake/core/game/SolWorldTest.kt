@@ -1,10 +1,10 @@
 package com.starwake.core.game
 
 import com.starwake.core.Settings
-import com.starwake.core.content.StationMesh
 import com.starwake.core.input.InputFrame
 import com.starwake.core.math.DVec3
 import com.starwake.core.math.Vec3
+import com.starwake.core.world.WorldBuilder
 import kotlin.math.abs
 import kotlin.math.sqrt
 import kotlin.test.Test
@@ -17,13 +17,13 @@ import kotlin.test.assertTrue
  * square, the air's drag and heat, flown by a [Session] over smooth spheres (no terrain attached).
  */
 class SolWorldTest {
-    private val system = StarSystem.sol()
+    private val system = WorldBuilder.sol()
     private val host = RecordingHost()
     private val input = InputFrame()
 
-    private fun body(name: String) = system.bodies.first { it.name == name }
+    private fun body(name: String) = system.bodies.first { it.displayName == name }
 
-    private fun index(name: String) = system.bodies.indexOfFirst { it.name == name }
+    private fun index(name: String) = system.bodies.indexOfFirst { it.displayName == name }
 
     private fun dist(a: DVec3, b: DVec3): Double {
         val dx = a.x - b.x
@@ -33,7 +33,7 @@ class SolWorldTest {
     }
 
     /** A flight in Sol with the lever at zero (a free-flight start sets it to 30 %). */
-    private fun session(): Session = Session(system, null, Settings(), host, GearRig()).also {
+    private fun session(): Session = Session(system, Settings(), host, GearRig()).also {
         it.startInSpace()
         it.setThrottle(0f)
     }
@@ -54,8 +54,7 @@ class SolWorldTest {
         assertEquals(3_390_000.0, body("MARS").radius, 1.0)
         assertEquals(384_000_000.0, dist(body("LUNA").pos, body("EARTH").pos), 384_000_000.0 * 0.01)
         assertEquals(18, system.bodies.size, "the star, 8 planets and 9 moons")
-        assertEquals(StarSystem.BodyType.STAR, system.bodies[0].type)
-        assertFalse(system.hasField, "no asteroid field in Sol (DECISIONS 13)")
+        assertEquals(StarSystem.BodyType.STAR, system.bodies[system.star].type)
     }
 
     @Test
@@ -64,29 +63,20 @@ class SolWorldTest {
             assertTrue(body(name).hasTerrain, "$name has a surface")
         }
         for (name in listOf("SOL", "JUPITER", "SATURN", "URANUS", "NEPTUNE")) assertFalse(body(name).hasTerrain, "$name has none")
-        assertEquals("Terrestrial World", body("EARTH").bodyClass)
+        assertEquals("Terrestrial World", body("EARTH").cls)
         assertEquals(3, body("EARTH").seed, "planet seeds are their index from 1")
         assertEquals(94, body("LUNA").seed, "moon seeds are planet · 31 + moon")
         assertTrue(body("EARTH").cloudCover > 0.3f && body("LUNA").cloudCover == 0f)
     }
 
     @Test
-    fun meridianHangsOverTheEarthAndIsTheHomeStation() {
-        val i = SpawnRules.startStation(system)
-        val st = system.stations[i]
-        assertEquals("MERIDIAN STATION", st.name)
-        assertEquals(index("EARTH"), st.parent)
-        assertEquals(19_800_000.0, dist(st.pos, body("EARTH").pos), 1000.0)
-        // the slot looks towards the planet: a launch flies out with the Earth ahead
-        val port = DVec3()
-        val out = Vec3()
-        SpawnRules.stationPort(st, port, out, Vec3())
-        val e = body("EARTH").pos.relativeTo(st.pos, Vec3()).normalize()
-        assertTrue(out.dot(e) > 0.9f, "the slot faces the Earth: ${out.dot(e)}")
-        assertEquals(6, system.stations.size)
-        assertEquals(StationMesh.radius(st.model).toDouble(), st.radius, 1e-6)
-        // home is in front of the station, in its zone
-        assertTrue(dist(system.home, st.pos) < StarSystem.STATION_ZONE_RADIUS)
+    fun theWorldsWithAirHaveItAndTheirCloudDecks() {
+        for (name in listOf("EARTH", "MARS", "VENUS")) {
+            assertTrue(body(name).airDensity > 0.0, "$name has air")
+            assertTrue(body(name).cloudCover > 0f, "$name has a cloud deck")
+        }
+        for (name in listOf("LUNA", "MERCURY", "IO", "JUPITER", "SOL")) assertEquals(0.0, body(name).airDensity, 0.0, "$name is airless for the flight")
+        assertTrue(body("VENUS").cloudCover > body("EARTH").cloudCover && body("EARTH").cloudCover > body("MARS").cloudCover)
     }
 
     @Test
@@ -182,7 +172,7 @@ class SolWorldTest {
     @Test
     fun theStarBurnsAHullThatComesTooCloseAndTheShipIsRecoveredAtAStation() {
         val s = session()
-        val star = system.bodies[0]
+        val star = system.bodies[system.star]
         s.teleport(star.pos.x + star.radius * 1.05, star.pos.y, star.pos.z, 0f, 0f, -1f, true)
         var lost = false
         var t = 0f
@@ -206,10 +196,10 @@ class SolWorldTest {
 
     @Test
     fun aFreshStartIsDockedAtMeridian() {
-        val s = Session(system, null, Settings(), host, GearRig())
+        val s = Session(system, Settings(), host, GearRig())
         s.startDocked()
         assertTrue(s.mode.docked)
-        assertEquals("MERIDIAN STATION", system.stations[s.dockStation].name)
+        assertEquals("SOL-MERIDIAN", system.stations[s.dockStation].id)
         assertEquals(index("EARTH"), s.here.nearestBody)
     }
 }

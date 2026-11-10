@@ -15,14 +15,21 @@ import org.lwjgl.opengles.GLES20
 
 /**
  * The eight Roblox ships through the real SceneRenderer: each from a 3/4 front and a side view under
- * the same light, far from the field and the stations, from the pilot's seat, and standing on its
- * gear; the VARROW's gear half-way and stowed; then the real Game: the cockpit, external and chase
- * views in flight, gear down in flight, the menu backdrop for every ship (cycled with "ship"), and
- * every hull docking in both stand-in stations' slots. [holograms] shows the holograms aboard.
+ * the same light, far from the stations, from the pilot's seat, and standing on its gear; the
+ * VARROW's gear half-way and stowed; then the real Game: the cockpit, external and chase views in
+ * flight, gear down in flight, the menu backdrop for every ship (cycled with "ship"), and every hull
+ * docking in both stand-in stations' slots (MERIDIAN's ring station, TRANQUILITY's outpost).
+ * [holograms] shows the holograms aboard.
  */
 object ShipsScenario {
-    /** 40 km behind the start (the field and the home station are not drawn), the gas giant ahead. */
+    /** 40 km on from the free-flight spawn off MERIDIAN (the station is not drawn), Earth in the sky. */
     private val shipCentre = DVec3()
+
+    /** 4 km up and 40 km on from MERIDIAN's free-flight spawn: far from every station. */
+    private fun farFromStations(system: com.starwake.core.game.StarSystem, out: DVec3): DVec3 {
+        system.spaceSpawn(0, out, com.starwake.core.math.Quat())
+        return out.set(out.x, out.y + 4000.0, out.z + 40_000.0)
+    }
 
     fun run(env: ScenarioEnv) {
         showcase(env)
@@ -38,8 +45,7 @@ object ShipsScenario {
             val h = opts.height
             val platform = DesktopPlatform(opts.assetsDir)
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
-            val home = content.system.home
-            shipCentre.set(home.x, home.y + 4000.0, home.z + 40_000.0)
+            farFromStations(content.system, shipCentre)
             val scene = SceneRenderer(gl, content, 2)
             val f = SceneFrame()
             val ship = ShipState()
@@ -49,7 +55,6 @@ object ShipsScenario {
             f.quality = 2
             f.pxScale = h / 1080f
             f.dustIntensity = 0f
-            f.drawField = false
             ship.engineOutput = 0.55f
             val centre = Vec3()
             var frame = 0L
@@ -143,7 +148,7 @@ object ShipsScenario {
             val h = opts.height
             val platform = DesktopPlatform(opts.assetsDir)
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
-            val home = content.system.home
+            val home = farFromStations(content.system, DVec3())
             val scene = SceneRenderer(s.gl, content, 2)
             val f = SceneFrame()
             val ship = ShipState()
@@ -153,10 +158,9 @@ object ShipsScenario {
             f.quality = 2
             f.pxScale = h / 1080f
             f.dustIntensity = 0f
-            f.drawField = false
             f.shipView = ShipModel.VIEW_EXTERIOR
             ship.engineOutput = 0.3f
-            ship.pos.set(home.x, home.y + 4000.0, home.z + 40_000.0)
+            ship.pos.set(home)
             ship.rot.identity()
             val cam = f.camera
             cam.fovY = 60f * DEG2RAD
@@ -254,7 +258,7 @@ object ShipsScenario {
     private fun inGame(env: ScenarioEnv) {
         GlSession(env).use { session ->
             val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
-            val game = Game(platform, com.starwake.core.game.StarSystem.Layout.RANGE)
+            val game = Game(platform)
             val d = GameDriver(game, session.gl, session, platform, env.report, env.opts, env.opts.insets)
             d.start()
             d.frames(90)
@@ -302,7 +306,7 @@ object ShipsScenario {
                 d.shot("ships-menu-$id")
             }
             // every hull docks in both stand-in slots, as every Roblox hangar takes every ship: lined
-            // up 20 m in front of OUTPOST II's slot (the smaller one) and HOME STATION's, it slides in,
+            // up 20 m in front of TRANQUILITY's outpost slot (the smaller one) and MERIDIAN's, it slides in,
             // parks with its centre on the slot axis and launches clear (the route, the slot and the
             // launch place the hull's centre, not the pilot's eye at the ship's origin). Auto-dock
             // flies without collision, so the probe gap to the station must stay open all the way.
@@ -337,7 +341,7 @@ object ShipsScenario {
                 return minHull
             }
             var tightest = Float.MAX_VALUE
-            for ((station, where) in listOf(1 to "OUTPOST II", 0 to "HOME STATION")) {
+            for ((station, where) in listOf(1 to "TRANQUILITY YARDS", 0 to "MERIDIAN STATION")) {
                 for (e in ShipCatalog.all) {
                     fly(e.id)
                     d.cmd("docked=$station")
@@ -353,20 +357,20 @@ object ShipsScenario {
                 }
             }
             d.log("docking: the closest any hull came to a station on the slide-in is %.1f m".format(tightest))
-            // the biggest hull flies the whole route into OUTPOST II: from 1.5 km behind it, round the
-            // outpost to the stand-off in front of the slot, then in
+            // the biggest hull flies the whole route into TRANQUILITY's outpost: from 1.5 km behind it,
+            // round the outpost to the stand-off in front of the slot, then in
             fly("morven")
             d.cmd("behind-station=1")
             d.frames(2)
             d.cmd("dock=1")
             d.frames(1)
-            check(game.debugInfo.contains("docking=true")) { "auto-dock refused the MORVEN at OUTPOST II: ${game.debugInfo}" }
-            val route = untilDocked("MORVEN from behind OUTPOST II", 60 * 120, 400, "ships-route-morven")
-            check(route > MIN_DOCK_GAP) { "the MORVEN's route came within $route m of OUTPOST II (collision is off while docking)" }
+            check(game.debugInfo.contains("docking=true")) { "auto-dock refused the MORVEN at TRANQUILITY: ${game.debugInfo}" }
+            val route = untilDocked("MORVEN from behind TRANQUILITY", 60 * 120, 400, "ships-route-morven")
+            check(route > MIN_DOCK_GAP) { "the MORVEN's route came within $route m of TRANQUILITY (collision is off while docking)" }
             d.shot("ships-route-morven-docked")
             game.launchFromStation()
             d.frames(2)
-            check(hull() > 10f) { "MORVEN launched into OUTPOST II: ${game.debugInfo}" }
+            check(hull() > 10f) { "MORVEN launched into TRANQUILITY: ${game.debugInfo}" }
             d.cmd("menu")
             d.frames(5)
             d.cmd("ship=varrow")

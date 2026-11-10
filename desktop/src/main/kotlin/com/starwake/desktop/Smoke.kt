@@ -4,12 +4,15 @@ import com.starwake.core.content.Content
 import com.starwake.core.content.ShipModel
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.ShipState
+import com.starwake.core.game.SpawnRules
 import com.starwake.core.gfx.GL
 import com.starwake.core.gfx.Gl
 import com.starwake.core.gfx.SceneFrame
 import com.starwake.core.gfx.SceneRenderer
 import com.starwake.core.gfx.Shaders
 import com.starwake.core.gfx.UiRenderer
+import com.starwake.core.math.DVec3
+import com.starwake.core.math.Quat
 import org.lwjgl.opengles.GLES20
 import kotlin.math.cos
 import kotlin.math.sin
@@ -17,15 +20,16 @@ import kotlin.math.sin
 /**
  * Validates the GL layer and every shader without going through [com.starwake.core.Game]:
  * compiles each shader source on its own (so all compile errors show up at once), then builds the
- * real SceneRenderer + UiRenderer and renders an orbiting view of a ship at the origin.
+ * real SceneRenderer + UiRenderer and renders an orbiting view of a ship at MERIDIAN's free-flight
+ * spawn (Sol: the origin is inside the Sun).
  */
 object Smoke {
     private class View(val name: String, val yaw: Float, val pitch: Float, val distance: Float, val engine: Float)
 
     private val views = listOf(
-        // from behind-left, looking past the ship towards the gas giant
+        // from behind-left, looking past the ship
         View("smoke", -0.80f, 0.20f, 27f, 0.8f),
-        // front three-quarter view, the sun is in the background
+        // front three-quarter view
         View("smoke-front", 2.55f, 0.16f, 25f, 0.25f),
     )
 
@@ -43,7 +47,10 @@ object Smoke {
             val platform = DesktopPlatform(opts.assetsDir)
             var t0 = System.nanoTime()
             val content = Content(String(platform.readAsset("font/ui.fnt"), Charsets.UTF_8), platform.readAsset("font/ui.sdf"))
-            r.note("Content (meshes, asteroid field, stars, font) built in %.0f ms".format((System.nanoTime() - t0) / 1e6))
+            r.note("Content (Sol, station meshes, stars, dust, debris rock, font) built in %.0f ms".format((System.nanoTime() - t0) / 1e6))
+            // the scene's centre: MERIDIAN's free-flight spawn, 13,440 km above Earth
+            val anchor = DVec3()
+            content.system.spaceSpawn(SpawnRules.startStation(content.system), anchor, Quat())
 
             t0 = System.nanoTime()
             val scene = SceneRenderer(gl, content, 2)
@@ -64,8 +71,8 @@ object Smoke {
 
             val f = SceneFrame()
             val ship = ShipState()
-            // the hull's centre at the origin, which the camera circles
-            ship.pos.set(-model.centreX.toDouble(), -model.centreY.toDouble(), -model.centreZ.toDouble())
+            // the hull's centre at the anchor, which the camera circles
+            ship.pos.set(anchor.x - model.centreX, anchor.y - model.centreY, anchor.z - model.centreZ)
             f.ship = ship
             f.gear = rig
             f.shipReach = model.radius * 4f
@@ -80,7 +87,7 @@ object Smoke {
                 for (i in 0 until 4) {
                     frame++
                     f.time = frame / 60f
-                    orbit(f, v.yaw + i * 0.004f, v.pitch, v.distance * model.radius / 8f)
+                    orbit(f, anchor, v.yaw + i * 0.004f, v.pitch, v.distance * model.radius / 8f)
                     f.camera.update(w, h)
                     val t = System.nanoTime()
                     scene.render(f)
@@ -103,13 +110,13 @@ object Smoke {
         }
     }
 
-    /** Camera orbiting the origin, like the menu's OrbitCamera. */
-    private fun orbit(f: SceneFrame, yaw: Float, pitch: Float, dist: Float) {
+    /** Camera orbiting [centre], like the menu's OrbitCamera. */
+    private fun orbit(f: SceneFrame, centre: DVec3, yaw: Float, pitch: Float, dist: Float) {
         val cp = cos(pitch)
         val ox = sin(yaw) * cp * dist
         val oy = sin(pitch) * dist
         val oz = cos(yaw) * cp * dist
-        f.camera.pos.set(ox.toDouble(), oy.toDouble(), oz.toDouble())
+        f.camera.pos.set(centre.x + ox, centre.y + oy, centre.z + oz)
         f.camera.rot.lookRotation(-ox, -oy, -oz, 0f, 1f, 0f)
     }
 

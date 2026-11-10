@@ -123,8 +123,12 @@ revisited.
 
 ## Assets that cannot ship
 
-31. **Audio:** Roblox-library sounds cannot ship. The port uses synthesised or CC0 stand-ins with
-    the same roles, gains and triggers. Voice lines are text toasts until recordings exist.
+31. **Audio** (amended by the audio port, 09 milestones 1-3; details in 36-40): Roblox-library and
+    Roblox-hosted sounds cannot ship. Every sound effect and every piece of music is an original
+    procedural work made by the scripts in `tools/audio` (36, 37), with the Roblox roles, gains and
+    triggers kept. Voice lines are spoken: the user's own recordings when they exist, else the
+    phone's text-to-speech (38). The welcome lines also keep their text on the message line until
+    the HUD and notices ports replace it.
 32. **Fonts:** bundle free OFL fonts as needed (Michroma, Sarpanch, Titillium Web, Roboto Mono,
     Oswald, Montserrat for GothamSSm, Source Sans Pro, Nunito).
 33. **Icons:** vector shapes drawn in code, not the uploaded PNGs.
@@ -132,53 +136,115 @@ revisited.
 35. Fix obvious Roblox bugs in the port (silent crash debris, unreachable "request received"
     line, the stations-only collision alert gets its intended NPC check).
 
-## Sol milestone: what the build does today
+## Sound (09 Q1-Q4, decided by the audio port)
+
+36. **Sound effects** (09 Q3, Q4): every sound of Appendix A.1 (the six flight layers), A.2 (the
+    cues, hits and the warp loop) and the warning alarms (Phase1, which is also the WARNING voice
+    tone; Phase2; the overheat loop) is an **original procedural synthesis** made offline by
+    `tools/audio/synth_sfx.py` (numpy/scipy, fixed seeds, no downloads), matching each described
+    band, length, envelope, attack and tail. Loops are built from exactly periodic material and are
+    stored with 0.128 s of their own wrap-around on both ends, which every loader cuts
+    (`SoundBank.loopPadded`), so they wrap without a click. Mono 32 kHz OGG Vorbis q5 in
+    `assets/audio/sfx/`. Each file is mastered so that its Roblox gain gives the intended balance, so
+    the mixer runs at headroom 1.0 with a soft-knee limiter (ceiling -0.18 dBFS). The target is a
+    phone, whose own speaker gives little below 300-400 Hz: the engine hum's harmonics reach 2 kHz
+    (with its turbine whine and intake air), the touchdown has the skids' metal and a gear rattle and
+    the cruise disengage hit a crack and a clang at 0.5-3 kHz, so the hum follows the lever and both
+    cues are heard there too; the Cruise layer and the hull rumble stay sub-bass as described.
+    `tools/audio/check_audio.py` verifies every file of the inventory (present, format, length,
+    loudness, peak, seamless loops, and for the engine, thrust, RCS, touchdown and cruise disengage at
+    most 10-12 dB lost through a 400 Hz small-speaker high-pass). Deck sounds (A.4) are out of scope
+    for now.
+37. **Music** (09 Q2): **original procedural ambient pieces** by `tools/audio/compose_music.py`,
+    slowly evolving pads, drones and sparse melodic material (seeded random walks, no existing tune):
+    the menu music (D Lydian, 66 BPM, loops seamlessly) and the playlist Deep Space (B-flat Aeolian,
+    52 BPM), Long Haul (F Lydian, 72 BPM) and Meridian Lights (E Mixolydian, 84 BPM); Sol Standard I
+    and II stay absent, as in Roblox. 44.1 kHz stereo OGG, 2.4-3.6 min each, mastered so that the
+    Roblox playlist gains give equal playback loudness (Deep Space -14 LUFS). All audio assets
+    together 8.2 MB.
+38. **Voice** (09 Q1): the user's own dry recordings at `assets/audio/voice/<Key>.ogg` are used when
+    they exist (drop-in, nothing else changes). Until then, on Android the **device's text-to-speech**
+    speaks the Appendix A.5 texts (AutopilotNoTarget included): an explicit English locale (en-US,
+    else en-GB, else any installed offline English voice; never the phone's own language),
+    synthesizeToFile once per line on a background thread at the first launch, then the Computer or
+    Control chain of 8.4 in Kotlin DSP (`VoiceFx`: 3-band EQ, flanger, distortion, gain) and loudness
+    normalisation (-22 LUFS, peak -1 dBFS), cached in app storage under text + engine + voice + chain
+    version, so it is redone only when one of them changes. No engine or no English voice: the lines
+    stay silent and the game does not care. Desktop: no text-to-speech; a line is silence of its
+    length, logged by the recording output. The queue rules of 09 2.13 apply whatever the source.
+    "Docking computer engaged" speaks as "Auto-dock engaged" (30).
+39. **Audio stand-ins until the flight, world, docking and notices ports land** (`SessionAudio`
+    marks each one): forward acceleration from the change of velocity along the nose; the rotation
+    and roll amounts from the pre-port stick commands; `cruising` = Flight Assist on, not boosting, not
+    controlled, above 1.02 x the hull's top speed and where the speed limit allows more than that (near
+    a station the pre-port limit is the top speed itself, so a boost dying away there is no cruise, as
+    Roblox's station speed brake never lets it become one); the boost cooldown from the pre-port boost timer
+    and capacitor; the docking state from the auto-dock (AUTO, a 1.6 s CLAMPING, DOCKED, a 2 s
+    LAUNCHING); the gravity well within 3 radii of the nearest body; the station lock = the station
+    zone; the pre-port message line for the comms (Roblox prefixes, plus "DOCKING GRANTED" and
+    "LAUNCHED"). Callout blocks without a source stay off: speed (no raw speed limit yet), collision
+    (no `timeToContact`), landing (no terrain altitude query), atmosphere, warp, heat, fuel, scoop,
+    G-load, survey, mining. Traffic control's "Request received. Stand by." comes 0.8 s into a
+    request (35).
+40. **Volumes and pause:** MASTER, EFFECTS and MUSIC volumes (0-1, 5 % steps) and MUSIC on/off are
+    saved with the settings (`vol`, `fx`, `mus`, `music`); MUSIC and EFFECTS are sliders in
+    SETTINGS, MUSIC ON/OFF is in the pause menu (21b). The pause menu holds the ship's sound and the
+    announcer where they are (they continue on resume), each hold and release a one-burst fade so
+    neither clicks; the music plays on, as Roblox's Heartbeat music does. Leaving the app opens the
+    pause menu and holds the ship and the announcer at once, before the output stops (the activity
+    runs `Game.onBackground` on the GL thread), then holds everything. Audio focus: the music ducks on
+    a duckable transient loss and pauses on any other loss, and stays paused while the request is
+    refused or delayed (a call in progress) until focus comes; the effects and the announcer duck with
+    the music, fall silent while another app needs the sound to itself (a transient loss, a call),
+    and keep playing under another app's music after a lasting loss. The menu music loops gaplessly
+    (two chained players on Android).
+
+## Planet surface milestone: what the build does today (P1-P12)
 
 The user asked for a realistic planet game: real sizes, real physics, seamless entry into the
 Earth, graphics not spared on a strong phone. That request decides the points below; where one
 differs from a decision above, this section wins until the matching port replaces it.
 
-36. **The world is Sol** (`SolData.kt`, decision 1): the Lua's numbers at S = 3000, 18 bodies and
-    the 6 stations, at a **fixed epoch** (decision 6's first step). MERIDIAN hangs at 55° from the
-    Earth → Sun direction instead of the Lua's 90°, so the Earth below it is mostly lit. The
-    stations are still the two stand-in models. The asteroid field is gone from Sol (decision 13).
-37. **The test range stays** as `StarSystem()` (the gas giant, four smooth planets, the asteroid
-    field): the unit tests and the harness scenes written for the flight mechanics keep running
-    on it. `StarSystem.sol()` is the game.
-38. **Gravity is the real one**: 9.81 m/s² per g at the surface, inverse square above it, without
+P1. **The terrain is wired into the world of 03**: the solid body the ship is nearest to (within
+    14 radii of its centre) is the terrain body (`WorldTerrain`); its pose follows the body on its
+    orbit every frame, and the ship rides the body's reference frame, so a landed ship stays put.
+P2. **Air and clouds are data of the body** (`StarSystem.Body.airDensity`, `cloudCover`, ...),
+    set once from its surface profile: the Sol profiles by name, generated worlds by class.
+P3. **Gravity is the real one**: 9.81 m/s² per g at the surface, inverse square above it, without
     the landing scene's 35 % damping (this replaces decision 5 for now). Flight Assist cancels all
     of it (the thrusters hold the ship); with Flight Assist off the ship falls and can orbit.
-39. **Air**: real ground densities and scale heights (Earth 1.225 kg/m³ and 8.5 km, Mars 0.020,
+P4. **Air**: real ground densities and scale heights (Earth 1.225 kg/m³ and 8.5 km, Mars 0.020,
     Venus 65, Titan 5.4), quadratic drag with Cd·A/m = 0.002 m²/kg, no lift. The speed laws are
     the pre-port ones (limit ∝ clearance, floor at the hull's top speed).
-40. **Entry heating** (decision 17d): heat flux ∝ √ρ·v³. The glow follows it over two decades;
+P5. **Entry heating** (decision 17d): heat flux ∝ √ρ·v³. The glow follows it over two decades;
     the skin's temperature follows with a 5 s time constant and costs hull beyond its limit. A
-    full-throttle dive under Flight Assist stays just inside the limit. The star heats a hull
+    Flight Assist holds the speed in air to what keeps the flux at 65 % of the limit, so an
+    assisted entry glows but never burns; without it the pilot can burn the hull. The star heats a hull
     within half a radius of its surface.
-41. **Hull and loss**: ground impacts above 12 m/s cost hull, only on ground that is already
+P6. **Hull and loss**: ground impacts above 12 m/s cost hull, only on ground that is already
     drawn at full detail (04 9.10). At 0 the ship is lost: 3.2 s of black, then a new hull in
     front of the nearest station (`SpawnRules.recoveryPose`). The crash cinematic of `05` is not
     ported. Docking restores the hull.
-42. **Landing** is still the pre-port landing mode (LAND, gear down, touch down slowly), now on
+P7. **Landing** is still the pre-port landing mode (LAND, gear down, touch down slowly), now on
     the real ground: the gear follows slopes up to 22°; steeper ground refuses the touchdown.
-43. **Clouds** (decision 17a): one weather map for every world with air (cover and colour from
+P8. **Clouds** (decision 17a): one weather map for every world with air (cover and colour from
     its surface profile, height = the middle of the profile's deck) plus tiling 3-D noise, shaded
     as one thin deck by the impostor and the terrain alike, with shadows on the ground and fog
     inside the deck. They drift at 12 m/s on the Earth's equator.
-44. **Far looks**: every solid body's image is baked on the device from its terrain functions
+P9. **Far looks**: every solid body's image is baked on the device from its terrain functions
     (decision 17a), 512 × 256 for all of them in the background after the start and 2048 × 1024
     (HIGH) for the terrain body.
 
-45. **Entry visuals**: the shock is a paraboloid shell around the hull (apex ahead of the hull
+P10. **Entry visuals**: the shock is a paraboloid shell around the hull (apex ahead of the hull
     along the flight direction, closed just behind the tail), additive and depth-tested against
     the hull, so the fire is outside the cabin. A fainter screen glow is drawn behind the ship.
     The glow lights the hull and the cabin from the direction of flight.
-46. **ULTRA** is a fourth quality level (terrain ρ 3.2 and 2,400 tile slots, 12 air steps, a
+P11. **ULTRA** is a fourth quality level (terrain ρ 3.2 and 2,400 tile slots, 12 air steps, a
     4096 × 2048 far image, a 512² ground texture, 4 tile workers). GPUs of the Adreno 740 /
     Immortalis-G715 class and newer are moved from HIGH to ULTRA once (`graphicsRev`); after that
     the pilot's choice stands. HIGH and ULTRA shade the ground's detail pattern as relief; the sea
     has six swells, sun glitter and a mirrored sky on every level.
-47. **Sky light**: inside an atmosphere the air's daylight joins the ambient light on the ship
+P12. **Sky light**: inside an atmosphere the air's daylight joins the ambient light on the ship
     and the stations.
 
 ## Optional exports that would improve fidelity

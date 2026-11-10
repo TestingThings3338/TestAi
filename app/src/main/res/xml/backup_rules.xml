@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 11 and lower: back up only the player settings. -->
+<!-- Android 11 and lower: back up the player settings and the saves (profile.json, galaxy.json). -->
 <full-backup-content>
     <include domain="sharedpref" path="space_exploration.xml" />
+    <include domain="file" path="saves/" />
 </full-backup-content>

@@ -4,6 +4,7 @@ import com.starwake.core.Settings
 import com.starwake.core.input.Action
 import com.starwake.core.input.InputFrame
 import com.starwake.core.math.DVec3
+import com.starwake.core.world.WorldBuilder
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -15,12 +16,16 @@ import kotlin.test.assertTrue
  * own steps, the frame a deck session ends returns early (9.4 SessionOrderTest; risk R1 of 10.3).
  */
 class SessionOrderTest {
-    private val system = StarSystem()
+    private val system = WorldBuilder.sol()
     private val host = RecordingHost()
     private val settings = Settings()
     private val input = InputFrame()
 
-    private fun session(): Session = Session(system, null, settings, host, GearRig()).also { it.startInSpace() }
+    /**
+     * A free-flight session in [world] (one world per flight: its save-game clock runs with the
+     * session's frames, so two sessions flown side by side need a world each).
+     */
+    private fun session(world: StarSystem = system): Session = Session(world, settings, host, GearRig()).also { it.startInSpace() }
 
     private fun traced(s: Session, dt: Float = 1f / 60f): List<FrameStep> {
         val t = FrameTrace()
@@ -123,9 +128,9 @@ class SessionOrderTest {
 
     @Test
     fun tracingDoesNotChangeTheFrame() {
-        // two sessions, one traced: identical flights
-        val a = session()
-        val b = session()
+        // two sessions, one traced: identical flights (each in its own world: the orbits move)
+        val a = session(WorldBuilder.sol())
+        val b = session(WorldBuilder.sol())
         for (i in 0 until 120) {
             input.begin()
             a.frame(1f / 60f, input)
@@ -141,12 +146,17 @@ class SessionOrderTest {
         // the game never calls frame() under PAUSE/SETTINGS; under MAP and SERVICES it does, and the ship flies on
         val s = session()
         s.mode.overlay = Overlay.MAP
-        val z0 = s.ship.pos.z
+        // measured in the ship's reference frame (Earth's: the planet carries the ship along)
+        val p0 = s.framePosition(DVec3())
         for (i in 0 until 180) {
             input.begin()
             s.frame(1f / 60f, input)
         }
-        val travelled = z0 - s.ship.pos.z
+        val p1 = s.framePosition(DVec3())
+        val dx = p1.x - p0.x
+        val dy = p1.y - p0.y
+        val dz = p1.z - p0.z
+        val travelled = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
         assertTrue(travelled > 0.3f * s.spec.maxSpeed * 2.5f, "flew $travelled m in 3 s under the map")
     }
 
@@ -241,7 +251,7 @@ class SessionOrderTest {
         val d1 = s.targetDistance(s.lockKind, s.lockIndex)
         s.cycleTarget()
         assertTrue(first != (s.lockKind to s.lockIndex), "the next target")
-        if (first.first != Session.LOCK_ASTEROID) assertTrue(s.targetDistance(s.lockKind, s.lockIndex) >= d1)
+        assertTrue(s.targetDistance(s.lockKind, s.lockIndex) >= d1)
         // cycling through everything comes back round
         val seen = HashSet<Pair<Int, Int>>()
         repeat(system.stations.size + system.bodies.size + 2) {

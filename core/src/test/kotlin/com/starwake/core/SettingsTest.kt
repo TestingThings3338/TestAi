@@ -70,8 +70,19 @@ class SettingsTest {
     @Test
     fun serializedFormIsCompactKeyValuePairs() {
         val text = Settings().serialize()
-        assertEquals("q=2;fps=1;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;ship=0;fov=80;shake=1;chase=0;rev=0", text)
+        assertEquals("q=2;fps=1;roll=1;climb=1;sens=1.0;left=0;hap=1;showfps=0;ship=0;fov=80;shake=1;chase=0;vol=1;fx=1;mus=1;music=1;rev=0", text)
         assertTrue(!text.contains(' ') && !text.contains('\n'))
+    }
+
+    @Test
+    fun theSoundSettingsRoundTripAndSnapLikeTheRobloxSliders() {
+        val a = Settings().apply { masterVolume = 0.7f; effectsVolume = 0.33f; musicVolume = 0f; musicOn = false }
+        assertEquals(0.35f, a.effectsVolume, "5 % steps (ShipSettings EffectsVolume)")
+        val b = Settings().apply { deserialize(a.serialize()) }
+        assertEquals(listOf(0.7f, 0.35f, 0f, false), listOf(b.masterVolume, b.effectsVolume, b.musicVolume, b.musicOn))
+        // old saves without the keys keep the defaults; junk is ignored
+        val c = Settings().apply { deserialize("q=1;vol=loud;fx=NaN;mus=2;music=x") }
+        assertEquals(listOf(1f, 1f, 1f, false), listOf(c.masterVolume, c.effectsVolume, c.musicVolume, c.musicOn))
     }
 
     @Test

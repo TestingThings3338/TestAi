@@ -1,6 +1,8 @@
 package com.starwake.core.gfx
 
 import com.starwake.core.game.StarSystem
+import com.starwake.core.world.Palettes
+import com.starwake.core.world.RingProfiles
 import com.starwake.core.math.Mat4
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Rng
@@ -66,11 +68,12 @@ class BodyRenderer(
     private val config = configKey(quality)
     private val atmoSteps = atmoSteps(quality)
     private val texW = bakeWidth(quality)
-    private val texH = texW / 2
+
+    /** Surface texture per body and its height (texels): the big planets get the full bake size, moons half, the tiny ones a quarter. */
     private val textures = IntArray(count)
 
-    /** Texture height per body (bakes are texH; [setSurfaceTexture] may supply another size). */
-    private val texHeights = IntArray(count) { texH }
+    /** Texture height per body: the bake's own height ([bakeHeight]); [setSurfaceTexture] may supply another size. */
+    private val texHeights = IntArray(count) { bakeHeight(texW, bodies[it].radius) }
 
     /** Bodies whose surface the terrain draws: the impostor keeps its sky and limb only. */
     private val surfaceCore = FloatArray(count)
@@ -79,9 +82,24 @@ class BodyRenderer(
     private val procDetail = FloatArray(count) { 1f }
     private val seeds = FloatArray(count * 4)
 
-    /** Distance and angular radius of the star from the home position: reference for light falloff and glare. */
+    /** Ring opacity profiles (128 x 1, mipmapped) and linear ring colours of the ringed bodies. */
+    private val ringTex = IntArray(count)
+    private val ringColor = FloatArray(count * 3)
+
+    /** Per body this frame: the occluder's camera-relative centre and radius in its own radii (w = 0: none). */
+    private val occ = FloatArray(count * 4)
+
+    /** Distance and angular radius of the star from the home planet's orbit: reference for light falloff and glare. */
     private val refDistance: Double
     private val refStarAngle: Double
+
+    /** The star's data colours (0..1): the disc and the corona. */
+    private val discR: Float
+    private val discG: Float
+    private val discB: Float
+    private val coronaR: Float
+    private val coronaG: Float
+    private val coronaB: Float
 
     private val planetProg = BodyProgram(gl, "bodyPlanet", BodyShaders.planetFs(atmoSteps, detailOctaves(quality)))
     private val ringProg = BodyProgram(gl, "bodyRing", BodyShaders.ringFs)
@@ -114,12 +132,16 @@ class BodyRenderer(
     private val pCloud = planetProg.p.u("u_cloud")
     private val pCloudCol = planetProg.p.u("u_cloudCol")
     private val pCloudGeo = planetProg.p.u("u_cloudGeo")
+    private val pRingTex = planetProg.p.u("u_ringTex")
+    private val pOcc = planetProg.p.u("u_occ")
 
     private val rToBody = ringProg.p.u("u_toBody")
     private val rSunBody = ringProg.p.u("u_sunBody")
     private val rSunColor = ringProg.p.u("u_sunColor")
     private val rSunAng = ringProg.p.u("u_sunAng")
     private val rRing = ringProg.p.u("u_ring")
+    private val rRingTex = ringProg.p.u("u_ringTex")
+    private val rRingColor = ringProg.p.u("u_ringColor")
 
     private val sColor = starProg.p.u("u_color")
     private val gGlow = glowProg.p.u("u_glow")
@@ -166,13 +188,17 @@ class BodyRenderer(
     private var starDrawn = true
 
     init {
-        val home = system.home
+        val disc = if (star >= 0) bodies[star].colour else 0xFFFFFF
+        val corona = if (star >= 0) bodies[star].corona else 0xFFBE6E
+        // the data colours are sRGB; the shaders light in linear and gamma-encode in the tonemap
+        discR = srgbToLinear((disc shr 16) and 0xFF)
+        discG = srgbToLinear((disc shr 8) and 0xFF)
+        discB = srgbToLinear(disc and 0xFF)
+        coronaR = srgbToLinear((corona shr 16) and 0xFF)
+        coronaG = srgbToLinear((corona shr 8) and 0xFF)
+        coronaB = srgbToLinear(corona and 0xFF)
         if (star >= 0) {
-            val s = bodies[star].pos
-            val dx = home.x - s.x
-            val dy = home.y - s.y
-            val dz = home.z - s.z
-            refDistance = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(bodies[star].radius * 2.0)
+            refDistance = system.lightReferenceDistance.coerceAtLeast(bodies[star].radius * 2.0)
             refStarAngle = asin(bodies[star].radius / refDistance)
         } else {
             refDistance = 1.0
@@ -186,6 +212,14 @@ class BodyRenderer(
             seeds[i * 4 + 3] = rng.nextFloat()
         }
         bake()
+        for (i in 0 until count) {
+            val b = bodies[i]
+            if (!b.hasRings || b.ringProfile < 0) continue
+            ringTex[i] = profileTexture(RingProfiles.values[b.ringProfile])
+            ringColor[i * 3] = srgbToLinear((b.ringColour shr 16) and 0xFF)
+            ringColor[i * 3 + 1] = srgbToLinear((b.ringColour shr 8) and 0xFF)
+            ringColor[i * 3 + 2] = srgbToLinear(b.ringColour and 0xFF)
+        }
     }
 
     /**
@@ -310,6 +344,7 @@ class BodyRenderer(
             order[i] = i
         }
         BodyMath.sortFarToNear(order, dist, count)
+        findOccluders()
         starView()
         fade = skyAlphaAtCamera(exposure)
         // under an opaque sky the planet shader draws the star (and its glare) on its own
@@ -344,7 +379,7 @@ class BodyRenderer(
         val scR = SUN_COLOR_R * sunScale
         val scG = SUN_COLOR_G * sunScale
         val scB = SUN_COLOR_B * sunScale
-        val ringed = b.hasRings && b.ringOuter > b.ringInner
+        val ringed = b.hasRings && b.ringOuter > b.ringInner && ringTex[i] != 0
         val ringIn = (b.ringInner / b.radius).toFloat()
         val ringOut = (b.ringOuter / b.radius).toFloat()
 
@@ -367,15 +402,20 @@ class BodyRenderer(
             gl.uniform1f(pTexScale, (texHeights[i] / PI).toFloat())
             gl.uniform1f(pNoSurface, surfaceCore[i])
             gl.uniform1f(pProcDetail, procDetail[i])
+            gl.activeTexture(GL.TEXTURE1)
+            gl.bindTexture(GL.TEXTURE_2D, ringTex[i]) // only sampled when ringed
+            gl.uniform1i(pRingTex, 1)
+            gl.uniform4f(pOcc, occ[i * 4], occ[i * 4 + 1], occ[i * 4 + 2], occ[i * 4 + 3])
+            gl.activeTexture(GL.TEXTURE0)
             // the cloud deck (its samplers always need their own units, deck or not)
             deckFor(i, time, deck)
-            gl.activeTexture(GL.TEXTURE0 + 1)
-            gl.bindTexture(GL.TEXTURE_2D, clouds.map)
             gl.activeTexture(GL.TEXTURE0 + 2)
+            gl.bindTexture(GL.TEXTURE_2D, clouds.map)
+            gl.activeTexture(GL.TEXTURE0 + 3)
             gl.bindTexture(GL.TEXTURE_3D, clouds.noise)
             gl.activeTexture(GL.TEXTURE0)
-            gl.uniform1i(pCloudMap, 1)
-            gl.uniform1i(pCloudNoise, 2)
+            gl.uniform1i(pCloudMap, 2)
+            gl.uniform1i(pCloudNoise, 3)
             if (deck.on) {
                 cloudMatrix(b.rot, deck.angle, toCloud, axis)
                 gl.uniformMatrix4fv(pToCloud, toCloud, 0)
@@ -392,8 +432,7 @@ class BodyRenderer(
             gl.uniform3f(pGlareColor, GLOW_R * starIntensity, GLOW_G * starIntensity, GLOW_B * starIntensity)
             gl.uniform1f(pStarBehind, if (inside && !starDrawn) 0f else 1f)
             if (star >= 0) {
-                val ca = bodies[star].atmo
-                gl.uniform3f(pCoronaColor, ca[0] * starIntensity, ca[1] * starIntensity, ca[2] * starIntensity)
+                gl.uniform3f(pCoronaColor, coronaR * starIntensity, coronaG * starIntensity, coronaB * starIntensity)
             } else {
                 gl.uniform3f(pCoronaColor, 0f, 0f, 0f)
             }
@@ -410,6 +449,11 @@ class BodyRenderer(
                 gl.uniform3f(rSunColor, scR, scG, scB)
                 gl.uniform1f(rSunAng, sunAng)
                 gl.uniform4f(rRing, ringIn, ringOut, 1f, 0f)
+                gl.uniform3f(rRingColor, ringColor[i * 3], ringColor[i * 3 + 1], ringColor[i * 3 + 2])
+                gl.activeTexture(GL.TEXTURE1)
+                gl.bindTexture(GL.TEXTURE_2D, ringTex[i])
+                gl.uniform1i(rRingTex, 1)
+                gl.activeTexture(GL.TEXTURE0)
                 drawCoverage()
             }
         }
@@ -448,9 +492,8 @@ class BodyRenderer(
         betaR = br * br
         betaG = bg * bg
         betaB = bb * bb
-        // lava worlds: keep the haze thin so the dark crust and the glow read
-        val haze = if (type[i] == BodyShaders.T_LAVA) 0.4f else 1f
-        atmoK = (atmoThick * 4f).coerceIn(0.02f, 0.15f) * haze
+        // the air's ground optical depth is data (the limb's height is absolute, DECISIONS 17b)
+        atmoK = b.atmoDepth
     }
 
     /**
@@ -516,16 +559,17 @@ class BodyRenderer(
         val glare = max(imp.trueAngle, GLARE_MIN_PX * pxAngle)
         val fadeOut = glowFadeOut(disc, glare)
         val intensity = sqrt(imp.trueAngle / refStarAngle).toFloat().coerceIn(0.6f, 1.4f)
-        val a = b.atmo
         if (coverage(glowProg, c, fadeOut, inside, exposure)) {
             gl.uniform4f(gGlow, disc.toFloat(), glare.toFloat(), intensity, fadeOut.toFloat())
             gl.uniform3f(gColor, GLOW_R, GLOW_G, GLOW_B)
-            gl.uniform3f(gCorona, a[0], a[1], a[2])
+            // the data corona colour (Sol 255,190,110), Roblox's ForceField corona sphere
+            gl.uniform3f(gCorona, coronaR, coronaG, coronaB)
             drawCoverage()
         }
         val angle = if (inside) PI else disc + MARGIN_PX * pxAngle
         if (coverage(starProg, c, angle, inside, exposure)) {
-            gl.uniform3f(sColor, STAR_INTENSITY, STAR_INTENSITY, STAR_INTENSITY)
+            // the data disc colour (Sol 255,246,224), Roblox's Neon star
+            gl.uniform3f(sColor, STAR_INTENSITY * discR, STAR_INTENSITY * discG, STAR_INTENSITY * discB)
             drawCoverage()
         }
     }
@@ -596,12 +640,18 @@ class BodyRenderer(
 
     // ------------------------------------------------------------------ one-time bakes
 
+    /**
+     * Bakes every body's equirect surface texture with its look ([BodyLooksShader]): the recipe,
+     * the body's data colour and its class palette (`ShipPalettes.colours`), linear.
+     */
     private fun bake() {
         val prog = ShaderProgram(gl, "bodyBake", BodyShaders.bakeVs, BodyShaders.bakeFs)
-        val uType = prog.u("u_type")
+        val uLook = prog.u("u_look")
         val uSeed = prog.u("u_seed")
+        val uPal = prog.u("u_pal")
+        val uAir = prog.u("u_air")
         val uRect = prog.u("u_rect")
-        val uTint = prog.u("u_tint")
+        val pal = FloatArray(32)
         val fbo = gl.genFramebuffer()
         gl.bindFramebuffer(GL.FRAMEBUFFER, fbo)
         gl.disable(GL.DEPTH_TEST)
@@ -610,9 +660,12 @@ class BodyRenderer(
         prog.use()
         for (i in 0 until count) {
             if (type[i] == T_STAR) continue
+            val b = bodies[i]
+            val th = texHeights[i]
+            val tw = th * 2
             val tex = gl.genTexture()
             gl.bindTexture(GL.TEXTURE_2D, tex)
-            gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, texW, texH, GL.RGBA, GL.UNSIGNED_BYTE, null)
+            gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA8, tw, th, GL.RGBA, GL.UNSIGNED_BYTE, null)
             // mipmapped, but the shader picks the LOD itself (textureLod): derivative-based LOD would
             // jump to the smallest mip along the atan() seam
             gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_LINEAR)
@@ -622,15 +675,17 @@ class BodyRenderer(
             gl.framebufferTexture2D(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, tex, 0)
             val status = gl.checkFramebufferStatus(GL.FRAMEBUFFER)
             check(status == GL.FRAMEBUFFER_COMPLETE) { "body bake framebuffer incomplete: 0x${status.toString(16)}" }
-            gl.uniform1i(uType, type[i])
+            gl.uniform1i(uLook, b.look)
             gl.uniform4f(uSeed, seeds[i * 4], seeds[i * 4 + 1], seeds[i * 4 + 2], seeds[i * 4 + 3])
-            val tint = bodies[i].tint
-            if (tint != null) gl.uniform4f(uTint, tint[0] * tint[0], tint[1] * tint[1], tint[2] * tint[2], 0.85f) else gl.uniform4f(uTint, 0f, 0f, 0f, 0f)
+            palette(b, pal)
+            gl.uniform4fv(uPal, 8, pal, 0)
+            val air = if (b.atmosphereColour != 0) b.atmosphereColour else b.colour
+            gl.uniform4f(uAir, srgbToLinear((air shr 16) and 0xFF), srgbToLinear((air shr 8) and 0xFF), srgbToLinear(air and 0xFF), 1f)
             for (s in 0 until BAKE_STRIPS) {
-                val y0 = s * texH / BAKE_STRIPS
-                val y1 = (s + 1) * texH / BAKE_STRIPS
-                gl.viewport(0, y0, texW, y1 - y0)
-                gl.uniform2f(uRect, y0.toFloat() / texH, (y1 - y0).toFloat() / texH)
+                val y0 = s * th / BAKE_STRIPS
+                val y1 = (s + 1) * th / BAKE_STRIPS
+                gl.viewport(0, y0, tw, y1 - y0)
+                gl.uniform2f(uRect, y0.toFloat() / th, (y1 - y0).toFloat() / th)
                 fullscreen.draw()
             }
             gl.framebufferTexture2D(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 0, 0)
@@ -643,6 +698,68 @@ class BodyRenderer(
         prog.dispose()
     }
 
+    /** One ring's opacity profile as a 128 x 1 R8 texture with its mip chain. */
+    private fun profileTexture(values: FloatArray): Int {
+        val n = values.size
+        val buf = java.nio.ByteBuffer.allocateDirect(n).order(java.nio.ByteOrder.nativeOrder())
+        for (v in values) buf.put((v.coerceIn(0f, 1f) * 255f + 0.5f).toInt().toByte())
+        buf.flip()
+        val tex = gl.genTexture()
+        gl.bindTexture(GL.TEXTURE_2D, tex)
+        gl.pixelStorei(GL.UNPACK_ALIGNMENT, 1)
+        gl.texImage2D(GL.TEXTURE_2D, 0, GL.R8, n, 1, GL.RED, GL.UNSIGNED_BYTE, buf)
+        gl.pixelStorei(GL.UNPACK_ALIGNMENT, 4)
+        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_LINEAR)
+        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR)
+        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE)
+        gl.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE)
+        gl.generateMipmap(GL.TEXTURE_2D)
+        return tex
+    }
+
+    /**
+     * The occluder of every body this frame (03-world.md 2.10: centre-distance sorting alone lets a
+     * small body behind a big body's limb show through it): the biggest body drawn before it (its
+     * centre is farther) whose disc overlaps its disc and whose near surface is nearer than its
+     * centre. Written in the body's own radii, camera-relative, into [occ]. O(n²) over ~18 bodies.
+     */
+    private fun findOccluders() {
+        for (k in 0 until count) {
+            val i = order[k]
+            val o = i * 4
+            occ[o + 3] = 0f
+            if (type[i] == T_STAR) continue
+            val ri = bodies[i].radius
+            val di = dist[i]
+            if (di <= ri) continue
+            val sinI = ri / di
+            val cosI = sqrt(1.0 - sinI * sinI)
+            var best = -1
+            var bestSin = 0.0
+            for (m in 0 until k) {
+                val j = order[m]
+                if (type[j] == T_STAR) continue
+                val rj = bodies[j].radius
+                val dj = dist[j]
+                if (dj <= rj || dj - rj >= di) continue
+                val sinJ = rj / dj
+                if (sinJ <= sinI || sinJ <= bestSin) continue
+                // overlap: the angle between the centres is below the sum of the angular radii
+                val cosSep = (relX[i] * relX[j] + relY[i] * relY[j] + relZ[i] * relZ[j]) / (di * dj)
+                val cosJ = sqrt(1.0 - sinJ * sinJ)
+                if (cosSep <= cosI * cosJ - sinI * sinJ) continue
+                best = j
+                bestSin = sinJ
+            }
+            if (best < 0) continue
+            val inv = 1.0 / ri
+            occ[o] = (relX[best] * inv).toFloat()
+            occ[o + 1] = (relY[best] * inv).toFloat()
+            occ[o + 2] = (relZ[best] * inv).toFloat()
+            occ[o + 3] = (bodies[best].radius * inv).toFloat()
+        }
+    }
+
     fun dispose() {
         planetProg.p.dispose()
         ringProg.p.dispose()
@@ -651,6 +768,7 @@ class BodyRenderer(
         quad.dispose()
         ownClouds?.dispose()
         for (t in textures) if (t != 0) gl.deleteTexture(t)
+        for (t in ringTex) if (t != 0) gl.deleteTexture(t)
     }
 
     companion object {
@@ -681,6 +799,37 @@ class BodyRenderer(
         private const val STAR_HIDDEN_FADE = 0.9f
 
         fun bakeWidth(quality: Int) = if (quality == 0) 512 else 1024
+
+        /**
+         * Height of a body's equirect bake (width = 2 × height) for a full width [texW]: planets of
+         * 3,000 km and more get the full size, the other moons and Mercury half, Phobos and Deimos a
+         * quarter (17 Sol textures: ~26 MB at quality 1-2 instead of 48).
+         */
+        fun bakeHeight(texW: Int, radius: Double): Int = when {
+            radius >= 3.0e6 -> texW / 2
+            radius >= 1.0e6 -> texW / 4
+            else -> texW / 8
+        }
+
+        /** An sRGB channel (0..255) as a linear value (gamma 2.2). */
+        fun srgbToLinear(c: Int): Float = (c / 255.0).pow(2.2).toFloat()
+
+        /**
+         * The bake palette of [b] into [out] (8 × vec4, linear): 0 its data colour, 1..5 its class
+         * ramp (shore, low, high, peak, ice with the ice latitude in w), 6..7 deep and shallow water.
+         */
+        fun palette(b: StarSystem.Body, out: FloatArray) {
+            val r = Palettes.colours(b.cls)
+            val cols = intArrayOf(b.colour, r.shore, r.low, r.high, r.peak, r.ice, r.deep, r.shallow)
+            for (k in 0 until 8) {
+                val c = cols[k]
+                out[k * 4] = srgbToLinear((c shr 16) and 0xFF)
+                out[k * 4 + 1] = srgbToLinear((c shr 8) and 0xFF)
+                out[k * 4 + 2] = srgbToLinear(c and 0xFF)
+                out[k * 4 + 3] = 0f
+            }
+            out[5 * 4 + 3] = r.iceLatitude
+        }
         fun atmoSteps(quality: Int) = if (quality == 0) 5 else if (quality >= 3) 12 else 8
         fun detailOctaves(quality: Int) = when (quality) {
             0 -> 0

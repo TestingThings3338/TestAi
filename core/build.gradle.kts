@@ -21,9 +21,13 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // -Pnoea: run without escape analysis, so the zero-allocation tests see what ART would allocate
+    if (project.hasProperty("noea")) jvmArgs("-XX:-DoEscapeAnalysis")
     // ShipModelTest reads the converted Roblox ships from the app's assets (../app/src/main/assets)
     inputs.dir(rootProject.file("app/src/main/assets/ships")).withPathSensitivity(PathSensitivity.RELATIVE)
     // the station tests read the converted Roblox stations (tools/roblox/convert_stations.py) and the font
     inputs.dir(rootProject.file("app/src/main/assets/stations")).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(rootProject.file("app/src/main/assets/font")).withPathSensitivity(PathSensitivity.RELATIVE)
+    // SoundBankTest checks the sound files (tools/audio/synth_sfx.py, compose_music.py)
+    inputs.dir(rootProject.file("app/src/main/assets/audio")).withPathSensitivity(PathSensitivity.RELATIVE)
 }

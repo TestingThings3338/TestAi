@@ -18,17 +18,18 @@ import kotlin.test.assertTrue
  * the height above the ground instead of above the reference sphere, and a landing on the gear.
  */
 class WorldTerrainTest {
-    private val system = StarSystem.sol()
+    private val system = com.starwake.core.world.WorldBuilder.sol()
     private val terrain = WorldTerrain(system, 0)
     private val host = RecordingHost()
     private val input = InputFrame()
-    private val earth = system.bodies.indexOfFirst { it.name == "EARTH" }
-    private val luna = system.bodies.indexOfFirst { it.name == "LUNA" }
+    private val earth = system.bodyIndex("Earth")
+    private val luna = system.bodyIndex("Luna")
+    private val meridian = system.stations[SpawnRules.startStation(system)]
 
     @AfterTest
     fun shutdown() = terrain.shutdown()
 
-    private fun session(): Session = Session(system, null, Settings(), host, GearRig(), terrain).also {
+    private fun session(): Session = Session(system, Settings(), host, GearRig(), terrain).also {
         it.startInSpace()
         it.setThrottle(0f)
     }
@@ -38,11 +39,11 @@ class WorldTerrainTest {
         assertEquals(-1, terrain.body)
         assertNull(terrain.surface(earth))
         // at MERIDIAN, 3.1 radii from the Earth's centre
-        assertTrue(terrain.select(system.stations[0].pos))
+        assertTrue(terrain.select(meridian.pos))
         assertEquals(earth, terrain.body)
         assertNotNull(terrain.surface(earth))
         assertNull(terrain.surface(luna), "one terrain body at a time")
-        assertFalse(terrain.select(system.stations[0].pos), "no change, no new planet")
+        assertFalse(terrain.select(meridian.pos), "no change, no new planet")
         val g = terrain.generation
         // by the Moon
         val l = system.bodies[luna]
