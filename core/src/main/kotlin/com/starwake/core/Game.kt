@@ -103,6 +103,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     var frameTrace = ""
         private set
 
+    /** The autopilot status as the HUD shows it, latched at 10 Hz ("" while it is off; harness read-out). */
+    val hudAutopilot: String get() = if (hud.autopilotLine.visible) hud.autopilotLine.text else ""
+
     /** Frame counter (rendered frames since the start). */
     var frameCount = 0L
         private set
@@ -760,6 +763,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             // the first-flight hints count only the time the pilot can see them (not under the
             // services of a docked start, a map or the LOADING curtain)
             if (flightHudShown(s) && !mode.curtain) hud.updateHints(dt, touch)
+            // the HUD's texts follow the frame at Roblox's 10 Hz text cadence (02 9.6)
+            hud.updateTexts(dt, s)
         }
         // the touch controls mirror the session: the latched lever, the action pill, AUTO, the look strip
         touch.throttle = s.throttle

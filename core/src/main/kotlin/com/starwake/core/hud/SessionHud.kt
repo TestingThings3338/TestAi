@@ -61,6 +61,19 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         hintTime = 0f
     }
 
+    // ---- the 10 Hz texts (Roblox ShipHud's text timer, 02 9.6)
+    /**
+     * The autopilot's status as the HUD shows it, in the status line and under AUTO: at most ten
+     * changes a second (near 1.05 × the desired speed the live status flips between CRUISING and
+     * BRAKING every frame, `ShipAutopilot.lua:176`), at once when it engages or disengages.
+     */
+    val autopilotLine = LatchedText()
+
+    /** The HUD's texts at the 10 Hz cadence. Call once per simulated frame, after the session's frame. */
+    fun updateTexts(dt: Float, s: Session) {
+        autopilotLine.update(dt, s.autopilot.engaged, s.autopilot.status)
+    }
+
     /**
      * Fades the first-flight hints. Call once per simulated frame, and only while the flight HUD is
      * on screen: the hints count their own screen time, so the station services of a docked start
@@ -132,7 +145,7 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             ui, a, (ship.speed / FlightConfig.Thrust.MAX_SPEED).toFloat(),
             if (gs.speedLimit < FlightConfig.Thrust.MAX_SPEED) (gs.speedLimit / FlightConfig.Thrust.MAX_SPEED).toFloat() else -1f,
             t.flightAssist, t.boosting, cooldown, t.cruising || s.handling.overloaded, hints, s.lockKind != Session.LOCK_NONE,
-            s.autopilot.engaged, s.autopilot.status,
+            autopilotLine.visible, autopilotLine.text,
         )
     }
 
@@ -176,15 +189,16 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     }
 
     /**
-     * The flight's status lines from [y] down (returns the next free line): the autopilot's status,
-     * the overheat stand-in (`Warnings.Overheat`: 80 % OVERHEATING, from 100 % HEAT CRITICAL, the
-     * ship burns up at 200 %; the crash-flow port's ShipWarnings replace it) and the fuel scoop.
+     * The flight's status lines from [y] down (returns the next free line): the autopilot's status
+     * (latched at 10 Hz, [autopilotLine]), the overheat stand-in (`Warnings.Overheat`: 80 %
+     * OVERHEATING, from 100 % HEAT CRITICAL, the ship burns up at 200 %; the crash-flow port's
+     * ShipWarnings replace it) and the fuel scoop.
      */
     private fun drawFlightLines(ui: UiRenderer, s: Session, cx: Float, y: Float, a: Float, time: Float): Float {
         val u = frame.u
         var warnY = y
-        if (s.autopilot.engaged) {
-            buf.clear().append("AUTOPILOT  ·  ").append(s.autopilot.status)
+        if (autopilotLine.visible) {
+            buf.clear().append("AUTOPILOT  ·  ").append(autopilotLine.text)
             ui.textCentered(buf, cx, warnY, 11f * u, withAlpha(Theme.LOCK, a), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
         }
