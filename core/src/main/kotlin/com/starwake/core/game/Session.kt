@@ -149,8 +149,12 @@ class Session(
     var pilotAimY = 0f
         private set
 
-    /** The flight arrow is shown (C35: not while looking around, docked or on foot). */
+    /** The flat flight arrow is shown (C35: not while looking around, docked or on foot). */
     var cursorShown = true
+        private set
+
+    /** The arrow on the cockpit's projection glass is shown (Roblox `s.cursorShown`: not docked, not on foot). */
+    var glassCursorShown = true
         private set
 
     /** The attitude indicator is shown (C69, DECISIONS 15; [attitudeWanted]). */
@@ -188,6 +192,9 @@ class Session(
 
     /** Gear position forced by debug commands (null = follow the flight), like ShipHull.gearForce. */
     var gearForce: Boolean? = null
+
+    /** The gear command of the last flight frame (`hull:setGearDown`). */
+    private var gearCommand = false
 
     // ---- docking (K): the pre-port auto-dock into the slot
     var dockStation = -1
@@ -334,7 +341,8 @@ class Session(
         chase.snapTo(ship)
         refFrame = if (mode.docked && dockStation >= 0) StarSystem.stationFrame(dockStation) else system.frameFor(ship.pos, StarSystem.FRAME_NONE)
         locate()
-        gearRig.update(0f, gearWanted(), true)
+        gearCommand = gearWanted()
+        gearRig.update(0f, gearCommand, true)
         zoneLabel = gs.zoneLabel
         ship.updateDerived()
         updateCamera(0f)
@@ -571,11 +579,20 @@ class Session(
         ship.boosting = thrust.boosting
         ship.engineOutput = if (mode.docking) 0.3f else clamp(abs(thrust.throttle).toFloat(), 0f, 1f)
         mark(FrameStep.C35)
-        cursorShown = !mode.looking && !mode.docked && !mode.onFoot
+        // the flat cursor hides while looking around, docked or on foot; the arrow on the cockpit's
+        // projection glass stays while looking (it turns with the head), Roblox `s.cursorShown`
+        glassCursorShown = !mode.docked && !mode.onFoot
+        cursorShown = glassCursorShown && !mode.looking
         mark(FrameStep.C36) // 06: cockpit state
         mark(FrameStep.C37)
         mark(FrameStep.C38)
-        gearRig.update(dt, gearWanted(), gearInstant())
+        val gearDown = gearWanted()
+        if (gearDown != gearCommand) {
+            // a light tick on every gear command (02 9.1 haptics)
+            gearCommand = gearDown
+            host.haptic(Haptics.TICK)
+        }
+        gearRig.update(dt, gearDown, gearInstant())
         mark(FrameStep.C39)
         impact.update(dt, settings.cameraShake, camera.shake)
         mark(FrameStep.C40)

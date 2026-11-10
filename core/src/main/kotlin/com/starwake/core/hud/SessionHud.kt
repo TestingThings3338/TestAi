@@ -79,8 +79,9 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val ship = s.ship
         lockArrowShown = false
 
-        // the flight cursor hides while the pilot looks around, docked or in a crash (Roblox C35)
-        if (s.cursorShown) drawFlightArrow(ui, s, cam, a)
+        // the arrow on the cockpit's projection glass is part of the cockpit: under the G overlay
+        val glass = s.mode.view == ShipView.COCKPIT
+        if (glass && s.glassCursorShown) drawFlightArrow(ui, s, cam, a)
         drawTargets(ui, s, cam, a)
         drawLandingHud(ui, s, cam, a)
 
@@ -100,36 +101,15 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val cx = frame.w * 0.5f
         val system = s.system
         val gs = s.gs
-        // the G blackout (ShipHud): above the HUD, below the warning lines; black blended to the
-        // redout colour by the share of the strain that comes from pushing
-        val dark = s.systems.darkness.toFloat()
-        if (dark > 0.003f) {
-            val tint = lerpColor(Theme.BLACK, OPAQUE or FlightConfig.Physics.REDOUT_COLOR, s.systems.redout.toFloat())
-            ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(tint, dark * a))
-        }
+        drawBlackout(ui, s, a)
+        // the flat flight arrow sits above the G overlay (Roblox: ShipCursorGui, DisplayOrder 50, over ShipHud's 46)
+        if (!glass && s.cursorShown) drawFlightArrow(ui, s, cam, a)
 
         // zone, autopilot, heat, flight-assist and proximity lines (top centre)
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         // below the first flight's "DRAG HERE TO LOOK AROUND" while it shows (it sits at the look strip's foot)
         var warnY = frame.st + 52f * u + if (hints > 0.01f && touch.lookEnabled) 16f * u else 0f
-        if (s.autopilot.engaged) {
-            buf.clear().append("AUTOPILOT  ·  ").append(s.autopilot.status)
-            ui.textCentered(buf, cx, warnY, 11f * u, withAlpha(Theme.LOCK, a), tracking = 0.2f, shadow = 0.7f)
-            warnY += 20f * u
-        }
-        val heat = s.systems.heat
-        if (heat >= FlightConfig.Systems.OVERHEAT_PHASE1) {
-            // Warnings.Overheat: phase 1 at 80 %, critical from 100 % (the ship burns up at 200 %)
-            val critical = heat >= FlightConfig.Systems.OVERHEAT_PHASE2
-            val blink = if (!critical || (time * 3f).toInt() % 2 == 0) 1f else 0.45f
-            buf.clear().append(if (critical) "HEAT CRITICAL  " else "OVERHEATING  ").append((heat * 100.0).toInt()).append('%')
-            ui.textCentered(buf, cx, warnY, 13f * u, withAlpha(if (critical) Theme.DANGER else Theme.WARN, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
-            warnY += 20f * u
-        }
-        if (s.systems.scooping) {
-            ui.textCentered("FUEL SCOOPING", cx, warnY, 10f * u, withAlpha(Theme.OK, a * 0.9f), tracking = 0.25f, shadow = 0.7f)
-            warnY += 18f * u
-        }
+        warnY = drawFlightLines(ui, s, cx, warnY, a, time)
         // the approach prompt of a giant (Roblox ShipAtmosphere reads LandingBlocked, DECISIONS 11)
         if (gs.body >= 0 && gs.groundAltitude < Session.LAND_RANGE && system.bodies[gs.body].landingBlocked != null) {
             ui.textCentered(Session.LANDING_BLOCKED_GAS, cx, warnY, 11f * u, withAlpha(Theme.WARN, a), tracking = 0.2f, shadow = 0.7f)
@@ -182,6 +162,45 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         arrow.setUnit(unit, MIN_DOT_DP * u, MIN_BASE_DP * u)
         arrow.update(s.pilotAimX, s.pilotAimY)
         arrow.draw(ui, cx, cy, a)
+    }
+
+    /**
+     * The G overlay (`ShipHud.lua:355-370`): over the HUD, under the warning lines; black blended to
+     * the redout colour by the share of the strain that comes from pushing, at the smoothed darkness.
+     */
+    private fun drawBlackout(ui: UiRenderer, s: Session, a: Float) {
+        val dark = s.systems.darkness.toFloat()
+        if (dark <= 0.003f) return
+        val tint = lerpColor(Theme.BLACK, OPAQUE or FlightConfig.Physics.REDOUT_COLOR, clamp(s.systems.redout.toFloat(), 0f, 1f))
+        ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(tint, dark * a))
+    }
+
+    /**
+     * The flight's status lines from [y] down (returns the next free line): the autopilot's status,
+     * the overheat stand-in (`Warnings.Overheat`: 80 % OVERHEATING, from 100 % HEAT CRITICAL, the
+     * ship burns up at 200 %; the crash-flow port's ShipWarnings replace it) and the fuel scoop.
+     */
+    private fun drawFlightLines(ui: UiRenderer, s: Session, cx: Float, y: Float, a: Float, time: Float): Float {
+        val u = frame.u
+        var warnY = y
+        if (s.autopilot.engaged) {
+            buf.clear().append("AUTOPILOT  ·  ").append(s.autopilot.status)
+            ui.textCentered(buf, cx, warnY, 11f * u, withAlpha(Theme.LOCK, a), tracking = 0.2f, shadow = 0.7f)
+            warnY += 20f * u
+        }
+        val heat = s.shipHeat
+        if (heat >= FlightConfig.Systems.OVERHEAT_PHASE1) {
+            val critical = heat >= FlightConfig.Systems.OVERHEAT_PHASE2
+            val blink = if (!critical || (time * 3f).toInt() % 2 == 0) 1f else 0.45f
+            buf.clear().append(if (critical) "HEAT CRITICAL  " else "OVERHEATING  ").append((heat * 100.0).toInt()).append('%')
+            ui.textCentered(buf, cx, warnY, 13f * u, withAlpha(if (critical) Theme.DANGER else Theme.WARN, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+            warnY += 20f * u
+        }
+        if (s.systems.scooping) {
+            ui.textCentered("FUEL SCOOPING", cx, warnY, 10f * u, withAlpha(Theme.OK, a * 0.9f), tracking = 0.25f, shadow = 0.7f)
+            warnY += 18f * u
+        }
+        return warnY
     }
 
     /** Heat, fuel and G under the speed (the systems' numbers; `06` lays the real readouts out). */

@@ -143,9 +143,13 @@ object ShipProfiles {
     /** In `ShipConfig.Ships` order. */
     val all: List<ShipProfile> = listOf(VARROW, BRANNOCK, MORVEN, KESSOCK, LOCHRAN, CALDER, TORRIN, DORNOCH)
 
-    /** The profile of ship [id] (case-insensitive), VARROW when there is none. */
+    /** The profile of ship [id] (case-insensitive), VARROW when there is none. No allocation (the menu asks every frame). */
     fun get(id: String): ShipProfile {
-        for (p in all) if (p.id.equals(id, ignoreCase = true)) return p
+        var i = 0
+        while (i < all.size) {
+            val p = all[i++]
+            if (p.id.equals(id, ignoreCase = true)) return p
+        }
         return VARROW
     }
 }

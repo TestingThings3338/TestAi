@@ -68,7 +68,8 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
         var used = false
         val sens = settings.sensitivity
         val pitchSign = if (settings.pitchUpClimb) 1f else -1f
-        // the platform already applies a radial dead zone and rescales (GamepadInput)
+        // the platform passes the left stick past its noise band only (the aim: the flight model
+        // applies Roblox's dead zone 0.20 and curve 1.7, 02 9.2) and dead-zones the right one
         val lx = pad.leftX
         val ly = pad.leftY
         val rx = pad.rightX

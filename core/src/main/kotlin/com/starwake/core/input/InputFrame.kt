@@ -27,7 +27,7 @@ class InputFrame {
     /** True when the touch lever was moved (or reset) this frame: [lever] is its new absolute position. */
     var leverSet = false
 
-    /** Absolute lever position (-1..1) while [leverSet]. */
+    /** Absolute lever position (`MinThrottle` −0.25 .. 1, the session clamps it) while [leverSet]. */
     var lever = 0f
 
     /** Lever ramp from the pad triggers, -1..1 (RT - LT); the thrust ramps the throttle by it. */

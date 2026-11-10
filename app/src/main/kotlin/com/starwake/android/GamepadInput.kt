@@ -12,9 +12,11 @@ import kotlin.math.sqrt
  * event (per-device axis data is cached and refreshed only when a different controller is used).
  *
  * - Sticks: AXIS_X/Y (left), AXIS_Z/RZ (right; falls back to RX/RY on devices without Z/RZ), with a
- *   radial dead-zone of max(device "flat", [STICK_DEAD_ZONE]) that is rescaled so the magnitude runs
- *   0..1 from the edge of the dead zone. This is the only stick dead zone: core expects
- *   [GamepadState] stick values to be already dead-zoned and applies none of its own.
+ *   radial dead-zone that is rescaled so the magnitude runs 0..1 from its edge. The right stick
+ *   gets max(device "flat", [STICK_DEAD_ZONE]): core applies no dead zone of its own to it. The
+ *   left stick is the flight's aim (the Roblox cursor): it gets only the device's own noise band
+ *   ("flat"), since the flight model applies Roblox's radial dead zone (0.20, curve 1.7) to the aim
+ *   itself (02-flight.md 9.2: the platform dead zone is off for this stick).
  * - Triggers: max(LTRIGGER, BRAKE) / max(RTRIGGER, GAS), merged with digital L2/R2 keys.
  * - HAT_X/HAT_Y and DPAD keys -> DPAD buttons.
  * - Face/shoulder/start/select keys and the stick clicks (L3, R3) -> buttons. KEYCODE_BACK /
@@ -39,7 +41,7 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
     private var cachedDeviceId = NO_DEVICE
     private var rightXAxis = MotionEvent.AXIS_Z
     private var rightYAxis = MotionEvent.AXIS_RZ
-    private var leftDeadZone = STICK_DEAD_ZONE
+    private var leftDeadZone = 0f
     private var rightDeadZone = STICK_DEAD_ZONE
     private var leftTriggerDeadZone = TRIGGER_DEAD_ZONE
     private var rightTriggerDeadZone = TRIGGER_DEAD_ZONE
@@ -141,7 +143,7 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
 
     // ---------------------------------------------------------------- internals
 
-    /** Sticks are published already dead-zoned and rescaled; core must not apply a second dead zone. */
+    /** Sticks are published dead-zoned and rescaled (the left one only past its noise band, see the class doc). */
     private fun publishAnalog() {
         val lt = if (digitalL2) 1f else analogL
         val rt = if (digitalR2) 1f else analogR
@@ -160,7 +162,8 @@ internal class GamepadInput(private val pad: GamepadState) : InputManager.InputD
             rightXAxis = MotionEvent.AXIS_Z
             rightYAxis = MotionEvent.AXIS_RZ
         }
-        leftDeadZone = maxOf(STICK_DEAD_ZONE, flat(dev, MotionEvent.AXIS_X), flat(dev, MotionEvent.AXIS_Y))
+        // the aim stick: only the device's noise band (the flight model has Roblox's dead zone)
+        leftDeadZone = maxOf(flat(dev, MotionEvent.AXIS_X), flat(dev, MotionEvent.AXIS_Y))
         rightDeadZone = maxOf(STICK_DEAD_ZONE, flat(dev, rightXAxis), flat(dev, rightYAxis))
         leftTriggerDeadZone = maxOf(
             TRIGGER_DEAD_ZONE, flat(dev, MotionEvent.AXIS_LTRIGGER), flat(dev, MotionEvent.AXIS_BRAKE),

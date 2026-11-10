@@ -282,13 +282,16 @@ object FlightConfig {
  * - [nearBand]: the absolute near-ground band below 11.4 km over the surface (DECISIONS 3), and the
  *   body radius the law measures from: Roblox's barrier (`CollisionRadius`) without it, the surface
  *   (the barrier no longer exists) with it;
- * - [shadowApproach]: closing on a body, the far law never allows more than `APPROACH_TIME` (2 s)
- *   to the surface along the closing part, outside the approach zone (2.2 R) too. Roblox's shadow
- *   law (`(h / shadow)^0.75` from the 3 Mm/s ×S ceiling) falls faster than the 0.4 s brake can
- *   follow when the shadow is small, and the approach zone then cuts the limit to a sixth: at
- *   S = 3000 the ship reached Deimos's ground at 90 km/s. Roblox's barrier hid that; the port's
- *   ground cannot (02 9.5). An e-folding law like the cruise law, so the brake follows it; for
- *   bodies whose shadow reaches 6 Mm (2 s at the ceiling) it changes nothing outside the zone.
+ * - [shadowApproach] (a port addition, not in 02): closing on a body, the far law never allows more
+ *   than `APPROACH_TIME` (2 s) to the surface along the closing part, outside the approach zone
+ *   (2.2 R) too. Roblox's shadow law (`(h / shadow)^0.75` from the 3 Mm/s ×S ceiling) falls faster
+ *   than the 0.4 s brake can follow when the shadow is small, and the approach zone then cuts the
+ *   limit to a quarter: without this, ARES DEEP to Deimos at full throttle passes 1 km above
+ *   Deimos at 94 km/s (TripTimeTest; 348 m/s with it). Roblox's barrier held the ship there (no
+ *   crash in space); the port's ground cannot (02 9.5). An e-folding law like the cruise law, so
+ *   the brake follows it; for bodies whose shadow reaches 6 Mm (2 s at the ceiling: every Sol
+ *   planet and every moon but Phobos, Deimos and Triton) it changes nothing outside the zone, and
+ *   [ROBLOX] has it off.
  *
  * [ROBLOX] reproduces the Roblox game exactly (parity tests); [PORT] is the game at S = 3000.
  */
