@@ -534,20 +534,25 @@ class MapScreen(private val host: MapHost, private val system: StarSystem) {
         private val YOU_SIDES = intArrayOf(LabelBoxes.UP_RIGHT, LabelBoxes.DOWN_RIGHT, LabelBoxes.UP_LEFT, LabelBoxes.DOWN_LEFT)
 
         /**
-         * Rough trip time (s) to a target [d] metres away under the pre-port speed law
-         * ([StarSystem.speedLimit]): the approach limit is APPROACH_RATE·altitude, capped at
-         * MAX_SPEED, so the last stretch takes ln(d/1 km)/rate, plus the cruise at the cap and a
-         * departure allowance.
+         * Rough trip time (s) to a target [d] metres away under the flight law (02-flight.md 3.5,
+         * [com.starwake.core.flight.SpeedLaw]): flying at the gap law's limit the gap shrinks by e
+         * every 3.5 s, so the stretch below the cap takes 3.5 · ln(gap / [ETA_ARRIVAL_GAP]); farther
+         * out the ship cruises at the 0.5 c cap. Plus [ETA_DEPARTURE] for the climb to cruise speed and
+         * the brake into the target's mass shadow.
          */
         fun etaSeconds(d: Double): Double {
             if (d <= 1000.0) return d / 220.0
-            val rate = StarSystem.APPROACH_RATE
-            val capAlt = StarSystem.MAX_SPEED / rate
-            val approach = if (d > capAlt) (d - capAlt) / StarSystem.MAX_SPEED + ln(capAlt / 1000.0) / rate else ln(d / 1000.0) / rate
+            val t = com.starwake.core.flight.FlightConfig.Thrust.CRUISE_DISTANCE_TIME
+            val cap = com.starwake.core.flight.FlightLaw.PORT.cruiseCap
+            val capGap = (cap - com.starwake.core.flight.FlightLaw.PORT.shadowCeiling) * t
+            val approach = if (d > capGap) (d - capGap) / cap + t * ln(capGap / ETA_ARRIVAL_GAP) else t * ln(maxOf(d, ETA_ARRIVAL_GAP) / ETA_ARRIVAL_GAP)
             return approach + ETA_DEPARTURE
         }
 
-        /** Departure allowance of [etaSeconds] (s): leaving a station or a planet's low orbit. */
+        /** Gap (m) below which the trip counts as arrived for [etaSeconds] (the mass shadow takes over). */
+        private const val ETA_ARRIVAL_GAP = 1.0e6
+
+        /** Allowance of [etaSeconds] (s): the climb to cruise speed and the brake at the far end. */
         private const val ETA_DEPARTURE = 15.0
 
         /** 1, 2 or 5 × 10^n not above [m]. */

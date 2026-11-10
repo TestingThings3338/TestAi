@@ -2,6 +2,7 @@ package com.starwake.core.ui
 
 import com.starwake.core.Settings
 import com.starwake.core.content.ShipCatalog
+import com.starwake.core.flight.ShipProfiles
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.UiRenderer
@@ -93,9 +94,11 @@ class MainMenu(private val game: GameActions) {
         ui.text(spec.role, c.x + 16f * u, c.y + 44f * u, 9.5f * u, withAlpha(Theme.ACCENT, a), tracking = 0.25f)
         buf.clear().append(spec.price / 1000).append(',').appendPadded(spec.price % 1000, 3).append(" CR")
         ui.text(buf, c.x + c.w - 16f * u, c.y + 28f * u, 12f * u, withAlpha(Theme.TEXT, a), UiRenderer.RIGHT, face = FontData.MONO)
-        statBar(ui, u, a, c.x + 16f * u, c.y + 62f * u, c.w - 32f * u, "SPEED", spec.maxSpeed, "M/S", spec.maxSpeed / 400f)
-        statBar(ui, u, a, c.x + 16f * u, c.y + 80f * u, c.w - 32f * u, "BOOST", spec.boostSpeed, "M/S", spec.boostSpeed / 500f)
-        statBar(ui, u, a, c.x + 16f * u, c.y + 98f * u, c.w - 32f * u, "AGILITY", spec.maxPitchRate * 57.3f, "°/S", spec.maxPitchRate / 1.5f)
+        // the ship's own numbers (ShipConfig.Ships): top speed, boost speed, pitch rate at its best agility
+        val p = ShipProfiles.get(ShipCatalog.get(game.settings.ship).id)
+        statBar(ui, u, a, c.x + 16f * u, c.y + 62f * u, c.w - 32f * u, "SPEED", p.topSpeed.toFloat(), "M/S", p.topSpeed.toFloat() / 320f)
+        statBar(ui, u, a, c.x + 16f * u, c.y + 80f * u, c.w - 32f * u, "BOOST", p.boostSpeed.toFloat(), "M/S", p.boostSpeed.toFloat() / 420f)
+        statBar(ui, u, a, c.x + 16f * u, c.y + 98f * u, c.w - 32f * u, "AGILITY", p.turnRatePitch.toFloat(), "°/S", p.turnRatePitch.toFloat() / 42f)
 
         // drag hint
         if (dragHint > 0.01f) {

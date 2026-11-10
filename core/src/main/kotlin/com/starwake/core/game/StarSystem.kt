@@ -4,7 +4,6 @@ import com.starwake.core.math.DVec3
 import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.world.Orbits
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -19,8 +18,8 @@ import kotlin.math.sqrt
  * station is carried by it ([frameFor], [frameDelta]: translation only, the velocity stays relative,
  * DECISIONS 6).
  *
- * Still the pre-port flight's companion: [locate] and [speedLimit] (the zones and the dynamic limit)
- * stay until the flight port brings ShipGravity.
+ * The speed law, the zones and the pull live in the flight port ([com.starwake.core.flight.GravityField],
+ * `ShipGravity`), which reads the bodies' attribute contract.
  */
 class StarSystem(
     /** System name as in the data ("Sol"). */
@@ -348,208 +347,9 @@ class StarSystem(
         return vis.toFloat()
     }
 
-    /** Result of [locate]; reused, no allocation. */
-    class Locality {
-        /**
-         * The nearest body by altitude relative to its size: LAND, the collisions and the zones but
-         * APPROACH / DEPARTURE, which follow [limitingBody].
-         */
-        var nearestBody = -1
-        var bodyDistance = 0.0 // to centre
-        var altitude = 0.0 // to surface
-        var radialSpeed = 0f // + moving away from the nearest body
-        /** radialSpeed / speed: -1 straight down, 0 level, +1 straight up. */
-        var radialFraction = 0f
-        var nearestStation = -1
-        var stationDistance = 0.0
-        /** stationRadialSpeed / speed: -1 straight at the nearest station, +1 straight away from it. */
-        var stationRadialFraction = 0f
-        var zone = Zone.OPEN_SPACE
-        var speedLimit = 0f
-
-        /**
-         * The body whose own limit is the lowest (`ShipGravity` `limitingBody`): the speed limit is
-         * the minimum over all bodies, so a moon beside a giant brakes the ship although the giant
-         * is the [nearestBody] by size. Its altitude (m) and radial fraction (as [radialFraction])
-         * feed [speedLimit].
-         */
-        var limitingBody = -1
-        var limitAltitude = 0.0
-        var limitRadialFraction = 0f
-    }
-
-    enum class Zone(val label: String) {
-        DEPARTURE("DEPARTURE"),
-        APPROACH("APPROACH"),
-        OPEN_SPACE("OPEN SPACE"),
-        GRAVITY_WELL("GRAVITY WELL"),
-        LOW_ALTITUDE("LOW ALTITUDE"),
-        STATION_ZONE("STATION ZONE"),
-        SYSTEM_EDGE("SYSTEM EDGE"),
-    }
-
-    /**
-     * Finds the nearest body/station, the zone, and the dynamic speed limit for a ship at [pos]
-     * moving with [vel] (relative to its frame). [localMax] = the ship's normal top speed.
-     */
-    fun locate(pos: DVec3, vel: Vec3, localMax: Float, out: Locality): Locality {
-        val spd = vel.length()
-        var best = -1
-        var bestAlt = Double.MAX_VALUE
-        var bestDist = 0.0
-        var limiter = -1
-        var limiterLaw = Double.MAX_VALUE
-        for (i in bodies.indices) {
-            val b = bodies[i]
-            val dx = pos.x - b.pos.x
-            val dy = pos.y - b.pos.y
-            val dz = pos.z - b.pos.z
-            val d = sqrt(dx * dx + dy * dy + dz * dz)
-            // compare by altitude relative to size, so a big star doesn't always win
-            val alt = d - b.radius
-            val score = alt / b.radius
-            if (score < bestAlt) {
-                bestAlt = score
-                best = i
-                bestDist = d
-            }
-            // the limit is the minimum of every body's own law ("Minimum ueber ALLE Koerper"): a
-            // moon beside a giant brakes the ship even while the giant is the nearest body by size
-            val rf = radialFraction(dx, dy, dz, d, vel, spd)
-            val law = alt * rate(rf)
-            if (law < limiterLaw) {
-                limiterLaw = law
-                limiter = i
-                out.limitAltitude = alt
-                out.limitRadialFraction = rf
-            }
-        }
-        out.nearestBody = best
-        out.limitingBody = limiter
-        out.bodyDistance = bestDist
-        val b = bodies[best]
-        out.altitude = bestDist - b.radius
-        if (bestDist > 1e-3) {
-            val inv = 1.0 / bestDist
-            out.radialSpeed = (((pos.x - b.pos.x) * vel.x + (pos.y - b.pos.y) * vel.y + (pos.z - b.pos.z) * vel.z) * inv).toFloat()
-        } else {
-            out.radialSpeed = 0f
-        }
-        out.radialFraction = if (spd > 1f) (out.radialSpeed / spd).coerceIn(-1f, 1f) else 0f
-        var st = -1
-        var stD = Double.MAX_VALUE
-        for (i in stations.indices) {
-            val s = stations[i].pos
-            val dx = pos.x - s.x
-            val dy = pos.y - s.y
-            val dz = pos.z - s.z
-            val d = sqrt(dx * dx + dy * dy + dz * dz)
-            if (d < stD) {
-                stD = d
-                st = i
-            }
-        }
-        out.nearestStation = st
-        out.stationDistance = stD
-        out.stationRadialFraction = 0f
-        if (st >= 0 && stD > 1e-3 && spd > 1f) {
-            val s = stations[st].pos
-            val radial = ((pos.x - s.x) * vel.x + (pos.y - s.y) * vel.y + (pos.z - s.z) * vel.z) / stD
-            out.stationRadialFraction = (radial / spd).toFloat().coerceIn(-1f, 1f)
-        }
-
-        val r = b.radius
-        val sp = bodies[star].pos
-        val fx = pos.x - sp.x
-        val fy = pos.y - sp.y
-        val fz = pos.z - sp.z
-        val fromStar = sqrt(fx * fx + fy * fy + fz * fz)
-        // APPROACH / DEPARTURE say why the speed is what it is, so they follow the body that limits
-        // it (Roblox `zoneLabel(limitZone, limitCosine)`): closing on Io beside Jupiter is an approach
-        val lr = bodies[limiter].radius
-        val near = out.limitAltitude + lr < lr * APPROACH_RADII
-        val limitRadialSpeed = out.limitRadialFraction * spd
-        out.zone = when {
-            stD < STATION_ZONE_RADIUS -> Zone.STATION_ZONE
-            !b.isStar && out.altitude < LOW_ALTITUDE -> Zone.LOW_ALTITUDE
-            bestDist < r * GRAVITY_WELL_RADII -> Zone.GRAVITY_WELL
-            fromStar > edgeRadius -> Zone.SYSTEM_EDGE
-            near && limitRadialSpeed < -localMax -> Zone.APPROACH
-            near && limitRadialSpeed > localMax -> Zone.DEPARTURE
-            else -> Zone.OPEN_SPACE
-        }
-        out.speedLimit = speedLimit(out, localMax)
-        return out
-    }
-
-    /**
-     * Dynamic speed (the pre-port law, kept until the flight port brings the Roblox one): the limit
-     * grows with the distance from a surface (or station), faster when departing than when
-     * approaching, from [localMax] up to [MAX_SPEED] (0.5 c, DECISIONS 2). The rate blends smoothly
-     * with the heading (level flight gets the mean), so a small pitch change never makes the limit
-     * jump. Every rate is per second, so the law has no length scale: at S = 3000 a trip between
-     * neighbouring planets takes about a minute (TripTimeTest, the "sol-trip" scenario).
-     *
-     * Every body has its own law (its altitude times the rate for the heading to it) and the
-     * lowest one limits ([Locality.limitingBody]), as Roblox's `ShipGravity:getState` takes the
-     * minimum over all bodies (03-world.md B.3): Io, 13 Mm away, brakes a ship that Jupiter alone
-     * would let through at 78 Mm/s.
-     *
-     * A station limits the speed while the ship closes on it or is inside its zone. Leaving it (the
-     * heading 3 to 27 degrees out from square to it, beyond 8 to 12 km, blended) the ship is free
-     * of it, as past Roblox's 6 km station lock (`DockingRange`): at S = 3000 MERIDIAN hangs 13 Mm
-     * above Earth, and growing the limit from the station's 4 km clearance held a departure for
-     * half a minute. Turning back, the station's limit returns before the ship can close on it.
-     */
-    fun speedLimit(l: Locality, localMax: Float): Float {
-        // 0 closing on the station or inside its zone .. 1 leaving it (blended, so the limit never jumps)
-        val heading = ((l.stationRadialFraction - LEAVE_FROM) / (LEAVE_TO - LEAVE_FROM)).coerceIn(0f, 1f)
-        val beyond = ((l.stationDistance - STATION_ZONE_RADIUS) / (STATION_ZONE_RADIUS * 0.5)).coerceIn(0.0, 1.0)
-        val leave = heading * heading * (3f - 2f * heading) * (beyond * beyond * (3.0 - 2.0 * beyond))
-        // the station's clearance, handed over geometrically to the limiting body's altitude as the ship leaves
-        val held = l.stationDistance - STATION_CLEARANCE
-        val altitude = l.limitAltitude
-        val clearance = when {
-            held <= 0.0 || altitude <= held -> minOf(altitude, held)
-            leave <= 0.0 -> held
-            else -> held * (altitude / held).pow(leave)
-        }
-        if (clearance <= 0.0) return localMax
-        return (clearance * rate(l.limitRadialFraction)).toFloat().coerceIn(localMax, MAX_SPEED)
-    }
-
-    /** The law's rate (1/s) for a radial fraction: [APPROACH_RATE] heading in, [DEPART_RATE] heading out, smoothly blended over ±[RATE_BLEND]. */
-    private fun rate(radialFraction: Float): Double {
-        val t = ((radialFraction + RATE_BLEND) / (2f * RATE_BLEND)).coerceIn(0f, 1f)
-        return APPROACH_RATE + (DEPART_RATE - APPROACH_RATE) * (t * t * (3f - 2f * t))
-    }
-
-    /** Radial speed over speed from a body's centre ([dx], [dy], [dz] at distance [d]): as [Locality.radialFraction]. */
-    private fun radialFraction(dx: Double, dy: Double, dz: Double, d: Double, vel: Vec3, spd: Float): Float {
-        if (spd <= 1f) return 0f
-        val radial = if (d > 1e-3) ((dx * vel.x + dy * vel.y + dz * vel.z) * (1.0 / d)).toFloat() else 0f
-        return (radial / spd).coerceIn(-1f, 1f)
-    }
-
     companion object {
         /** `LandingBlocked` of the gas and ice giants (`tagBody`). */
         const val NO_SOLID_SURFACE = "NO SOLID SURFACE"
-
-        /** Cruise cap: half the speed of light (DECISIONS 2). */
-        const val MAX_SPEED = 1.5e8f
-        const val DEPART_RATE = 0.6
-        const val APPROACH_RATE = 0.32
-        /** Heading (radial fraction) over which the rate blends from approach to depart: ±~17°. */
-        const val RATE_BLEND = 0.3f
-        const val STATION_ZONE_RADIUS = 8000.0
-        const val STATION_CLEARANCE = 4000.0
-
-        /** Heading away from the nearest station (radial fraction) over which its limit lets go. */
-        const val LEAVE_FROM = 0.05f
-        const val LEAVE_TO = 0.45f
-        const val LOW_ALTITUDE = 60_000.0
-        const val GRAVITY_WELL_RADII = 3.0
-        const val APPROACH_RADII = 12.0
 
         /** `ShipConfig.Stations.ZoneRadius`: the station reference frame (absolute, DECISIONS 9). */
         const val STATION_FRAME_RADIUS = 2200.0

@@ -17,8 +17,7 @@ class StationCollisionTest {
     /** One station per model, with non-trivial orientations and real (1e9 m) coordinates. */
     private val stations = Array(StationMesh.MODELS) { m -> system.stations.first { it.model == m } }
     private val fields = FIELDS
-    private val flight = FlightModel(ShipSpec.STANDARD)
-    private val sc = StationCollision(flight)
+    private val sc = StationCollision()
     private val r = ShipSpec.STANDARD.collisionRadius
 
     // ------------------------------------------------------------------ helpers
@@ -220,7 +219,10 @@ class StationCollisionTest {
 
     @Test
     fun shipsFlyingAtTheHullStayOutside() {
-        val ctl = ControlInput()
+        // the Roblox flight model: Flight Assist on, the lever at 100 m/s (a tenth of the lever's
+        // linear 1 km/s up to TopSpeed), the ship sliding along what it hits
+        val handling = com.starwake.core.flight.ShipHandling()
+        val thrust = com.starwake.core.flight.ShipThrust()
         val s = ShipState()
         val lp = Vec3()
         val aim = Vec3()
@@ -242,13 +244,15 @@ class StationCollisionTest {
                 st.rot.rotate(0f, 1f, 0f, up)
                 if (kotlin.math.abs(wAim.dot(up)) > 0.95f) st.rot.rotate(1f, 0f, 0f, up)
                 s.rot.lookRotation(wAim.x, wAim.y, wAim.z, up.x, up.y, up.z)
-                s.vel.set(wAim).scale(100f)
-                ctl.clearAxes()
-                ctl.throttle = 100f / ShipSpec.STANDARD.maxSpeed
+                s.vel.set(wAim).scale(100.0)
+                thrust.reset(s.vel)
+                s.vel.set(wAim).scale(100.0)
+                thrust.setThrottle(0.1)
                 var touched = false
                 val h = 1f / 120f
                 for (i in 0 until (20f / h).toInt()) {
-                    flight.step(s, ctl, h, ShipSpec.STANDARD.maxSpeed)
+                    thrust.update(h.toDouble(), s.rot, s.vel, handling)
+                    s.pos.addScaled(s.vel, h.toDouble())
                     if (sc.collide(s, st) > 0f) touched = true
                     toLocal(st, s.pos, lp)
                     val gap = f.distance(lp.x.toDouble(), lp.y.toDouble(), lp.z.toDouble(), 30.0)
@@ -557,7 +561,7 @@ class StationCollisionTest {
         for (p in listOf(floatArrayOf(0f, 0f, -300f), floatArrayOf(0f, 330f, 200f), floatArrayOf(250f, 250f, -150f))) {
             toWorld(st, p[0], p[1], p[2], pos)
             val a = sc.dockWaypoint(st, pos, wp)
-            val b = StationCollision(flight).dockWaypoint(st, pos, fresh)
+            val b = StationCollision().dockWaypoint(st, pos, fresh)
             assertEquals(b, a)
             if (a) assertTrue(dist(wp, fresh) < 1e-6, "stale leg reused at (${p.joinToString()})")
         }
@@ -631,7 +635,7 @@ class StationCollisionTest {
                 minClear = minOf(minClear, sc.localDistance(m, x, y, z) - r)
                 s.reset()
                 toWorld(st, x, y, z, s.pos)
-                st.rot.rotate(dirL, s.vel).scale(-30f)
+                s.vel.set(st.rot.rotate(dirL, Vec3())).scale(-30.0)
                 val before = DVec3().set(s.pos)
                 assertEquals(0f, sc.collide(s, st), "model $m: contact on the slide-in path at along $a")
                 assertTrue(dist(before, s.pos) == 0.0, "model $m: the slide-in path was pushed at along $a")
@@ -658,7 +662,7 @@ class StationCollisionTest {
             // parked, then pushed deeper at 40 m/s: stops at the back wall
             s.reset()
             toWorld(st, portL.x - dirL.x * slot.z * 0.5f, portL.y, portL.z - dirL.z * slot.z * 0.5f, s.pos)
-            st.rot.rotate(dirL, s.vel).scale(-40f)
+            s.vel.set(st.rot.rotate(dirL, Vec3())).scale(-40.0)
             var impact = 0f
             for (i in 0 until 600) {
                 s.pos.addScaled(s.vel, 1.0 / 120.0)
@@ -671,7 +675,7 @@ class StationCollisionTest {
             // drifting sideways and up inside the tunnel: the side walls and ceiling hold
             s.reset()
             toWorld(st, portL.x, portL.y, portL.z - dirL.z * slot.z * 0.5f, s.pos)
-            st.rot.rotate(20f, 10f, 0f, s.vel)
+            s.vel.set(st.rot.rotate(20f, 10f, 0f, Vec3()))
             for (i in 0 until 600) {
                 s.pos.addScaled(s.vel, 1.0 / 120.0)
                 sc.collide(s, st)
@@ -690,7 +694,7 @@ class StationCollisionTest {
         for (m in 0 until StationMesh.MODELS) {
             val st = stations[m]
             toWorld(st, 0f, 0f, st.radius.toFloat() + 60f, s.pos)
-            s.vel.set(0f, 0f, -100f)
+            s.vel.set(0.0, 0.0, -100.0)
             val before = DVec3().set(s.pos)
             assertEquals(0f, sc.collide(s, st))
             assertEquals(0.0, dist(before, s.pos))
@@ -723,7 +727,7 @@ class StationCollisionTest {
             for (m in 0 until StationMesh.MODELS) {
                 val st = stations[m]
                 s.pos.set(touching[m])
-                s.vel.set(0f, 0f, 0f)
+                s.vel.set(0.0, 0.0, 0.0)
                 sc.collide(s, st)
                 sc.clearance(s, st)
                 sc.dockWaypoint(st, s.pos, wp)

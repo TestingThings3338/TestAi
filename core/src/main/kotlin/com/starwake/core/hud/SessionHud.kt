@@ -1,13 +1,16 @@
 package com.starwake.core.hud
 
 import com.starwake.core.Settings
+import com.starwake.core.flight.FlightConfig
 import com.starwake.core.game.Session
+import com.starwake.core.game.ShipView
 import com.starwake.core.gfx.Camera
 import com.starwake.core.gfx.FontData
 import com.starwake.core.gfx.UiRenderer
 import com.starwake.core.input.TouchFlightControls
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.clamp
+import com.starwake.core.math.lerpColor
 import com.starwake.core.math.withAlpha
 import com.starwake.core.ui.Frame
 import com.starwake.core.ui.TextBuf
@@ -17,11 +20,12 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * The flat flight HUD of the pre-port game, drawn over the session's scene: nose reticle and
- * velocity marker, the stick's steering arrow, target markers and the lock (with the off-screen
- * arrow), the landing ladder, the speed readout beside the lever, zone and warning lines, the
- * message line, and the touch controls. `06` (FlightHud, TargetMarkers, Notices) and `02`
- * (FlightArrow, AttitudeHud) replace it piece by piece. Numbers go through [Units]. No allocation.
+ * The flat flight HUD, drawn over the session's scene: the Roblox flight arrow (DECISIONS 20: no
+ * nose reticle, no velocity marker, no GEAR bar), target markers and the lock (with the off-screen
+ * arrow), the pre-port landing ladder, the speed and systems readouts beside the lever, zone,
+ * autopilot and warning lines, the G blackout overlay, the message line, and the touch controls.
+ * `06` (FlightHud, TargetMarkers, Notices) and `02` (AttitudeHud) replace the rest piece by piece.
+ * Numbers go through [Units]. No allocation.
  */
 class SessionHud(private val frame: Frame, private val settings: Settings) {
     private val buf = TextBuf(64)
@@ -31,6 +35,9 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     private val upV = Vec3()
     private val fwdV = Vec3()
     private val rightV = Vec3()
+
+    /** The Roblox flight arrow (02 3.9). */
+    val arrow = FlightArrow()
 
     /** Target labels placed this frame (x0, y0, x1, y1), so they never overlap. */
     private val labelBoxes = FloatArray(4 * MAX_LABELS)
@@ -71,35 +78,9 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val a = alpha
         val ship = s.ship
         lockArrowShown = false
-        // reticle where the nose points (800 m ahead) and the velocity vector marker
-        ship.rot.rotate(0f, 0f, -800f, tmp)
-        relToCam(s, cam, tmp)
-        if (cam.project(tmp.x, tmp.y, tmp.z, screenPt)) {
-            val x = screenPt.x
-            val y = screenPt.y
-            val col = withAlpha(Theme.TEXT, a * 0.85f)
-            ui.circle(x, y, 13f * u, col, 1.5f * u)
-            ui.rect(x - 24f * u, y - 0.75f * u, 9f * u, 1.5f * u, col)
-            ui.rect(x + 15f * u, y - 0.75f * u, 9f * u, 1.5f * u, col)
-            ui.rect(x - 0.75f * u, y - 24f * u, 1.5f * u, 9f * u, col)
-            ui.circle(x, y, 1.6f * u, col)
-        }
-        if (ship.speed > 3f) {
-            tmp.set(ship.vel).scale(800f / ship.speed)
-            relToCam(s, cam, tmp)
-            if (cam.project(tmp.x, tmp.y, tmp.z, screenPt)) {
-                val x = screenPt.x
-                val y = screenPt.y
-                val col = withAlpha(if (ship.flightAssist) Theme.ACCENT else Theme.WARN, a * 0.9f)
-                ui.circle(x, y, 7f * u, col, 1.5f * u)
-                ui.rect(x - 0.75f * u, y - 15f * u, 1.5f * u, 8f * u, col)
-                ui.rect(x - 15f * u, y - 0.75f * u, 8f * u, 1.5f * u, col)
-                ui.rect(x + 7f * u, y - 0.75f * u, 8f * u, 1.5f * u, col)
-            }
-        }
 
-        // the flight cursor hides while the pilot looks around (Roblox C35)
-        if (!s.mode.looking) drawSteeringArrow(ui, touch, a)
+        // the flight cursor hides while the pilot looks around, docked or in a crash (Roblox C35)
+        if (s.cursorShown) drawFlightArrow(ui, s, cam, a)
         drawTargets(ui, s, cam, a)
         drawLandingHud(ui, s, cam, a)
 
@@ -109,39 +90,52 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         val sx = if (mirrored) g.x - 26f * u else g.x + g.w + 26f * u
         val align = if (mirrored) UiRenderer.RIGHT else UiRenderer.LEFT
         val sy = g.y + g.h
-        val speed = ship.forwardSpeed
-        val unit = Units.speedParts(buf.clear(), abs(speed).toDouble())
-        val numW = ui.text(buf, sx, sy - 12f * u, 28f * u, withAlpha(if (speed < -1f) Theme.WARN else Theme.TEXT, a), align, 0f, 0.02f, shadow = 0.7f, face = FontData.MONO)
+        val reverse = ship.forwardSpeed < -1.0
+        val unit = Units.speedParts(buf.clear(), ship.speed)
+        val numW = ui.text(buf, sx, sy - 12f * u, 28f * u, withAlpha(if (reverse) Theme.WARN else Theme.TEXT, a), align, 0f, 0.02f, shadow = 0.7f, face = FontData.MONO)
         val unitX = if (mirrored) sx - numW - 6f * u else sx + numW + 6f * u
         ui.text(unit, unitX, sy - 12f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a), align, tracking = 0.15f, shadow = 0.7f)
-        // boost capacitor bar
-        val spec = s.spec
-        val bw = 104f * u
-        val bx = if (mirrored) sx - bw else sx
-        ui.rect(bx, sy - 3f * u, bw, 4f * u, withAlpha(Theme.PANEL, a * 0.9f), 2f * u)
-        val capCol = if (ship.capacitor >= spec.boostCost) Theme.ACCENT else Theme.TEXT_DIM
-        ui.rect(bx, sy - 3f * u, bw * ship.capacitor, 4f * u, withAlpha(capCol, a), 2f * u)
-        ui.rect(bx + bw * spec.boostCost, sy - 6f * u, 1.2f * u, 10f * u, withAlpha(Theme.TEXT_DIM, a * 0.8f))
-        // zone, flight-assist and proximity warnings (top centre)
+        drawSystems(ui, s, sx, sy + 6f * u, align, a)
+
         val cx = frame.w * 0.5f
-        val here = s.here
         val system = s.system
+        val gs = s.gs
+        // the G blackout (ShipHud): above the HUD, below the warning lines; black blended to the
+        // redout colour by the share of the strain that comes from pushing
+        val dark = s.systems.darkness.toFloat()
+        if (dark > 0.003f) {
+            val tint = lerpColor(Theme.BLACK, OPAQUE or FlightConfig.Physics.REDOUT_COLOR, s.systems.redout.toFloat())
+            ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(tint, dark * a))
+        }
+
+        // zone, autopilot, heat, flight-assist and proximity lines (top centre)
         ui.textCentered(s.zoneLabel, cx, frame.st + 30f * u, 10.5f * u, withAlpha(Theme.TEXT, a * 0.85f), tracking = 0.3f, shadow = 0.6f)
         // below the first flight's "DRAG HERE TO LOOK AROUND" while it shows (it sits at the look strip's foot)
         var warnY = frame.st + 52f * u + if (hints > 0.01f && touch.lookEnabled) 16f * u else 0f
-        if (here.nearestBody == system.star && here.altitude < system.bodies[system.star].radius * 0.5) {
-            val blink = if ((time * 3f).toInt() % 2 == 0) 1f else 0.45f
-            ui.textCentered("HEAT", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+        if (s.autopilot.engaged) {
+            buf.clear().append("AUTOPILOT  ·  ").append(s.autopilot.status)
+            ui.textCentered(buf, cx, warnY, 11f * u, withAlpha(Theme.LOCK, a), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
         }
+        val heat = s.systems.heat
+        if (heat >= FlightConfig.Systems.OVERHEAT_PHASE1) {
+            // Warnings.Overheat: phase 1 at 80 %, critical from 100 % (the ship burns up at 200 %)
+            val critical = heat >= FlightConfig.Systems.OVERHEAT_PHASE2
+            val blink = if (!critical || (time * 3f).toInt() % 2 == 0) 1f else 0.45f
+            buf.clear().append(if (critical) "HEAT CRITICAL  " else "OVERHEATING  ").append((heat * 100.0).toInt()).append('%')
+            ui.textCentered(buf, cx, warnY, 13f * u, withAlpha(if (critical) Theme.DANGER else Theme.WARN, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
+            warnY += 20f * u
+        }
+        if (s.systems.scooping) {
+            ui.textCentered("FUEL SCOOPING", cx, warnY, 10f * u, withAlpha(Theme.OK, a * 0.9f), tracking = 0.25f, shadow = 0.7f)
+            warnY += 18f * u
+        }
         // the approach prompt of a giant (Roblox ShipAtmosphere reads LandingBlocked, DECISIONS 11)
-        if (here.zone == com.starwake.core.game.StarSystem.Zone.LOW_ALTITUDE && here.nearestBody >= 0 &&
-            system.bodies[here.nearestBody].landingBlocked != null
-        ) {
+        if (gs.body >= 0 && gs.groundAltitude < Session.LAND_RANGE && system.bodies[gs.body].landingBlocked != null) {
             ui.textCentered(Session.LANDING_BLOCKED_GAS, cx, warnY, 11f * u, withAlpha(Theme.WARN, a), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
         }
-        if (!ship.flightAssist) {
+        if (!s.thrust.flightAssist) {
             val blink = if ((time * 2f).toInt() % 2 == 0) 1f else 0.55f
             ui.textCentered("FLIGHT ASSIST OFF", cx, warnY, 11f * u, withAlpha(Theme.WARN, a * blink), tracking = 0.2f, shadow = 0.7f)
             warnY += 20f * u
@@ -152,10 +146,61 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             ui.textCentered("PROXIMITY", cx, warnY, 13f * u, withAlpha(Theme.DANGER, a * blink), tracking = 0.3f, weight = 0.03f, shadow = 0.7f)
         }
 
+        val t = s.thrust
+        val cooldown = if (t.boostCooldown > 0.0) (t.boostCooldown / s.profile.boostCooldown).toFloat() else 0f
         touch.draw(
-            ui, a, ship.forwardSpeed / spec.maxSpeed, ship.flightAssist,
-            ship.capacitor >= spec.boostCost, ship.boosting, ship.capacitor, hints, s.lockKind != Session.LOCK_NONE,
+            ui, a, (ship.speed / FlightConfig.Thrust.MAX_SPEED).toFloat(),
+            if (gs.speedLimit < FlightConfig.Thrust.MAX_SPEED) (gs.speedLimit / FlightConfig.Thrust.MAX_SPEED).toFloat() else -1f,
+            t.flightAssist, t.boosting, cooldown, t.cruising || s.handling.overloaded, hints, s.lockKind != Session.LOCK_NONE,
+            s.autopilot.engaged, s.autopilot.status,
         )
+    }
+
+    /**
+     * The Roblox flight arrow at the screen centre, or in the cockpit on its projection glass 3.2 m
+     * in front of the eye (it moves with the head when the cockpit sways; 02 6.2), sized by
+     * `shortSide / 1080` (× focal / focal at 80° on the glass) with the phone clamps of 9.1.
+     */
+    private fun drawFlightArrow(ui: UiRenderer, s: Session, cam: Camera, a: Float) {
+        val u = frame.u
+        var unit = minOf(frame.w, frame.h) / FlightConfig.Cursor.DESIGN_HEIGHT
+        var cx = frame.w * 0.5f
+        var cy = frame.h * 0.5f
+        if (s.mode.view == ShipView.COCKPIT) {
+            // the glass point: eye + nose · GlassDistance, camera-relative
+            val eye = s.camera
+            s.ship.rot.rotate(0f, 0f, -GLASS_DISTANCE, tmp)
+            s.ship.rot.rotate(eye.seat, tmp2)
+            tmp.add(tmp2)
+            relToCam(s, cam, tmp)
+            if (!cam.project(tmp.x, tmp.y, tmp.z, screenPt)) return
+            cx = screenPt.x
+            cy = screenPt.y
+            // keep the glass's angular size when the field of view changes
+            unit *= TAN_40 / cam.tanHalfY
+        }
+        arrow.setUnit(unit, MIN_DOT_DP * u, MIN_BASE_DP * u)
+        arrow.update(s.pilotAimX, s.pilotAimY)
+        arrow.draw(ui, cx, cy, a)
+    }
+
+    /** Heat, fuel and G under the speed (the systems' numbers; `06` lays the real readouts out). */
+    private fun drawSystems(ui: UiRenderer, s: Session, x: Float, y: Float, align: Int, a: Float) {
+        val u = frame.u
+        val sys = s.systems
+        buf.clear().append("HEAT ").append((sys.heat * 100.0).toInt()).append("%   FUEL ").append((sys.fuelFraction * 100.0).toInt()).append('%')
+        val heatCol = if (sys.heat >= FlightConfig.Systems.OVERHEAT_PHASE1) Theme.WARN else Theme.TEXT_DIM
+        ui.text(buf, x, y, 9f * u, withAlpha(heatCol, a * 0.9f), align, tracking = 0.12f, shadow = 0.7f, face = FontData.MONO)
+        val strain = sys.strainG
+        if (sys.gForce >= 0.5) {
+            val col = when {
+                strain >= FlightConfig.Physics.BLACKOUT_START_G -> OPAQUE or FlightConfig.Physics.G_DANGER_COLOR
+                strain >= FlightConfig.Physics.BLACKOUT_START_G * FlightConfig.Physics.G_WARN_SHARE -> OPAQUE or FlightConfig.Physics.G_WARN_COLOR
+                else -> Theme.TEXT_DIM
+            }
+            buf.clear().append(sys.gForce, 1).append(" G")
+            ui.text(buf, x, y + 13f * u, 9f * u, withAlpha(col, a * 0.9f), align, tracking = 0.12f, shadow = 0.7f, face = FontData.MONO)
+        }
     }
 
     /**
@@ -181,30 +226,6 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
         v.x += (s.ship.pos.x - c.x).toFloat()
         v.y += (s.ship.pos.y - c.y).toFloat()
         v.z += (s.ship.pos.z - c.z).toFloat()
-    }
-
-    /** Arrow from the screen centre showing which way the stick is turning the ship. */
-    private fun drawSteeringArrow(ui: UiRenderer, touch: TouchFlightControls, a: Float) {
-        val vx = touch.stickVecX
-        val vy = touch.stickVecY
-        val mag = sqrt(vx * vx + vy * vy)
-        if (mag < 0.05f) return
-        val u = frame.u
-        val cx = frame.w * 0.5f
-        val cy = frame.h * 0.5f
-        val ux = vx / mag
-        val uy = vy / mag
-        val len = 30f * u + 58f * u * min(mag, 1f)
-        val ex = cx + ux * len
-        val ey = cy + uy * len
-        val col = withAlpha(Theme.TEXT, a * (0.35f + 0.5f * min(mag, 1f)))
-        ui.line(cx + ux * 20f * u, cy + uy * 20f * u, ex, ey, 2f * u, col)
-        // arrow head: back vector rotated ±30°
-        val bx = -ux
-        val by = -uy
-        val hl = 11f * u
-        ui.line(ex, ey, ex + (bx * 0.866f - by * 0.5f) * hl, ey + (bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
-        ui.line(ex, ey, ex + (bx * 0.866f + by * 0.5f) * hl, ey + (-bx * 0.5f + by * 0.866f) * hl, 2f * u, col)
     }
 
     // ------------------------------------------------------------------ targets, lock and markers
@@ -403,17 +424,13 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
     // ------------------------------------------------------------------ landing ladder and gear
 
     /**
-     * Pitch ladder (±10° steps relative to the local horizon) with PITCH and ALT boxes. Shown only
-     * in landing mode, like the Roblox version's L landing.
+     * Pitch ladder (±10° steps relative to the local horizon) with PITCH and ALT boxes: the
+     * attitude indicator, shown by DECISIONS 15's rule ([Session.attitudeShown]).
      */
     private fun drawLandingHud(ui: UiRenderer, s: Session, cam: Camera, a: Float) {
         val mode = s.mode
-        val gear = s.gearRig.downFraction
-        if (!(mode.landing || mode.landed)) {
-            if (gear > 0f) drawGear(ui, s, a)
-            return
-        }
-        val i = if (mode.landed) s.landedBody else s.here.nearestBody
+        if (!s.attitudeShown) return
+        val i = if (mode.landed) s.landedBody else s.gs.body
         if (i < 0) return
         val ship = s.ship
         val b = s.system.bodies[i]
@@ -491,34 +508,27 @@ class SessionHud(private val frame: Frame, private val settings: Settings) {
             }
         }
         // vertical speed under the ALT box, total speed under the PITCH box (touchdown limits)
-        val vs = ship.vel.dot(upV)
+        val vs = (ship.vel.x * upV.x + ship.vel.y * upV.y + ship.vel.z * upV.z).toFloat()
         buf.clear().append(vs, 1).append(" M/S")
-        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs <= -Session.TOUCHDOWN_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
-        buf.clear().append(ship.speed, 0).append(" M/S")
+        ui.text(buf, rx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (vs <= -Session.HARD_TOUCHDOWN) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
+        buf.clear().append(ship.speed.toFloat(), 0).append(" M/S")
         ui.text(buf, lx + bw * 0.5f, cy + bh * 0.5f + 14f * u, 9.5f * u, withAlpha(if (ship.speed >= Session.TOUCHDOWN_MAX_SPEED) Theme.DANGER else Theme.OK, a), UiRenderer.CENTER, shadow = 0.6f, face = FontData.MONO)
-        drawGear(ui, s, a)
-    }
-
-    private fun drawGear(ui: UiRenderer, s: Session, a: Float) {
-        val u = frame.u
-        val rig = s.gearRig
-        val gear = rig.downFraction
-        val label = when {
-            gear >= 1f -> if (s.mode.landed) "LANDED" else "GEAR DOWN"
-            rig.doorsMoving -> "GEAR · DOORS"
-            else -> "GEAR · LEGS"
-        }
-        val x = frame.w * 0.5f
-        val y = frame.h - frame.sb - 30f * u
-        val col = withAlpha(if (gear >= 1f) Theme.OK else Theme.WARN, a)
-        ui.textCentered(label, x, y - 12f * u, 10f * u, col, tracking = 0.25f, shadow = 0.6f)
-        ui.rect(x - 50f * u, y, 100f * u, 4f * u, withAlpha(Theme.PANEL, a), 2f * u)
-        ui.rect(x - 50f * u, y, 100f * u * gear, 4f * u, col, 2f * u)
     }
 
     companion object {
         /** Most target labels the flight HUD places per frame. */
         private const val MAX_LABELS = 32
+        private const val OPAQUE = -0x1000000
+
+        /** The cockpit's projection glass in front of the eye (`Attitude.GlassDistance`), m. */
+        const val GLASS_DISTANCE = 3.2f
+
+        /** tan(40°): the glass arrow is sized for a vertical FOV of 80°. */
+        private const val TAN_40 = 0.8390996f
+
+        /** Phone clamps of 9.1: the dot at least 2.5 dp, the triangle's base at least 9 dp. */
+        const val MIN_DOT_DP = 2.5f
+        const val MIN_BASE_DP = 9f
 
         /** The first-flight hints start to fade after this long on screen, s. */
         const val HINT_TIME = 25f

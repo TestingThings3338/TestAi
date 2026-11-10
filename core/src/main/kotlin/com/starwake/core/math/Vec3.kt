@@ -93,6 +93,35 @@ class DVec3(
         x += (to.x - x) * t; y += (to.y - y) * t; z += (to.z - z) * t; return this
     }
 
+    fun zero(): DVec3 = set(0.0, 0.0, 0.0)
+
+    fun add(v: DVec3): DVec3 {
+        x += v.x; y += v.y; z += v.z; return this
+    }
+
+    fun sub(v: DVec3): DVec3 {
+        x -= v.x; y -= v.y; z -= v.z; return this
+    }
+
+    fun addScaled(v: DVec3, s: Double): DVec3 {
+        x += v.x * s; y += v.y * s; z += v.z * s; return this
+    }
+
+    fun scale(s: Double): DVec3 {
+        x *= s; y *= s; z *= s; return this
+    }
+
+    fun dot(v: DVec3): Double = x * v.x + y * v.y + z * v.z
+    fun dot(ax: Double, ay: Double, az: Double): Double = x * ax + y * ay + z * az
+    fun lengthSq(): Double = x * x + y * y + z * z
+    fun length(): Double = kotlin.math.sqrt(lengthSq())
+
+    /** this = v as doubles. */
+    fun set(v: Vec3): DVec3 = set(v.x.toDouble(), v.y.toDouble(), v.z.toDouble())
+
+    /** out = this as floats (directions and small velocities for float consumers). */
+    fun toFloat(out: Vec3): Vec3 = out.set(x.toFloat(), y.toFloat(), z.toFloat())
+
     /** out = this - origin, as floats (camera-relative coordinates). */
     fun relativeTo(origin: DVec3, out: Vec3): Vec3 =
         out.set((x - origin.x).toFloat(), (y - origin.y).toFloat(), (z - origin.z).toFloat())

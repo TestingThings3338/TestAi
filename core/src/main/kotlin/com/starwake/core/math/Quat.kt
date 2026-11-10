@@ -83,6 +83,38 @@ class Quat(
 
     fun rotateInverse(v: Vec3, out: Vec3): Vec3 = rotateInverse(v.x, v.y, v.z, out)
 
+    /** out = this * v * this⁻¹ in double precision (velocities of up to 10⁹ m/s keep their low digits). */
+    fun rotate(vx: Double, vy: Double, vz: Double, out: DVec3): DVec3 {
+        val qx = x.toDouble()
+        val qy = y.toDouble()
+        val qz = z.toDouble()
+        val qw = w.toDouble()
+        val tx = 2.0 * (qy * vz - qz * vy)
+        val ty = 2.0 * (qz * vx - qx * vz)
+        val tz = 2.0 * (qx * vy - qy * vx)
+        return out.set(
+            vx + qw * tx + (qy * tz - qz * ty),
+            vy + qw * ty + (qz * tx - qx * tz),
+            vz + qw * tz + (qx * ty - qy * tx),
+        )
+    }
+
+    /** out = this⁻¹ * v * this (world -> local) in double precision. */
+    fun rotateInverse(vx: Double, vy: Double, vz: Double, out: DVec3): DVec3 {
+        val qx = -x.toDouble()
+        val qy = -y.toDouble()
+        val qz = -z.toDouble()
+        val qw = w.toDouble()
+        val tx = 2.0 * (qy * vz - qz * vy)
+        val ty = 2.0 * (qz * vx - qx * vz)
+        val tz = 2.0 * (qx * vy - qy * vx)
+        return out.set(
+            vx + qw * tx + (qy * tz - qz * ty),
+            vy + qw * ty + (qz * tx - qx * tz),
+            vz + qw * tz + (qx * ty - qy * tx),
+        )
+    }
+
     /** Integrates a body-frame angular velocity (rad/s) over dt: this = this * exp(ω dt / 2). */
     fun integrateLocal(wx: Float, wy: Float, wz: Float, dt: Float): Quat {
         val ax = wx * dt

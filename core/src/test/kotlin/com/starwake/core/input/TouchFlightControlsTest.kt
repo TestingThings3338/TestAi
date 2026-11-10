@@ -104,6 +104,25 @@ class TouchFlightControlsTest {
     }
 
     @Test
+    fun theLeverRunsFromMinus25To100PercentWithZeroAtAFifth() {
+        // DECISIONS 19: an absolute lever, −25 %..100 %, the zero line at 20 % of the gauge
+        val c = controls()
+        val g = c.gauge
+        val x = g.cx + 80f * u
+        // a drag over the whole gauge from the zero line: up to 100 %, down to −25 %
+        c.onDown(1, x, h * 0.6f)
+        c.onMove(1, x, h * 0.6f - g.h * 0.8f)
+        assertEquals(1f, c.throttle, 1e-4f)
+        c.onMove(1, x, h * 0.6f - g.h * 0.4f)
+        assertEquals(0.5f, c.throttle, 1e-3f, "half way up the forward part is 50 %")
+        c.onMove(1, x, h * 0.6f + g.h * 0.2f)
+        assertEquals(-0.25f, c.throttle, 1e-4f, "the bottom fifth is the reverse quarter")
+        c.onMove(1, x, h * 0.6f + g.h)
+        assertEquals(-0.25f, c.throttle, "clamped")
+        c.onUp(1, x, 0f, false)
+    }
+
+    @Test
     fun doubleTapOnTheLeverZeroesIt() {
         val c = controls()
         c.throttle = 0.6f
@@ -115,6 +134,37 @@ class TouchFlightControlsTest {
             write(c, 0.05f)
         }
         assertEquals(0f, c.throttle)
+        assertTrue(f.leverSet, "the zero goes to the session")
+    }
+
+    @Test
+    fun doubleTapAndHoldIsTheFullStop() {
+        // Roblox X: held, the lever runs to zero in 1.2 s and every axis brakes (the thrust does that)
+        val c = controls()
+        c.throttle = 0.8f
+        val x = c.gauge.cx + 80f * u
+        c.onDown(1, x, h * 0.6f)
+        write(c, 0.05f)
+        c.onUp(1, x, h * 0.6f, false)
+        write(c, 0.05f)
+        assertFalse(f.held(Action.FULL_STOP), "one tap is nothing")
+        c.onDown(1, x, h * 0.6f)
+        for (i in 0 until 30) {
+            write(c, 1f / 60f)
+            assertTrue(f.held(Action.FULL_STOP), "frame $i of the hold")
+        }
+        // dragging while it is held does not move the lever (the thumb only holds the stop)
+        c.onMove(1, x, h * 0.6f - 60f * u)
+        assertEquals(0.8f, c.throttle)
+        c.onUp(1, x, h * 0.6f - 60f * u, false)
+        write(c)
+        assertFalse(f.held(Action.FULL_STOP))
+        assertEquals(0f, c.throttle, "the lever ends at zero")
+        // a later single touch is the lever again
+        c.onDown(2, x, h * 0.6f)
+        write(c, 0.5f)
+        assertFalse(f.held(Action.FULL_STOP))
+        c.onUp(2, x, h * 0.6f, false)
     }
 
     @Test
@@ -216,13 +266,18 @@ class TouchFlightControlsTest {
         c.write(f, 1f / 60f)
         assertFalse(f.pressed(Action.LAND))
         c.releaseAll()
-        // WALK, DATA, AUTO, SCAN have no feature yet: never pressed
+        // WALK, DATA, SCAN have no feature yet, AUTO shows only with a lock: never pressed hidden
         for (r in listOf(c.walkBtn, c.dataBtn, c.autoBtn, c.scanBtn)) {
             c.onDown(2, r.cx, r.cy)
             write(c)
             for (a in listOf(Action.LEAVE_SEAT, Action.STATION_PANEL, Action.AUTOPILOT, Action.SURVEY)) assertFalse(f.pressed(a))
             c.onUp(2, r.cx, r.cy, false)
         }
+        // with a target locked AUTO is there: the autopilot (Roblox P)
+        c.autoVisible = true
+        c.onDown(3, c.autoBtn.cx, c.autoBtn.cy)
+        assertEquals(1, write(c).presses(Action.AUTOPILOT))
+        c.onUp(3, c.autoBtn.cx, c.autoBtn.cy, false)
     }
 
     @Test

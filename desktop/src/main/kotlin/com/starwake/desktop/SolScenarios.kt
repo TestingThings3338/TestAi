@@ -27,6 +27,9 @@ import kotlin.math.sqrt
  * clock the debug read-out shows to know where the bodies are.
  */
 object SolScenarios {
+    /** The trip marks' approach: 12 radii from the target's centre. */
+    private const val APPROACH_RADII = 12.0
+
     private fun run(env: ScenarioEnv, script: GameDriver.() -> Unit) {
         GlSession(env).use { session ->
             val platform = DesktopPlatform(env.opts.assetsDir, env.opts.settings)
@@ -235,7 +238,13 @@ object SolScenarios {
         )) {
             viewOf(body, radii, sun, elev)
             frames(3)
-            if (field("body") != body) fail("the nearest body is not $body")
+            // the nearest body is the one at the smallest altitude (Roblox `getState`): from 3 radii
+            // a small moon inside them (Phobos round Mars) can be nearer than the planet
+            val w = world()
+            val near = w.bodyIndex(field("body") ?: "")
+            if (near < 0 || (w.bodies[near].name != body && w.bodies[near].parent != w.bodyIndex(body))) {
+                fail("the nearest body is ${field("body")}, not $body or one of its moons")
+            }
             cmd("lock-body ${body.lowercase()}")
             frames(20)
             shot("sol-view-${body.lowercase()}")
@@ -335,7 +344,7 @@ object SolScenarios {
                     log("t %4.1f s: %s".format(t, game.debugInfo.substringAfter(" alt=").substringBefore(" throttle=") + " zone=" + field("zone") + " body=" + field("body") + " limit=" + field("limit")))
                     mark++
                 }
-                if (t12 < 0 && d < mars0.radius * StarSystem.APPROACH_RADII) {
+                if (t12 < 0 && d < mars0.radius * APPROACH_RADII) {
                     t12 = t
                     marks += frame to "sol-trip-mars-12r"
                 }
@@ -343,7 +352,7 @@ object SolScenarios {
                     tEdge = t
                     marks += frame to "sol-trip-mars-shadow-edge"
                 }
-                if (d - mars0.radius < StarSystem.LOW_ALTITUDE) {
+                if (d - mars0.radius < Session.LAND_RANGE) {
                     tLow = t
                     arrival = frame
                     break
@@ -354,8 +363,12 @@ object SolScenarios {
                 "MERIDIAN -> Mars: mass-shadow edge after %.1f s, 12 radii after %.1f s, 60 km after %.1f s; peak %.1f Mm/s (%.2f c); closest to Earth on the way %,.0f km"
                     .format(tEdge, t12, tLow, peak / 1e6, peak / 2.998e8, minEarth / 1000.0),
             )
-            if (peak > StarSystem.MAX_SPEED * 1.0001) fail("faster than 0.5 c: $peak m/s")
-            if (tEdge > 90.0) fail("MERIDIAN -> Mars took $tEdge s to the mass-shadow edge (about a minute expected)")
+            if (peak > com.starwake.core.flight.FlightLaw.HALF_LIGHT * 1.0001) fail("faster than 0.5 c: $peak m/s")
+            // the flight port's Roblox law: out of the slot the station holds the ship at 140 m/s
+            // (2.2 km) and 260 m/s (6 km lock), and at clock 0 Mars lies behind Earth: the straight
+            // line crosses Earth's mass shadow (MERIDIAN orbits inside it) at its 0.15 R floor,
+            // 954 km/s. DECISIONS 2's minute is planet to planet at the closest approach (TripTimeTest)
+            if (tEdge > 130.0) fail("MERIDIAN -> Mars took $tEdge s to the mass-shadow edge (about two minutes expected)")
             if (field("body") != "Mars") fail("arrived, but the nearest body is ${field("body")}")
         }
         // the same flight drawn at half resolution (the runs are deterministic): shots at the marks
@@ -395,6 +408,15 @@ object SolScenarios {
         if (field("station") != "$galilean") fail("not docked at GALILEAN REFINERY")
         cmd("undock")
         frames(90)
+        // out of the station's zones on the launch axis first: the straight line to Io may cross
+        // the refinery, and its hull crashes a ship above 45 m/s (the flight port, 02 5.7)
+        cmd("throttle 1")
+        frame()
+        var out = 0
+        while (field("zone") == "STATION_ZONE") {
+            frame()
+            if (++out > 60 * 60) fail("still in GALILEAN REFINERY's zone after a minute")
+        }
         cmd("face io")
         cmd("lock-body io")
         cmd("throttle 1")
@@ -410,9 +432,10 @@ object SolScenarios {
     }
 
     /**
-     * GALILEAN REFINERY to Io at full throttle. Jupiter is the nearest body by size for most of the
-     * way, but Io limits the speed (the minimum over all bodies, `ShipGravity:getState`): the ship
-     * reaches Io's surface at landing speeds instead of tens of Mm/s.
+     * GALILEAN REFINERY to Io at full throttle. The limit is the minimum over all bodies, not the
+     * nearest body's alone (`ShipGravity:getState`): once Io is the nearest body (the smallest
+     * altitude, Roblox's rule) Jupiter's mass shadow still limits the speed for a while, then Io
+     * brings the ship to its surface at landing speeds instead of Mm/s.
      */
     fun moon(env: ScenarioEnv) {
         val sol = WorldBuilder.sol()
@@ -430,7 +453,7 @@ object SolScenarios {
             var t1km = -1.0
             var v1km = 0.0
             var peak = 0.0
-            var ioUnderJupiter = 0.0
+            var jupiterOverIo = 0.0
             var mark = 0
             while (frame - start < 60 * 150) {
                 val before = num("speed")
@@ -438,20 +461,26 @@ object SolScenarios {
                 val t = (frame - start) / 60.0
                 val alt = dist(vec("pos"), world().bodies[ioIndex].pos) - io0.radius
                 peak = maxOf(peak, num("speed"))
-                // Jupiter is the nearest body by size, Io sets the limit
-                if (field("body") == "Jupiter" && field("limiter") == "Io") ioUnderJupiter += 1.0 / 60.0
+                // Io is the nearest body (the smallest altitude), Jupiter's shadow sets the limit
+                if (field("body") == "Io" && field("limiter") == "Jupiter") jupiterOverIo += 1.0 / 60.0
                 if (mark < MOON_MARKS.size && t >= MOON_MARKS[mark]) {
                     marks += frame to "sol-moon-%02.0fs".format(MOON_MARKS[mark])
                     log("t %4.1f s: Io %,.0f km below, speed %s m/s, limit %s, nearest %s, limiter %s".format(t, alt / 1000.0, field("speed"), field("limit"), field("body"), field("limiter")))
                     mark++
                 }
-                if (t12 < 0 && alt + io0.radius < io0.radius * StarSystem.APPROACH_RADII) {
+                if (t12 < 0 && alt + io0.radius < io0.radius * APPROACH_RADII) {
                     t12 = t
                     marks += frame to "sol-moon-io-12r"
-                    // the zone names the body that limits the speed: an approach to Io, not a departure from Jupiter
-                    if (field("zone") != "APPROACH") fail("12 radii from Io the zone is ${field("zone")}, not APPROACH")
+                    // the zone names the constraint that limits the speed, never a departure from
+                    // Jupiter: 12 radii out the ship is still in Jupiter's mass shadow, whose floor
+                    // (0.15 R, 4.19 Mm/s in the port's law) can be below Io's approach; Io takes over
+                    // closer in (and limits while Jupiter's shadow does, jupiterOverIo below)
+                    val z = field("zone")
+                    if (z != "APPROACH" && !(z == "GRAVITY_WELL" && field("limiter") == "Jupiter")) {
+                        fail("12 radii from Io the zone is $z (limiter ${field("limiter")}), not APPROACH or Jupiter's GRAVITY WELL")
+                    }
                 }
-                if (tLow < 0 && alt < StarSystem.LOW_ALTITUDE) {
+                if (tLow < 0 && alt < Session.LAND_RANGE) {
                     tLow = t
                     marks += frame to "sol-moon-io-60km"
                 }
@@ -464,11 +493,11 @@ object SolScenarios {
             }
             if (t1km < 0) fail("never came within 1 km of Io in 150 s")
             report.note(
-                "GALILEAN REFINERY -> Io: 12 radii after %.1f s, 60 km after %.1f s, 1 km after %.1f s at %.0f m/s; peak %.2f Mm/s; Io set the limit for %.1f s while Jupiter was the nearest body"
-                    .format(t12, tLow, t1km, v1km, peak / 1e6, ioUnderJupiter),
+                "GALILEAN REFINERY -> Io: 12 radii after %.1f s, 60 km after %.1f s, 1 km after %.1f s at %.0f m/s; peak %.2f Mm/s; Jupiter set the limit for %.1f s while Io was the nearest body"
+                    .format(t12, tLow, t1km, v1km, peak / 1e6, jupiterOverIo),
             )
             if (v1km > 400.0) fail("reached Io's surface too fast: %.0f m/s 1 km up".format(v1km))
-            if (ioUnderJupiter <= 0.0) fail("Io never limited the speed while Jupiter was the nearest body")
+            if (jupiterOverIo <= 0.0) fail("Jupiter never limited the speed while Io was the nearest body")
             if (field("body") != "Io") fail("arrived, but the nearest body is ${field("body")}")
         }
         // the same approach drawn at half resolution: shots at the marks and on arrival

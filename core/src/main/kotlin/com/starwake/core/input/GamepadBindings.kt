@@ -13,7 +13,7 @@ import kotlin.math.abs
  * |---|---|---|
  * | left stick | aim (pitch, roll/yaw) | |
  * | right stick | X key axis, Y vertical thrust; with L3 held: look around (up to 180°/s) | |
- * | LT / RT | lever down / up (zero detent) | |
+ * | LT / RT | lever down / up at 25 %/s × trigger (the W/S ramp) | |
  * | LB / RB | strafe left / right | |
  * | L3 | | look modifier |
  * | R3 | | full stop |
@@ -36,9 +36,6 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
     private val active = BooleanArray(GamepadState.BUTTONS)
     private val heldTime = FloatArray(GamepadState.BUTTONS)
     private val holdFired = BooleanArray(GamepadState.BUTTONS)
-
-    /** The triggers crossed zero: the lever stays at zero until both are released (detent). */
-    private var zeroHold = false
 
     init {
         bind(GamepadState.A, Action.BOOST)
@@ -63,11 +60,10 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
     fun holdOf(button: Int): Action? = holdAction[button]
 
     /**
-     * Writes the pad's flight input into [f]. [throttle] is the lever position before this frame
-     * (the session's); the triggers ramp it at [LEVER_RATE] per second with a zero detent and the
-     * result goes into [InputFrame.lever]. [host] gets the detent's haptic tick.
+     * Writes the pad's flight input into [f]: the triggers are Roblox's W/S ([InputFrame.throttleAxis],
+     * RT − LT: the thrust ramps the lever by it at 25 %/s, 02 9.2). [host] gets the hold ticks.
      */
-    fun write(f: InputFrame, dt: Float, throttle: Float, host: UiHost?) {
+    fun write(f: InputFrame, dt: Float, host: UiHost?) {
         if (!pad.connected) return
         var used = false
         val sens = settings.sensitivity
@@ -107,27 +103,12 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
             f.hold(Action.FULL_STOP)
             used = true
         }
-        // triggers ramp the lever; crossing zero stops at zero until they are released
+        // the triggers are W and S: the thrust ramps the lever by their difference (ThrottleRampTime 4 s)
         val thr = pad.rightTrigger - pad.leftTrigger
-        val base = if (f.leverSet) f.lever else throttle
         if (abs(thr) > TRIGGER_DEAD) {
-            var t = clamp(base + thr * LEVER_RATE * dt, -1f, 1f)
-            if (zeroHold || (base > 0f && t <= 0f) || (base < 0f && t >= 0f)) {
-                if (!zeroHold) host?.haptic(Haptics.TICK)
-                t = 0f
-                zeroHold = true
-            }
-            f.leverSet = true
-            f.lever = t
+            f.throttleAxis = clamp(f.throttleAxis + thr, -1f, 1f)
             f.hold(if (thr > 0f) Action.THROTTLE_UP else Action.THROTTLE_DOWN)
             used = true
-        } else {
-            zeroHold = false
-            // a lever left just off zero by the triggers settles on zero
-            if (!f.leverSet && base != 0f && abs(base) < SNAP) {
-                f.leverSet = true
-                f.lever = 0f
-            }
         }
         // buttons
         for (b in 0 until GamepadState.BUTTONS) {
@@ -166,11 +147,10 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
         if (used) f.device = InputFrame.GAMEPAD
     }
 
-    /** Forgets held buttons and the detent (the screen changed; presses are discarded by the game). */
+    /** Forgets held buttons (the screen changed; presses are discarded by the game). */
     fun reset() {
         active.fill(false)
         holdFired.fill(false)
-        zeroHold = false
     }
 
     companion object {
@@ -180,12 +160,6 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
         /** Look rate at full right-stick deflection with L3 held, degrees per second (01 8.1.1). */
         const val LOOK_RATE = 180f
 
-        /**
-         * Lever travel per second at full trigger. The Roblox W/S ramp is 25 %/s (ThrottleRampTime 4 s);
-         * the flight-model port (`02`) brings that rate, until then the triggers keep the current feel.
-         */
-        const val LEVER_RATE = 0.8f
         private const val TRIGGER_DEAD = 0.05f
-        private const val SNAP = 0.03f
     }
 }

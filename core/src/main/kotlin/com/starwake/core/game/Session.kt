@@ -5,6 +5,18 @@ import com.starwake.core.Settings
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
 import com.starwake.core.content.StationMesh
+import com.starwake.core.flight.Autopilot
+import com.starwake.core.flight.FlightConfig
+import com.starwake.core.flight.FlightLaw
+import com.starwake.core.flight.GravityField
+import com.starwake.core.flight.GravityState
+import com.starwake.core.flight.LimitZone
+import com.starwake.core.flight.ShipHandling
+import com.starwake.core.flight.ShipProfile
+import com.starwake.core.flight.ShipProfiles
+import com.starwake.core.flight.ShipRotation
+import com.starwake.core.flight.ShipSystems
+import com.starwake.core.flight.ShipThrust
 import com.starwake.core.gfx.SceneFrame
 import com.starwake.core.input.Action
 import com.starwake.core.input.InputFrame
@@ -15,7 +27,6 @@ import com.starwake.core.math.Quat
 import com.starwake.core.math.Vec3
 import com.starwake.core.math.clamp
 import com.starwake.core.math.expApproach
-import com.starwake.core.math.expoCurve
 import com.starwake.core.ui.UiHost
 import com.starwake.core.world.RingDebris
 import kotlin.math.abs
@@ -41,11 +52,14 @@ interface SessionHost : UiHost {
  * flight frame runs the steps of [FrameStep] in order; a step whose module is not ported yet is an
  * empty slot (marked in the trace) where that area's port plugs in.
  *
- * The flight itself is still the pre-port model ([FlightModel], [StarSystem.locate], the Kotlin
- * landing mode and auto-dock); it sits in its Roblox slots (C13 rotation input, C16 gravity state,
- * C19-C21 limit, C23 the sub-stepped move with its collisions, C28 ground, C30 docking) until the
- * flight and station ports replace it. The world runs in its slots: C14 moves the bodies on their
- * orbits, C15 carries the ship with its reference frame (03-world.md 2.9.4, DECISIONS 6).
+ * The flight is the Roblox flight model (02-flight.md): [handling], the [autopilot], [rotation],
+ * the [gravity] field with the S-classified speed law and its station and edge composition,
+ * [thrust], the [systems] (fuel, heat, G) and the gear command, each in its Roblox slot. The move
+ * is sub-stepped (≤ 1/120 s) with the collisions: the ship slides along surfaces and station hulls
+ * and crashes above their thresholds (a plain Roblox crash: fade, respawn in front of the nearest
+ * station; `05` brings the cinematic). The world runs in its slots: C14 moves the bodies on their
+ * orbits, C15 carries the ship with its reference frame (03-world.md 2.9.4, DECISIONS 6). The
+ * landing mode (L) and the auto-dock (K) are still the pre-port ones (`05`, `08` replace them).
  *
  * Also here: the key handlers (Roblox `InputBegan` glue: view, Flight Assist, boost, target, land,
  * dock, autopilot) and the frame-local state of 2.1.9. GL thread; the frame performs no allocation.
@@ -59,21 +73,38 @@ class Session(
 ) {
     val mode = PlayerMode()
     val ship = ShipState()
+
+    /** The hull's collision shape. */
     var spec = ShipSpec.STANDARD
         private set
     private var entry: ShipCatalog.Entry = ShipCatalog.all[ShipCatalog.DEFAULT]
     private var model: ShipModel? = null
-    private val flight = FlightModel(spec)
-    private val controls = ControlInput()
-    val here = StarSystem.Locality()
+
+    // ---- the flight model (02)
+    /** The world's flight law: S = 3000, the 0.5 c cap, the near band, 9.81 m/s² per g at 35 %. */
+    val law = FlightLaw.PORT
+
+    /** The flown ship's numbers (`ShipConfig.Ships`). */
+    var profile: ShipProfile = ShipProfiles.VARROW
+        private set
+    val handling = ShipHandling(profile)
+    val rotation = ShipRotation()
+    val thrust = ShipThrust(law)
+    val gravity = GravityField(law)
+
+    /** This frame's gravity state with the stations and the edge composed in (Roblox `gravityState`). */
+    val gs = GravityState()
+    val systems = ShipSystems()
+    val autopilot = Autopilot()
+
+    /** Cargo on board, t (the economy's `getCargoUsed`; debug "cargo"). */
+    var cargoMass = 0.0
+    private val contact = HullContact()
 
     /** Rocks in the ring plane around the ship (C65, 03-world.md 2.12). */
     val debris = RingDebris()
 
-    /**
-     * Heat brought by ring-debris contacts (`systems:addHeat`). The heat system comes with the
-     * flight port (02); until then it only adds up here (debug read-out `rheat`).
-     */
+    /** Heat brought by ring-debris contacts so far (it goes into [systems]; debug read-out `rheat`). */
     var debrisHeat = 0.0
         private set
 
@@ -88,7 +119,7 @@ class Session(
     /** The optional lagging chase view (DECISIONS 21a). */
     val chase = ChaseCamera()
     private val impact = ImpactShake()
-    private val stationCollision = StationCollision(flight)
+    private val stationCollision = StationCollision()
 
     val decks = DeckSession()
     val destruction = Destruction()
@@ -97,9 +128,8 @@ class Session(
     /** Set to record the next frame's steps (debug "trace", the frame-order test); null = off. */
     var trace: FrameTrace? = null
 
-    /** The throttle lever, -1..1 (Roblox `thrust.throttle`; the touch lever and the pad set it). */
-    var throttle = 0f
-        private set
+    /** The throttle lever, `MinThrottle`..1 (Roblox `thrust.throttle`; the touch lever and the pad follow it). */
+    val throttle: Float get() = thrust.throttle.toFloat()
 
     /** Session clock (s): runs with the simulation, stops while paused. */
     var time = 0f
@@ -112,6 +142,20 @@ class Session(
     private var wasTravelling = false
     private var lastFlightAssist = true
     private var welcomeIn = -1f
+
+    /** The PILOT's cursor this frame (the flight arrow shows it even while the autopilot steers). */
+    var pilotAimX = 0f
+        private set
+    var pilotAimY = 0f
+        private set
+
+    /** The flight arrow is shown (C35: not while looking around, docked or on foot). */
+    var cursorShown = true
+        private set
+
+    /** The attitude indicator is shown (C69, DECISIONS 15; [attitudeWanted]). */
+    var attitudeShown = false
+        private set
 
     /** Closest gap (m) between the hull and a station this frame (PROXIMITY warning). */
     var proximity = Float.MAX_VALUE
@@ -142,8 +186,22 @@ class Session(
     /** Seconds of assisted climb left after a take-off (Flight Assist would otherwise stop it). */
     private var liftTime = 0f
 
-    /** Gear position forced by debug commands (null = follow the landing mode), like ShipHull.gearForce. */
+    /** Gear position forced by debug commands (null = follow the flight), like ShipHull.gearForce. */
     var gearForce: Boolean? = null
+
+    // ---- the crash (a plain Roblox crash, `Warnings.Crash`; `05` brings the cinematic)
+    /** Seconds since the crash started, -1 without one. */
+    var crashTime = -1f
+        private set
+
+    /** What destroyed the ship last: "HEAT", "GROUND", "STATION" ("" before any crash). */
+    var crashCause = ""
+        private set
+    var crashes = 0
+        private set
+    private var respawned = false
+    private var pendingCrash: String? = null
+    private val crashPos = DVec3()
 
     // ---- docking (K): the pre-port auto-dock into the slot
     var dockStation = -1
@@ -160,6 +218,14 @@ class Session(
     var message: String? = null
         private set
     private var messageTime = 0f
+    private var barrierNoticeAt = -100f
+
+    /** The barrier's texts per body, built once (no string building in the frame). */
+    private val holdText = Array(system.bodies.size) { "MINIMUM ALTITUDE  ·  HOLDING ABOVE " + system.bodies[it].displayName }
+    private val blockedText = Array(system.bodies.size) {
+        val b = system.bodies[it].landingBlocked
+        if (b == null || b == StarSystem.NO_SOLID_SURFACE) LANDING_BLOCKED_GAS else "LANDING BLOCKED  ·  $b"
+    }
 
     // ---- HUD state (C67)
     /** Caption of the contextual ACTION control, "" when hidden. */
@@ -170,7 +236,7 @@ class Session(
     var actionTarget: Action? = null
         private set
 
-    /** Zone caption under the top bar (StarSystem zone; `02` brings ShipGravity.zoneLabel). */
+    /** Zone caption under the top bar (Roblox `thrust.speedZone`, `ShipGravity.zoneLabel`). */
     var zoneLabel = ""
         private set
 
@@ -195,19 +261,25 @@ class Session(
     private val tmp2 = Vec3()
     private val upV = Vec3()
     private val fwdV = Vec3()
+    private val velF = Vec3()
+    private val feltLocal = DVec3()
+    private val targetPos = DVec3()
     private val landRot = Quat()
 
     // ================================================================== set-up
 
     /**
-     * Flies ship [e] with [newSpec] (and its model's eye, when loaded): the flight model's spec, the
-     * Roblox external camera of the ship and the chase framing. Not per frame.
+     * Flies ship [e] with [newSpec] (and its model's eye, when loaded): its flight profile and
+     * handling, the collision shape, the Roblox external camera and the chase framing. The tank
+     * keeps its level. Not per frame.
      */
     fun setShip(e: ShipCatalog.Entry, newSpec: ShipSpec, m: ShipModel?) {
         entry = e
         spec = newSpec
         model = m
-        flight.spec = newSpec
+        profile = ShipProfiles.get(e.id)
+        handling.profile = profile
+        stationCollision.spec = newSpec
         camera.setExternalCamera(e.cameraX, e.cameraY, e.cameraZ, e.cameraPitchDeg)
         if (m != null) camera.seat.set(m.eyeX, m.eyeY, m.eyeZ) else camera.seat.set(0f, 0.5f, 0f)
         // the chase view takes the Roblox external camera's place and tilt, circling the hull's centre
@@ -219,8 +291,11 @@ class Session(
     private fun resetFlight() {
         mode.reset()
         ship.reset()
-        controls.clearAxes()
-        throttle = 0f
+        thrust.reset(ship.vel)
+        thrust.flightAssist = FlightConfig.Thrust.FLIGHT_ASSIST_DEFAULT
+        thrust.boostRequested = false
+        systems.reset()
+        autopilot.disengage()
         flightTime = 0f
         launchTime = -100f
         lockKind = LOCK_NONE
@@ -233,6 +308,8 @@ class Session(
         wasTravelling = false
         lastFlightAssist = true
         stickHold = false
+        crashTime = -1f
+        pendingCrash = null
         camera.lookHold = false
         camera.resetLook()
         impact.reset()
@@ -256,25 +333,25 @@ class Session(
 
     /**
      * Free flight [StarSystem.SPAWN_DISTANCE] out of the home station's mouth, nose away from it
-     * (towards Earth from MERIDIAN), moving at 30 % throttle (harness scripts that test flying
-     * use it through "launch space").
+     * (towards Earth from MERIDIAN), the lever at 30 % and moving at 30 % of TopSpeed (harness
+     * scripts that test flying use it through "launch space").
      */
     fun startInSpace() {
         resetFlight()
         system.spaceSpawn(SpawnRules.startStation(system), ship.pos, ship.rot)
-        throttle = 0.3f
-        controls.throttle = 0.3f
-        ship.rot.rotate(0f, 0f, -0.3f * spec.maxSpeed, ship.vel)
+        thrust.setThrottle(0.3)
+        ship.rot.rotate(0.0, 0.0, -0.3 * handling.topSpeed, ship.vel)
         afterPlacement()
     }
 
     private fun afterPlacement() {
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
-        gearRig.update(0f, gearWanted(), true)
         refFrame = if (mode.docked && dockStation >= 0) StarSystem.stationFrame(dockStation) else system.frameFor(ship.pos, StarSystem.FRAME_NONE)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-        zoneLabel = here.zone.label
+        locate()
+        gearRig.update(0f, gearWanted(), true)
+        zoneLabel = gs.zoneLabel
+        ship.updateDerived()
         updateCamera(0f)
     }
 
@@ -362,6 +439,7 @@ class Session(
 
     /** Branch C: the flight frame in Roblox order (`ShipClient.lua:2344-3195`). */
     private fun flightFrame(dt: Float, input: InputFrame) {
+        val dtd = dt.toDouble()
         // ---- C1 input: look-around, the key handlers (Roblox InputBegan runs before the render step)
         mark(FrameStep.C1)
         flightTime += dt
@@ -372,6 +450,8 @@ class Session(
         // the pilot's raw deflection decides "steering" (C7) before the gate zeroes it
         val rawAim = input.aimMagnitude
         val rawKeys = input.keyAxis
+        pilotAimX = input.aimX
+        pilotAimY = input.aimY
         InputGate.filterActions(input, mode)
         handleActions(input)
         val lookOk = mode.view != ShipView.CHASE && InputGate.allows(Action.LOOK, mode)
@@ -385,49 +465,111 @@ class Session(
         mark(FrameStep.C3)
         mode.controlled = mode.docking || mode.docked || mode.launching // 05: or a guidance phase
         mark(FrameStep.C4)
-        val thrustInput = InputGate.thrustEnabled(mode)
+        thrust.inputEnabled = InputGate.thrustEnabled(mode)
         mark(FrameStep.C5)
-        if (mode.controlled || mode.onFoot) controls.boost = false
+        if (mode.controlled || mode.onFoot) thrust.boostRequested = false
         mark(FrameStep.C6)
         if (mode.travelling != wasTravelling) wasTravelling = mode.travelling // a touch stick recentres by itself
         mark(FrameStep.C7)
-        steering = !mode.onFoot && (rawAim > OVERRIDE_DEFLECTION || abs(rawKeys) > OVERRIDE_DEFLECTION)
+        steering = !mode.onFoot && (rawAim > FlightConfig.Autopilot.OVERRIDE_DEFLECTION || rawKeys != 0f)
         InputGate.gateAxes(input, mode)
+        thrustInput(input)
+        var aimX = input.aimX
+        var aimY = input.aimY
+        var keyAxis = input.keyAxis
+        var cursorRolls = settings.stickXRoll
 
         // ---- C8-C13 handling, autopilot, rotation
-        mark(FrameStep.C8) // 02: handling:update
-        mark(FrameStep.C9) // 02: autopilot disengages in an atmosphere
-        mark(FrameStep.C10) // 02: autopilot disengages while controlled
-        mark(FrameStep.C11) // 02: autopilot computes aim, roll and throttle
+        mark(FrameStep.C8)
+        handling.update(dtd, ship.speed, systems.fuelFraction, cargoMass)
+        mark(FrameStep.C9)
+        // the autopilot knows only space: the landing mode (the later atmosphere states) takes it off
+        if (autopilot.engaged && (mode.landing || mode.landed)) {
+            autopilot.disengage(Autopilot.ATMOSPHERE)
+            thrust.setThrottle(0.0)
+            voice.say(VOICE_AUTOPILOT_ATMOSPHERE)
+        }
+        mark(FrameStep.C10)
+        if (autopilot.engaged && mode.controlled) autopilot.disengage(Autopilot.STANDBY)
+        mark(FrameStep.C11)
+        if (autopilot.engaged) {
+            val ok = autopilotTarget() && autopilot.compute(
+                ship.pos, ship.rot, targetPos, autopilotRadius(), ship.speed, thrust.speedLimit, handling, law.cruiseCap,
+            )
+            if (!autopilot.engaged) {
+                // switched itself off (arrived or lost): no flying on with the last autopilot lever
+                thrust.setThrottle(0.0)
+                voice.say(if (autopilot.status == Autopilot.ARRIVED) VOICE_TARGET_REACHED else VOICE_AUTOPILOT_OFF)
+            } else if (ok) {
+                // the pilot's stick, keys or FA off take over
+                val aimMag = sqrt(aimX * aimX + aimY * aimY)
+                if (FlightConfig.Autopilot.DISENGAGE_ON_INPUT &&
+                    (aimMag > FlightConfig.Autopilot.OVERRIDE_DEFLECTION || keyAxis != 0f || !thrust.flightAssist)
+                ) {
+                    autopilot.disengage(Autopilot.MANUAL_OVERRIDE)
+                    voice.say(VOICE_MANUAL_OVERRIDE)
+                    host.haptic(Haptics.TICK)
+                } else {
+                    aimX = autopilot.cursorX
+                    aimY = autopilot.cursorY
+                    keyAxis = autopilot.roll
+                    cursorRolls = false
+                    thrust.setThrottle(autopilot.throttle)
+                }
+            }
+        }
         mark(FrameStep.C12) // 09: nobody at the helm -> throttle 0, FA on
         mark(FrameStep.C13)
-        rotationInput(input)
+        if (!mode.landed && !mode.docked && !mode.docking) {
+            rotation.update(ship.rot, ship.angVel, dt, aimX, aimY, keyAxis, handling, thrust.flightAssist, cursorRolls)
+        }
 
         // ---- C14-C22 world, gravity state and the speed limit
         mark(FrameStep.C14)
-        system.advance(dt.toDouble()) // orbits:update on the save-game clock
+        system.advance(dtd) // orbits:update on the save-game clock
         mark(FrameStep.C15)
         carryWithFrame()
         mark(FrameStep.C16)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here) // the previous frame's velocity, as Roblox
+        gravity.getState(system, ship.pos, ship.vel, gs) // the previous frame's velocity, as Roblox
         mark(FrameStep.C19)
-        val limit = if (mode.landing) minOf(here.speedLimit, LANDING_SPEED) else here.speedLimit
+        gravity.composeStations(system, ship.pos, ship.vel, StarSystem.isStationFrame(refFrame), gs)
+        gravity.composeEdge(system, ship.pos, ship.vel, gs)
         mark(FrameStep.C20)
+        zoneLabel = gs.zoneLabel
         mark(FrameStep.C21)
-        mark(FrameStep.C22) // 02: thrust:setGravity
+        thrust.setSpeedLimit(gs.speedLimit, gs.limitZone == LimitZone.SURFACE)
+        mark(FrameStep.C22)
+        thrust.setGravity(gs.gravity.x, gs.gravity.y, gs.gravity.z)
 
-        // ---- C23-C25 thrust and move: the pre-port model, sub-stepped with its collisions
+        // ---- C23-C25 thrust and the move: sub-stepped with the collisions
         mark(FrameStep.C23)
-        thrustInput(input, thrustInput)
-        move(dt, limit)
-        mark(FrameStep.C24) // 02: boost heat
-        mark(FrameStep.C25) // 02: field-edge clamp
+        if (liftTime > 0f) liftTime -= dt
+        if (!mode.docked && !mode.docking && !mode.crashing) {
+            thrust.update(dtd, ship.rot, ship.vel, handling)
+            move(dt)
+        }
+        mark(FrameStep.C24)
+        if (thrust.boostStarted) {
+            // every boost heats the ship
+            thrust.boostStarted = false
+            systems.addHeat(profile.boostHeat)
+            host.haptic(Haptics.HEAVY)
+            addShake(0.8f)
+        }
+        mark(FrameStep.C25) // the field-edge clamp runs in every sub-step of the move
 
         // ---- C26-C31 assist, systems, ground, stations
-        mark(FrameStep.C26) // 05: landing assist (the pre-port landing mode caps the limit in C19)
-        mark(FrameStep.C27) // 02: systems
+        mark(FrameStep.C26) // 05: landing assist
+        mark(FrameStep.C27)
+        thrust.localFelt(ship.rot, feltLocal)
+        systems.update(dtd, gs.starHeat, thrust.throttle, feltLocal.x, feltLocal.y, feltLocal.z, profile.fuelBurn, profile.scoopRate)
         mark(FrameStep.C28)
-        if (mode.landed) holdLanded(dt, input)
+        if (!mode.crashing) {
+            if (systems.heat >= FlightConfig.Systems.FATAL_HEAT) startCrash(CRASH_HEAT)
+            else pendingCrash?.let { startCrash(it) }
+        }
+        pendingCrash = null
+        if (mode.landed && !mode.crashing) holdLanded(dt)
         mark(FrameStep.C30)
         if (mode.docking) {
             // the pilot's deflection takes the ship back from the docking computer
@@ -442,13 +584,15 @@ class Session(
 
         // ---- C34-C40 derived state, cockpit, hull, camera
         mark(FrameStep.C34)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-        zoneLabel = here.zone.label
-        mark(FrameStep.C35) // 02: flight cursor hidden while looking, docked or on foot
+        ship.updateDerived()
+        ship.boosting = thrust.boosting
+        ship.engineOutput = if (mode.docking) 0.3f else clamp(abs(thrust.throttle).toFloat(), 0f, 1f)
+        mark(FrameStep.C35)
+        cursorShown = !mode.looking && !mode.docked && !mode.onFoot && !mode.crashing
         mark(FrameStep.C36) // 06: cockpit state
         mark(FrameStep.C37)
         mark(FrameStep.C38)
-        gearRig.update(dt, gearWanted(), false)
+        gearRig.update(dt, gearWanted(), gearInstant())
         mark(FrameStep.C39)
         impact.update(dt, settings.cameraShake, camera.shake)
         mark(FrameStep.C40)
@@ -458,9 +602,10 @@ class Session(
         mark(FrameStep.C41) // 05: entry effects
         mark(FrameStep.C43) // 09: audio
         mark(FrameStep.C44)
-        if (ship.flightAssist != lastFlightAssist) lastFlightAssist = ship.flightAssist // 09: FA voice
+        if (thrust.flightAssist != lastFlightAssist) lastFlightAssist = thrust.flightAssist // 09: FA voice
         mark(FrameStep.C45)
         updateProximity()
+        updateCrash(dt)
         mark(FrameStep.C46) // 09: callouts
         mark(FrameStep.C47)
         validateLock()
@@ -484,8 +629,9 @@ class Session(
         updateDustMood(dt)
         mark(FrameStep.C67)
         updateHudState()
-        mark(FrameStep.C68) // 02: flight arrow
+        mark(FrameStep.C68) // 02: flight arrow (the HUD draws the pilot's cursor, [pilotAimX]/[cursorShown])
         mark(FrameStep.C69) // 02: attitude
+        attitudeShown = attitudeWanted()
         // ---- C70-C76 survey, mining, construction, galaxy, notices, services, autosave
         mark(FrameStep.C70) // 08
         mark(FrameStep.C71) // 08
@@ -501,7 +647,7 @@ class Session(
 
     private fun handleActions(f: InputFrame) {
         if (f.consume(Action.TOGGLE_FLIGHT_ASSIST)) toggleFlightAssist()
-        if (f.consume(Action.BOOST)) controls.boost = true
+        if (f.consume(Action.BOOST)) requestBoost()
         if (f.consume(Action.EXTERNAL_VIEW)) toggleView()
         if (f.consume(Action.CLEAR_TARGET)) clearTarget()
         if (f.consume(Action.CYCLE_TARGET)) cycleTarget()
@@ -510,14 +656,15 @@ class Session(
         if (f.consume(Action.AUTOPILOT)) autopilotButton()
     }
 
+    /** Z (`ShipThrust` InputBegan): Flight Assist on/off. */
     fun toggleFlightAssist() {
-        ship.flightAssist = !ship.flightAssist
+        thrust.flightAssist = !thrust.flightAssist
         host.haptic(Haptics.TICK)
     }
 
-    /** A boost request (Roblox `thrust.boostRequested`), used by the flight step. */
+    /** B: a boost request (Roblox `thrust.boostRequested`), handled (or dropped) by the next thrust update. */
     fun requestBoost() {
-        controls.boost = true
+        thrust.boostRequested = true
     }
 
     /**
@@ -545,13 +692,65 @@ class Session(
         }
     }
 
-    /** Autopilot / auto-dock (Roblox P, `autopilotButton`): the autopilot arrives with `02`. */
+    /** P / AUTO (Roblox `autopilotButton`): the docking computer key comes first (`08`), else the autopilot. */
     fun autopilotButton() {
-        // 02: docking:handleComputerKey, then toggleAutopilot (needs a lock, SPACE, not travelling)
+        toggleAutopilot()
+    }
+
+    /**
+     * `toggleAutopilot` (`ShipClient.lua:964-981`): off when engaged; on with a locked target in
+     * space (not travelling, not landing or landed, not docked): the cursor centred (a deflected
+     * cursor would count as manual input next frame) and Flight Assist forced on (it brakes through
+     * the flight computer). Without a lock: "No target selected."
+     */
+    fun toggleAutopilot() {
+        if (autopilot.engaged) {
+            autopilot.disengage(Autopilot.STANDBY)
+            voice.say(VOICE_AUTOPILOT_OFF)
+            host.haptic(Haptics.TICK)
+        } else if (!mode.travelling && !mode.landing && !mode.landed && !mode.docked && !mode.docking && !mode.crashing &&
+            lockKind != LOCK_NONE && autopilot.engage(lockKind, lockIndex)
+        ) {
+            stickHold = false
+            thrust.flightAssist = true
+            voice.say(VOICE_AUTOPILOT_ON)
+            host.haptic(Haptics.TICK)
+        } else if (lockKind == LOCK_NONE) {
+            autopilot.engage(-1, -1) // status NO TARGET
+            voice.say(VOICE_NO_TARGET)
+            host.haptic(Haptics.BUMP)
+        } else {
+            host.haptic(Haptics.BUMP)
+        }
+    }
+
+    /** The autopilot's target position into [targetPos]; false (TARGET LOST) when the lock is gone. */
+    private fun autopilotTarget(): Boolean {
+        val kind = autopilot.targetKind
+        val i = autopilot.targetIndex
+        val n = when (kind) {
+            LOCK_STATION -> system.stations.size
+            LOCK_BODY -> system.bodies.size
+            else -> 0
+        }
+        if (i !in 0 until n) {
+            autopilot.disengage(Autopilot.TARGET_LOST)
+            return false
+        }
+        targetPos.set(if (kind == LOCK_STATION) system.stations[i].pos else system.bodies[i].pos)
+        return true
+    }
+
+    /** The autopilot target's `CollisionRadius`: a station's beacon radius, a body's law radius. */
+    private fun autopilotRadius(): Double = when (autopilot.targetKind) {
+        LOCK_STATION -> system.stations[autopilot.targetIndex].radius
+        LOCK_BODY -> gravity.radiusOf(system.bodies[autopilot.targetIndex])
+        else -> FlightConfig.Autopilot.DEFAULT_TARGET_RADIUS
     }
 
     /** L (Roblox `landKey`): the pre-port landing mode: take off, cancel, or engage it near a solid body. */
     fun landKey() {
+        val near = gs.body >= 0 && gs.groundAltitude < LAND_RANGE
         when {
             mode.docking || mode.docked -> host.haptic(Haptics.BUMP) // ignored while the docking computer flies
             mode.landed -> takeOff()
@@ -559,19 +758,19 @@ class Session(
                 mode.landing = false
                 showMessage("LANDING CANCELLED")
             }
-            here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> {
+            near && landable(gs.body) -> {
                 mode.landing = true
                 showMessage("LANDING MODE  ·  GEAR DOWN")
             }
-            here.zone == StarSystem.Zone.LOW_ALTITUDE && here.nearestBody >= 0 && system.bodies[here.nearestBody].landingBlocked != null -> {
+            near && system.bodies[gs.body].landingBlocked != null -> {
                 host.haptic(Haptics.BUMP)
-                showMessage(landingBlockedText(system.bodies[here.nearestBody]))
+                showMessage(blockedText[gs.body])
             }
             else -> host.haptic(Haptics.BUMP)
         }
     }
 
-    /** K (Roblox `dockButton`): request docking in a station zone, cancel the auto-dock, or launch when docked. */
+    /** K (Roblox `dockButton`): request docking within a station's docking range, cancel the auto-dock, or launch when docked. */
     fun dockButton() {
         when {
             mode.docked -> launchFromStation()
@@ -579,10 +778,13 @@ class Session(
                 mode.docking = false
                 showMessage("DOCKING CANCELLED")
             }
-            here.zone == StarSystem.Zone.STATION_ZONE -> requestDocking(here.nearestStation)
+            inDockingRange() -> requestDocking(gs.station)
             else -> host.haptic(Haptics.BUMP)
         }
     }
+
+    /** Within the nearest station's docking range (`Stations.DockingRange`, 6 km). */
+    fun inDockingRange(): Boolean = gs.station >= 0 && gs.stationDistance <= FlightConfig.Stations.DOCKING_RANGE
 
     /** The contextual ACTION (touch pill, pad D-pad down, debug "action"): what its label shows. */
     fun contextAction() {
@@ -731,30 +933,24 @@ class Session(
     /** The upper-case name a marker shows. */
     fun targetName(kind: Int, i: Int): String = if (kind == LOCK_STATION) system.stations[i].name else system.bodies[i].displayName
 
-    // ================================================================== flight (pre-port model)
+    // ================================================================== flight (02)
 
-    /** C13: the pilot's cursor and key axis as the pre-port flight model's rate commands. */
-    private fun rotationInput(f: InputFrame) {
-        // the pre-port stick feel: a small radial dead zone and some expo near the centre
-        // (02 replaces it with Roblox's applyDeadzone(0.20, 1.7) inside the rotation)
-        val mag = f.aimMagnitude
-        var sx = 0f
-        var sy = 0f
-        if (mag >= STICK_DEAD) {
-            val k = ((mag - STICK_DEAD) / (1f - STICK_DEAD)) / mag
-            sx = clamp(expoCurve(f.aimX * k, STICK_EXPO), -1f, 1f)
-            sy = clamp(expoCurve(f.aimY * k, STICK_EXPO), -1f, 1f)
+    /**
+     * C7 (`ShipThrust.readInput` and the touch lever): the lever (absolute from the touch lever, the
+     * W/S ramp from the pad's triggers), the lateral thrusters and the full stop, into the thrust.
+     * A disabled thrust input drops them (C4).
+     */
+    private fun thrustInput(f: InputFrame) {
+        val t = thrust
+        if (t.inputEnabled) {
+            if (f.leverSet) t.setThrottle(f.lever.toDouble())
+            t.throttleAxis = f.throttleAxis.toDouble()
+            t.lateralX = f.lateralX.toDouble()
+            t.lateralY = f.lateralY.toDouble()
+            t.fullStopHeld = f.held(Action.FULL_STOP)
         }
-        val c = controls
-        c.pitch = -sy // aim Y is down; +pitch raises the nose
-        val keys = -f.keyAxis // +1 = right
-        if (settings.stickXRoll) {
-            c.roll = sx
-            c.yaw = keys
-        } else {
-            c.yaw = sx
-            c.roll = keys
-        }
+        // the pre-port take-off climbs for a moment (Flight Assist would otherwise hold the ship)
+        if (liftTime > 0f) t.lateralY = maxOf(t.lateralY, 1.0)
     }
 
     /**
@@ -776,43 +972,43 @@ class Session(
         }
     }
 
-    /** C23 input half: lever, full stop, lateral thrust (Roblox ShipThrust.readInput). */
-    private fun thrustInput(f: InputFrame, enabled: Boolean) {
-        val c = controls
-        if (enabled) {
-            if (f.leverSet) throttle = clamp(f.lever, -1f, 1f)
-            if (f.held(Action.FULL_STOP)) throttle = 0f
-            c.strafeX = f.lateralX
-            c.strafeY = f.lateralY
-        } else {
-            c.strafeX = 0f
-            c.strafeY = 0f
-        }
-        c.throttle = throttle
-        // landing mode: the vertical thrusters give a gentle, safe descent rate
-        if (mode.landing && !mode.landed) c.strafeY *= LANDING_VERTICAL
-        if (liftTime > 0f) c.strafeY = maxOf(c.strafeY, 1f)
+    /** C16-C19 outside the frame (placements, teleports): the gravity state with the stations and the edge. */
+    private fun locate() {
+        gravity.getState(system, ship.pos, ship.vel, gs)
+        gravity.composeStations(system, ship.pos, ship.vel, StarSystem.isStationFrame(refFrame), gs)
+        gravity.composeEdge(system, ship.pos, ship.vel, gs)
     }
 
-    /** C23-C25 and the collisions: the pre-port flight step in sub-steps of at most 1/120 s. */
-    private fun move(dt: Float, limit: Float) {
-        if (liftTime > 0f) liftTime -= dt
+    /**
+     * C23-C25: the move by the velocity in sub-steps of at most 1/120 s, each with the field edge
+     * (`rotation:translate`) and the collisions, so a fast ship cannot tunnel through a hull.
+     */
+    private fun move(dt: Float) {
         val steps = clamp(ceil(dt / MAX_STEP), 1f, 8f).toInt()
-        val h = dt / steps
+        val h = (dt / steps).toDouble()
         for (i in 0 until steps) {
-            if (mode.landed || mode.docking || mode.docked) break
-            if (flight.step(ship, controls, h, limit)) {
-                host.haptic(Haptics.HEAVY)
-                addShake(0.8f)
-            }
-            controls.boost = false
-            bumpCooldown -= h
-            // collide every substep so fast ships can't tunnel through a station's hull
+            if (mode.landed || mode.docking || mode.docked || pendingCrash != null) break
+            ship.pos.addScaled(ship.vel, h)
+            fieldEdge()
+            bumpCooldown -= h.toFloat()
             collideBodies(h)
             collideStation()
         }
-        // a press while landed, docking or as an overlay opens is dropped, not latched
-        controls.boost = false
+    }
+
+    /** `rotation:translate`: the field edge holds the ship and takes the outward velocity (C25). */
+    private fun fieldEdge() {
+        val r = system.edgeRadius
+        if (r <= 0.0) return
+        val star = system.bodies[system.star].pos
+        val px = ship.pos.x - star.x
+        val py = ship.pos.y - star.y
+        val pz = ship.pos.z - star.z
+        val d = sqrt(px * px + py * py + pz * pz)
+        if (d <= r) return
+        val k = r / d
+        ship.pos.set(star.x + px * k, star.y + py * k, star.z + pz * k)
+        ShipThrust.cancelAlong(ship.vel, px / d, py / d, pz / d)
     }
 
     private fun addShake(a: Float) {
@@ -825,70 +1021,77 @@ class Session(
      * C65: the ring debris around the ship (`ringDebris:update(dt, shipPos, thrust.velocity)`). The
      * velocity is relative to the ship's frame, which near a ring is its planet's. A contact plays
      * the hit (Roblox `audio:playHit`, at most once a second: until the audio port a bump and a
-     * shake as strong as the hit sound would be loud) and brings heat.
+     * shake as strong as the hit sound would be loud) and brings heat (`systems:addHeat`).
      */
     private fun updateDebris(dt: Float) {
         debris.count = if (settings.quality == 0) RingDebris.COUNT_LOW else RingDebris.COUNT
         if (debrisHitCooldown > 0f) debrisHitCooldown -= dt
-        val hits = debris.update(dt.toDouble(), system, ship.pos, ship.vel)
+        val hits = debris.update(dt.toDouble(), system, ship.pos, ship.vel.toFloat(velF))
         if (hits <= 0) return
         debrisHits += hits
         debrisHeat += debris.heat
+        systems.addHeat(debris.heat)
         if (debrisHitCooldown <= 0f) {
             debrisHitCooldown = RingDebris.HIT_COOLDOWN
             host.haptic(Haptics.BUMP)
-            addShake(0.3f + clamp(ship.speed / 400f, 0f, 1.1f) * 0.5f)
+            addShake(0.3f + clamp(ship.speed.toFloat() / 400f, 0f, 1.1f) * 0.5f)
         }
     }
 
-    /** Station hulls are solid (coarse proxies, see StationCollision). */
+    /**
+     * Station hulls are solid (coarse proxies, see StationCollision): the ship slides along them; a
+     * hit faster than `Stations.CrashSpeed` (45 m/s into the wall) destroys it.
+     */
     private fun collideStation() {
-        val i = here.nearestStation
+        val i = gs.station
         if (i < 0) return
         val hit = stationCollision.collide(ship, system.stations[i])
-        if (hit > 2f && bumpCooldown <= 0f) {
+        if (hit > FlightConfig.Stations.CRASH_SPEED) {
+            pendingCrash = CRASH_STATION
+            return
+        }
+        if (hit > 4f && bumpCooldown <= 0f) {
             bumpCooldown = 0.25f
-            host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
+            host.haptic(if (hit > 25f) Haptics.HEAVY else Haptics.BUMP)
             addShake(clamp(hit / 50f, 0.2f, 1.2f))
         }
     }
 
-    /** Planet and star surfaces are solid; in landing mode a slow, level, gear-down contact touches down. */
-    private fun collideBodies(dt: Float) {
-        val i = here.nearestBody
+    /**
+     * The nearest body's surface (the sphere until the terrain lands; a giant's cloud tops,
+     * DECISIONS 11): the ship slides; on solid ground an impact above `Surface.SafeLandingSpeed`
+     * (38 m/s) crashes it, a slow, level contact with the gear down touches down; a giant or the
+     * star holds the ship at its surface ("LANDING BLOCKED").
+     */
+    private fun collideBodies(dt: Double) {
+        val i = gs.body
         if (i < 0) return
         val b = system.bodies[i]
-        if (here.altitude > maxOf(spec.reach, spec.groundClearance) * 2 + ship.speed * dt * 2) return
-        if (mode.landing && landable(i)) {
-            // touchdown: slow, gear down and roughly level -> stand on the gear (RootToGround)
-            val dx = ship.pos.x - b.pos.x
-            val dy = ship.pos.y - b.pos.y
-            val dz = ship.pos.z - b.pos.z
-            val d = sqrt(dx * dx + dy * dy + dz * dz)
-            if (d - b.radius < spec.groundClearance + 0.5) {
-                upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
-                val radial = ship.vel.dot(upV)
+        val dx = ship.pos.x - b.pos.x
+        val dy = ship.pos.y - b.pos.y
+        val dz = ship.pos.z - b.pos.z
+        val d = sqrt(dx * dx + dy * dy + dz * dz)
+        if (d - b.radius > maxOf(spec.reach, spec.groundClearance) * 2 + ship.speed * dt * 2) return
+        val solid = landable(i)
+        if (solid && d - b.radius < spec.groundClearance + 0.5) {
+            // touchdown: slow enough, gear down and roughly level -> stand on the gear (RootToGround)
+            upV.set((dx / d).toFloat(), (dy / d).toFloat(), (dz / d).toFloat())
+            val radial = (ship.vel.x * dx + ship.vel.y * dy + ship.vel.z * dz) / d
+            if (radial < 0.5) {
                 ship.rot.rotate(0f, 1f, 0f, tmp)
                 val level = tmp.dot(upV)
-                val gear = gearRig.downFraction
-                if (radial < 0.5f) {
-                    if (gear >= 1f && radial > -TOUCHDOWN_SPEED && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
-                        mode.landed = true
-                        landedBody = i
-                        ship.vel.zero()
-                        ship.angVel.zero()
-                        throttle = 0f
-                        // a thumb still on the throttle lever must not lift off by accident
-                        host.releaseControls()
-                        controls.clearAxes()
-                        host.haptic(Haptics.BUMP)
-                        showMessage("TOUCHDOWN  ·  " + b.displayName)
-                        return
-                    }
+                if (-radial > FlightConfig.Surface.SAFE_LANDING_SPEED) {
+                    pendingCrash = CRASH_GROUND
+                    return
+                }
+                if (gearRig.downFraction >= 1f && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
+                    touchDown(i)
+                    return
+                }
+                if (mode.landing) {
                     showMessage(
                         when {
-                            gear < 1f -> "GEAR NOT DOWN"
-                            radial <= -TOUCHDOWN_SPEED -> "HARD LANDING"
+                            gearRig.downFraction < 1f -> "GEAR NOT DOWN"
                             ship.speed >= TOUCHDOWN_MAX_SPEED -> "TOO FAST  ·  TOUCH DOWN BELOW 40 M/S"
                             else -> "LEVEL OUT TO TOUCH DOWN"
                         },
@@ -896,24 +1099,115 @@ class Session(
                 }
             }
         }
-        // the surface, or a giant's barrier at its cloud tops (DECISIONS 11)
-        val hit = flight.collideSphere(ship, b.pos.x, b.pos.y, b.pos.z, b.radius)
-        if (hit > 0f && b.landingBlocked != null && message == null) showMessage(landingBlockedText(b))
-        if (hit > 2f && bumpCooldown <= 0f) {
-            bumpCooldown = 0.25f
-            host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
-            addShake(clamp(hit / 50f, 0.2f, 1.2f))
+        if (!contact.sphere(ship, spec, b.pos.x, b.pos.y, b.pos.z, b.radius)) return
+        val hit = contact.impact
+        if (solid && hit > FlightConfig.Surface.SAFE_LANDING_SPEED) {
+            pendingCrash = CRASH_GROUND
+            return
         }
+        if (!solid && time - barrierNoticeAt > BARRIER_NOTICE_PAUSE) {
+            // the barrier holds the ship at a giant's cloud tops or the star's surface
+            showMessage(if (b.landingBlocked != null) blockedText[i] else holdText[i])
+        }
+        if (!solid) barrierNoticeAt = time
+        if (hit > 2.0 && bumpCooldown <= 0f) {
+            bumpCooldown = 0.25f
+            host.haptic(if (hit > 20.0) Haptics.HEAVY else Haptics.BUMP)
+            addShake(clamp(hit.toFloat() / 50f, 0.2f, 1.2f))
+        }
+    }
+
+    /** The ship stands on its gear on body [i] (the pre-port landed state; `04`/`05` refine it). */
+    private fun touchDown(i: Int) {
+        val b = system.bodies[i]
+        mode.landed = true
+        mode.landing = false
+        landedBody = i
+        ship.vel.zero()
+        ship.angVel.zero()
+        thrust.setThrottle(0.0)
+        // a thumb still on the throttle lever must not lift off by accident
+        host.releaseControls()
+        host.haptic(Haptics.BUMP)
+        showMessage("TOUCHDOWN  ·  " + b.displayName)
+    }
+
+    // ================================================================== the crash (Warnings.Crash)
+
+    /**
+     * `startCrash(cause)` without the cinematic (the plain `Warnings.Crash` of 05 4.7: fade 0.3 s,
+     * respawn in the black, black 1.6 s, fade-in 0.9 s): "Hull failure.", the ship stops where it
+     * is, flight input blocked until the fade-in starts. A crash while one runs is ignored. `05`
+     * brings the cinematic and the losses.
+     */
+    fun startCrash(cause: String) {
+        if (mode.crashing || destruction.isActive()) return
+        mode.crashing = true
+        crashTime = 0f
+        crashCause = cause
+        crashes++
+        respawned = false
+        crashPos.set(ship.pos)
+        ship.vel.zero()
+        ship.angVel.zero()
+        mode.landing = false
+        mode.docking = false
+        autopilot.disengage(Autopilot.STANDBY)
+        voice.interrupt()
+        voice.say(VOICE_HULL_FAILURE)
+        message = null
+        host.haptic(Haptics.HEAVY)
+        addShake(1.2f)
+    }
+
+    /** The crash timeline: the respawn in the black, the end after the fade-in ("All systems online."). */
+    private fun updateCrash(dt: Float) {
+        if (crashTime < 0f) return
+        crashTime += dt
+        if (!respawned && crashTime >= CRASH_FADE_OUT) respawnAfterCrash()
+        if (crashTime >= CRASH_FADE_OUT + CRASH_HOLD + CRASH_FADE_IN) {
+            crashTime = -1f
+            mode.crashing = false
+            voice.say(Voice.SYSTEMS_ONLINE)
+        }
+    }
+
+    /** Opacity of the crash's black (0 without a crash): 0.3 s in, 1.6 s black, 0.9 s out. */
+    val crashFade: Float
+        get() {
+            val t = crashTime
+            return when {
+                t < 0f -> 0f
+                t < CRASH_FADE_OUT -> t / CRASH_FADE_OUT
+                t < CRASH_FADE_OUT + CRASH_HOLD -> 1f
+                else -> clamp(1f - (t - CRASH_FADE_OUT - CRASH_HOLD) / CRASH_FADE_IN, 0f, 1f)
+            }
+        }
+
+    /**
+     * `respawnAfterCrash` in the black: thrust and systems reset, autopilot off, the landing and
+     * docking states cleared, the ship in front of the station nearest the crash ("Rebooting.").
+     */
+    private fun respawnAfterCrash() {
+        respawned = true
+        thrust.reset(ship.vel)
+        systems.reset()
+        autopilot.disengage(Autopilot.STANDBY)
+        mode.landed = false
+        mode.landing = false
+        mode.docking = false
+        liftTime = 0f
+        stickHold = false
+        SpawnRules.recoveryPose(system, crashPos, ship.pos, ship.rot)
+        ship.angVel.zero()
+        voice.say(VOICE_REBOOTING)
+        snapAfterJump()
     }
 
     // ================================================================== landing mode (L), ground (C28)
 
     /** The body's `Landable` (not a star, not a gas or ice giant: Roblox `tagBody`). */
     fun landable(i: Int): Boolean = i >= 0 && system.bodies[i].landable
-
-    /** "LANDING BLOCKED  ·  NO SOLID SURFACE" (Roblox's approach prompt from `LandingBlocked`). */
-    private fun landingBlockedText(b: StarSystem.Body): String =
-        if (b.landingBlocked == StarSystem.NO_SOLID_SURFACE) LANDING_BLOCKED_GAS else "LANDING BLOCKED  ·  " + b.landingBlocked
 
     private fun takeOff() {
         if (!mode.landed) return
@@ -925,13 +1219,13 @@ class Session(
         upV.set(
             (ship.pos.x - b.pos.x).toFloat(), (ship.pos.y - b.pos.y).toFloat(), (ship.pos.z - b.pos.z).toFloat(),
         ).normalize()
-        ship.vel.set(upV).scale(25f)
+        ship.vel.set(upV).scale(25.0)
         showMessage("LIFT OFF")
         host.haptic(Haptics.TICK)
     }
 
     /** While landed: stand on the gear, level out, and wait for a take-off input. */
-    private fun holdLanded(dt: Float, f: InputFrame) {
+    private fun holdLanded(dt: Float) {
         val b = system.bodies[landedBody]
         val dx = ship.pos.x - b.pos.x
         val dy = ship.pos.y - b.pos.y
@@ -942,8 +1236,6 @@ class Session(
         ship.pos.set(b.pos.x + dx / d * rest, b.pos.y + dy / d * rest, b.pos.z + dz / d * rest)
         ship.vel.zero()
         ship.angVel.zero()
-        ship.speed = 0f
-        ship.forwardSpeed = 0f
         // settle level: keep the heading, align the ship's up with the surface normal
         ship.rot.rotate(0f, 0f, -1f, fwdV)
         fwdV.addScaled(upV, -fwdV.dot(upV))
@@ -952,19 +1244,48 @@ class Session(
             landRot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
             ship.rot.slerp(ship.rot, landRot, expApproach(3f, dt))
         }
-        if (f.lateralY > 0f || throttle > 0.05f || controls.strafeY > 0.2f) takeOff()
+        if (thrust.lateralY > 0.0 || thrust.throttle > 0.05) takeOff()
     }
 
-    /** C62 (pre-port): the landing mode ends when the ship climbs out of the low band or leaves a solid body. */
+    /** C62 (pre-port): the landing mode ends when the ship climbs out of the landing range or leaves a solid body. */
     private fun updateLandingMode() {
-        if (mode.landing && (here.altitude > StarSystem.LOW_ALTITUDE * 1.2 || !landable(here.nearestBody))) {
+        if (mode.landing && (gs.groundAltitude > LAND_RANGE * 1.2 || !landable(gs.body))) {
             mode.landing = false
             if (!mode.landed) showMessage("LANDING CANCELLED")
         }
     }
 
-    /** Gear position the session asks for: down while landing or landed (or as forced by a debug command). */
-    fun gearWanted(): Boolean = gearForce ?: (mode.landing || mode.landed)
+    /**
+     * The gear command (C38, `hull:setGearDown`): down below `Hull.GearDownAltitude` (60 m) over
+     * solid ground (Roblox: in the landing scene), in the landing mode and landed (pre-port), or as
+     * a debug command forces it.
+     */
+    fun gearWanted(): Boolean = gearForce
+        ?: (mode.landing || mode.landed || (landable(gs.body) && gs.groundAltitude < FlightConfig.Hull.GEAR_DOWN_ALTITUDE))
+
+    /**
+     * DECISIONS 15: the attitude indicator (the pitch ladder with PITCH, ALT and the climb rate)
+     * shows inside a body's air (the sky profile's thickness, a third of the visible limb: Earth
+     * 26 km), below 50 km above the ground of an airless body, and while landing or with the gear
+     * out or moving. Never at a star, never docked.
+     */
+    private fun attitudeWanted(): Boolean {
+        if (mode.docked || mode.docking) return false
+        // the gear commanded down, or (with a rig) still out or moving
+        if (mode.landing || mode.landed || gearWanted() || (gearRig.model != null && !gearRig.stowed)) return true
+        val i = gs.body
+        if (i < 0) return false
+        val b = system.bodies[i]
+        if (b.isStar) return false
+        val ceiling = if (b.hasAtmosphere && b.atmoThickness > 0f) b.atmoThickness * b.radius / 3.0 else FlightConfig.Surface.ATTITUDE_AIRLESS_ALTITUDE
+        return gs.groundAltitude < ceiling
+    }
+
+    /**
+     * Roblox moves the gear at once while the pilot sits in a cockpit (`ShipHull.stepGear`: seated
+     * you cannot see it, and folded legs could poke into the floor).
+     */
+    private fun gearInstant(): Boolean = mode.view == ShipView.COCKPIT && model != null
 
     // ================================================================== docking (K): pre-port auto-dock
 
@@ -983,6 +1304,7 @@ class Session(
         dockPhase = 0
         dockBoxedTime = 0f
         mode.landing = false
+        if (autopilot.engaged) autopilot.disengage(Autopilot.STANDBY)
         showMessage("DOCKING GRANTED  ·  AUTO-DOCK ENGAGED")
         host.haptic(Haptics.TICK)
         return true
@@ -1026,13 +1348,10 @@ class Session(
         ship.rot.slerp(ship.rot, landRot, expApproach(turn, dt))
         val speed = if (detour) DOCK_APPROACH_SPEED else if (dockPhase == 0) minOf(DOCK_APPROACH_SPEED, (d * 0.6).toFloat() + 5f) else minOf(30f, (d * 0.8).toFloat() + 8f)
         val k = if (d > 0.5) minOf(1.0, speed * dt / d) else 0.0
-        if (d > 0.5) ship.vel.set((dx / d * speed).toFloat(), (dy / d * speed).toFloat(), (dz / d * speed).toFloat())
+        if (d > 0.5) ship.vel.set(dx / d * speed, dy / d * speed, dz / d * speed)
         ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
         ship.pos.set(hullPos.x + dx * k - tmp.x, hullPos.y + dy * k - tmp.y, hullPos.z + dz * k - tmp.z)
-        ship.speed = speed
-        ship.forwardSpeed = speed
         ship.angVel.zero()
-        ship.engineOutput += (0.3f - ship.engineOutput) * expApproach(4f, dt)
         if (dockPhase == 0 && !detour && d < 15.0) {
             dockPhase = 1
             showMessage("ENTERING SLOT")
@@ -1041,10 +1360,7 @@ class Session(
             mode.docking = false
             mode.docked = true
             ship.vel.zero()
-            ship.speed = 0f
-            ship.forwardSpeed = 0f
-            throttle = 0f
-            controls.clearAxes()
+            thrust.setThrottle(0.0)
             host.haptic(Haptics.BUMP)
             message = null
             host.openServices(dockStation)
@@ -1062,9 +1378,8 @@ class Session(
         val out = spec.sizeZ * 0.5 + LAUNCH_CLEAR
         ship.rot.rotate(spec.centreX, spec.centreY, spec.centreZ, tmp)
         ship.pos.set(dockPos.x + dockDir.x * out - tmp.x, dockPos.y + dockDir.y * out - tmp.y, dockPos.z + dockDir.z * out - tmp.z)
-        ship.vel.set(dockDir).scale(60f)
-        throttle = 0.3f
-        controls.clearAxes()
+        ship.vel.set(dockDir).scale(60.0)
+        thrust.setThrottle(0.3)
         chase.snapTo(ship)
         mode.docked = false
         launchTime = flightTime
@@ -1076,10 +1391,11 @@ class Session(
 
     private fun updateCamera(dt: Float) {
         if (mode.view == ShipView.CHASE && !settings.chaseView) setView(ShipView.COCKPIT)
-        val speedFrac = ship.speed / spec.maxSpeed
+        val top = handling.topSpeed.toFloat()
+        val speedFrac = (ship.speed / handling.topSpeed).toFloat()
         val radius = model?.radius ?: spec.reach
         if (mode.view == ShipView.CHASE) {
-            chase.update(ship, dt, clamp(speedFrac, 0f, 1.8f), spec.maxSpeed)
+            chase.update(ship, dt, clamp(speedFrac, 0f, 1.8f), top)
             cameraPos.set(chase.pos)
             chase.renderRotation(cameraRot)
             val boostFov = if (ship.boosting) 9f else 0f
@@ -1106,32 +1422,31 @@ class Session(
         // route), docked or landed, nor just after a launch, which starts 30 m off the slot
         proximity = Float.MAX_VALUE
         if (mode.docking || mode.docked || mode.landed) return
-        if (here.nearestStation >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
-            proximity = stationCollision.clearance(ship, system.stations[here.nearestStation])
+        if (gs.station >= 0 && flightTime - launchTime > LAUNCH_GRACE) {
+            proximity = stationCollision.clearance(ship, system.stations[gs.station])
         }
     }
 
     /** Clearance (m) between the hull's probes and the nearest station's proxies (HUD, harness). */
     fun stationClearance(): Float =
-        if (here.nearestStation >= 0) stationCollision.clearance(ship, system.stations[here.nearestStation]) else Float.MAX_VALUE
+        if (gs.station >= 0) stationCollision.clearance(ship, system.stations[gs.station]) else Float.MAX_VALUE
 
     /** C48: speed dust moves at a capped "visual" speed so it stays readable at Mm/s. */
     private fun updateDust(dt: Float) {
         val sp = ship.speed
-        val visScale = if (sp > DUST_VISUAL_SPEED) DUST_VISUAL_SPEED / sp else 1f
-        tmp.set(ship.vel).scale(visScale)
+        val visScale = if (sp > DUST_VISUAL_SPEED) DUST_VISUAL_SPEED / sp else 1.0
+        tmp.set((ship.vel.x * visScale).toFloat(), (ship.vel.y * visScale).toFloat(), (ship.vel.z * visScale).toFloat())
         dustOrigin.addScaled(tmp, dt.toDouble())
         // longer streaks the faster you go (logarithmic above the visual cap)
-        val streak = if (sp > DUST_VISUAL_SPEED) 1f + 0.6f * kotlin.math.log10(sp / DUST_VISUAL_SPEED) else 1f
+        val streak = if (sp > DUST_VISUAL_SPEED) 1f + 0.6f * kotlin.math.log10(sp / DUST_VISUAL_SPEED).toFloat() else 1f
         dustVelocity.set(tmp).scale(streak)
     }
 
     /** C66: dust mood: white in open space, blue in a gravity well, red for danger or heat. */
     private fun updateDustMood(dt: Float) {
-        val zone = here.zone
-        val star = here.nearestBody == system.star
-        val danger = proximity < 80f || (star && here.altitude < system.bodies[system.star].radius)
-        val well = zone == StarSystem.Zone.GRAVITY_WELL || zone == StarSystem.Zone.LOW_ALTITUDE
+        val zone = gs.limitZone
+        val danger = proximity < 80f || systems.heat >= FlightConfig.Systems.OVERHEAT_PHASE1 || gs.limitZone == LimitZone.HEAT
+        val well = zone == LimitZone.SHADOW || zone == LimitZone.SURFACE || zone == LimitZone.LANDING
         val k = expApproach(4f, dt)
         val tr = if (danger) 1.0f else if (well) 0.40f else 0.66f
         val tg = if (danger) 0.30f else if (well) 0.62f else 0.72f
@@ -1148,11 +1463,15 @@ class Session(
             mode.docking -> { actionLabel = "CANCEL"; actionTarget = Action.DOCK }
             mode.landing -> { actionLabel = "CANCEL"; actionTarget = Action.LAND }
             mode.docked -> { actionLabel = "LAUNCH"; actionTarget = Action.DOCK }
-            here.zone == StarSystem.Zone.STATION_ZONE -> { actionLabel = "DOCK"; actionTarget = Action.DOCK }
-            here.zone == StarSystem.Zone.LOW_ALTITUDE && landable(here.nearestBody) -> { actionLabel = "LAND"; actionTarget = Action.LAND }
+            inDockingRange() -> { actionLabel = "DOCK"; actionTarget = Action.DOCK }
+            gs.groundAltitude < LAND_RANGE && landable(gs.body) -> { actionLabel = "LAND"; actionTarget = Action.LAND }
             else -> { actionLabel = ""; actionTarget = null }
         }
     }
+
+    /** The AUTO button shows: a target is locked (or the autopilot flies), in free flight. */
+    val autopilotOffered: Boolean
+        get() = (lockKind != LOCK_NONE || autopilot.engaged) && !mode.docked && !mode.docking && !mode.landed && !mode.crashing
 
     /**
      * C64: the voice queue; the welcome lines once per app run, [Voice.WELCOME_DELAY] after the
@@ -1218,17 +1537,16 @@ class Session(
         if (hold) camera.setLook(x, y)
     }
 
-    /** "speed v": the velocity (relative to the ship's frame) set to [v] m/s along the nose; with FA off it holds. */
+    /** "speed v": the velocity (relative to the ship's frame) set to [v] m/s along the nose; with FA off it holds (up to the caps). */
     fun debugSpeed(v: Float) {
         if (mode.docked || mode.docking || mode.landed) return
-        ship.rot.rotate(0f, 0f, -v, ship.vel)
-        ship.speed = abs(v)
+        ship.rot.rotate(0.0, 0.0, -v.toDouble(), ship.vel)
+        ship.updateDerived()
     }
 
-    /** "throttle v": the lever. */
+    /** "throttle v": the lever (clamped to `MinThrottle`..1). */
     fun setThrottle(v: Float) {
-        throttle = clamp(v, -1f, 1f)
-        controls.throttle = throttle
+        thrust.setThrottle(v.toDouble())
     }
 
     /** "teleport x y z [lx ly lz [ux uy uz]]": system metres, looking along l with up u (default: keep the rotation; up +Y); at rest. */
@@ -1272,7 +1590,7 @@ class Session(
         val b = system.bodies[i]
         ship.rot.lookRotation((b.pos.x - ship.pos.x).toFloat(), (b.pos.y - ship.pos.y).toFloat(), (b.pos.z - ship.pos.z).toFloat(), 0f, 1f, 0f)
         val v = ship.vel.length()
-        ship.rot.rotate(0f, 0f, -v, ship.vel)
+        ship.rot.rotate(0.0, 0.0, -v, ship.vel)
         ship.angVel.zero()
     }
 
@@ -1314,14 +1632,14 @@ class Session(
         fwdV.set(0f, 1f, 0f).addScaled(upV, -upV.y).normalize()
         ship.rot.lookRotation(fwdV.x - upV.x * 0.25f, fwdV.y - upV.y * 0.25f, fwdV.z - upV.z * 0.25f, upV.x, upV.y, upV.z)
         ship.vel.zero()
-        throttle = 0.2f
+        thrust.setThrottle(0.2)
         snapAfterJump()
     }
 
     /** Harness hook: drop straight down to [alt] metres above the nearest body, level, at rest. */
     fun debugDrop(alt: Double) {
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
-        val b = system.bodies[here.nearestBody]
+        locate()
+        val b = system.bodies[gs.body]
         val dx = ship.pos.x - b.pos.x
         val dy = ship.pos.y - b.pos.y
         val dz = ship.pos.z - b.pos.z
@@ -1334,11 +1652,11 @@ class Session(
         ship.rot.lookRotation(fwdV.x, fwdV.y, fwdV.z, upV.x, upV.y, upV.z)
         ship.vel.zero()
         ship.angVel.zero()
-        throttle = 0f
+        thrust.setThrottle(0.0)
         snapAfterJump()
     }
 
-    /** Harness hook: [dist] m behind station [i] (opposite its slot), nose on the hub, flying at it at [speed]. */
+    /** Harness hook: [dist] m behind station [i] (opposite its slot), nose on the hub, flying at it at [speed] (FA off so the speed holds). */
     fun debugBehindStation(i: Int, dist: Double, speed: Float) {
         undockQuietly()
         val st = system.stations[i]
@@ -1346,15 +1664,16 @@ class Session(
         ship.pos.set(st.pos.x - dockDir.x * dist, st.pos.y - dockDir.y * dist, st.pos.z - dockDir.z * dist)
         st.rot.rotate(0f, 1f, 0f, upV)
         ship.rot.lookRotation(dockDir.x, dockDir.y, dockDir.z, upV.x, upV.y, upV.z)
-        ship.vel.set(dockDir).scale(speed)
+        ship.vel.set(dockDir).scale(speed.toDouble())
         ship.angVel.zero()
-        throttle = if (speed > 0f) 0.6f else 0f
+        thrust.setThrottle(0.0)
+        thrust.flightAssist = speed <= 0f
         mode.landed = false
         mode.landing = false
         liftTime = 0f
-        gearRig.update(0f, gearWanted(), true)
         mode.docking = false
         snapAfterJump()
+        gearRig.update(0f, gearWanted(), true)
     }
 
     /**
@@ -1386,12 +1705,13 @@ class Session(
     }
 
     private fun snapAfterJump() {
-        controls.clearAxes()
         dustOrigin.set(ship.pos)
         chase.snapTo(ship)
         // a teleport lands in whatever frame holds the new spot (the docking station forces its own)
         refFrame = if (mode.docking && dockStation >= 0) StarSystem.stationFrame(dockStation) else system.frameFor(ship.pos, StarSystem.FRAME_NONE)
-        system.locate(ship.pos, ship.vel, spec.maxSpeed, here)
+        locate()
+        zoneLabel = gs.zoneLabel
+        ship.updateDerived()
         updateCamera(0f)
     }
 
@@ -1404,21 +1724,33 @@ class Session(
     /** Harness read-out (allocates; never per frame). */
     fun debugState(): String {
         val fp = framePosition(DVec3())
+        val rates = ShipRotation.angularVelocityDeg(ship.angVel, Vec3())
         return "branch=${mode.branch} pstate=${mode.state} view=${mode.view} look=${"%.1f".format(camera.lookX)},${"%.1f".format(camera.lookY)} " +
             "landed=${mode.landed} landing=${mode.landing} docking=${mode.docking} docked=${mode.docked} " +
             "controlled=${mode.controlled} revealed=${mode.revealed} station=$dockStation " +
-            "gear=${"%.2f".format(gearRig.downFraction)} stowed=${gearRig.stowed} " +
-            "alt=${"%.1f".format(here.altitude - spec.groundClearance)} speed=${"%.1f".format(ship.speed)} " +
-            "throttle=${"%.2f".format(throttle)} fa=${ship.flightAssist} " +
-            "boosting=${ship.boosting} cap=${"%.2f".format(ship.capacitor)} lock=$lockKind:$lockIndex " +
+            "gear=${"%.2f".format(gearRig.downFraction)} stowed=${gearRig.stowed} legT=${"%.3f".format(gearRig.legT)} doorT=${"%.3f".format(gearRig.doorT)} " +
+            "alt=${"%.1f".format(gs.groundAltitude - spec.groundClearance)} speed=${"%.1f".format(ship.speed)} fwd=${"%.1f".format(ship.forwardSpeed)} " +
+            "throttle=${"%.3f".format(thrust.throttle)} fa=${thrust.flightAssist} " +
+            "boosting=${thrust.boosting} cooldown=${"%.2f".format(thrust.boostCooldown)} cruising=${thrust.cruising} " +
+            "lock=$lockKind:$lockIndex " +
             "hull=${"%.1f".format(stationClearance())} prox=${"%.1f".format(proximity)} " +
             "pos=${"%.1f".format(ship.pos.x)},${"%.1f".format(ship.pos.y)},${"%.1f".format(ship.pos.z)} " +
             "cam=${"%.2f".format(cameraPos.x - ship.pos.x)},${"%.2f".format(cameraPos.y - ship.pos.y)},${"%.2f".format(cameraPos.z - ship.pos.z)} " +
-            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${here.zone.name} action=${actionTarget?.name ?: "-"} " +
-            "body=${if (here.nearestBody >= 0) system.bodies[here.nearestBody].name else "-"} limit=${"%.1f".format(here.speedLimit)} " +
-            "limiter=${if (here.limitingBody >= 0) system.bodies[here.limitingBody].name else "-"} " +
+            "fov=${"%.1f".format(fovY / DEG2RAD)} zone=${zoneLabel.replace(' ', '_')} limitZone=${gs.limitZone} action=${actionTarget?.name ?: "-"} " +
+            "body=${if (gs.body >= 0) system.bodies[gs.body].name else "-"} limit=${"%.1f".format(gs.speedLimit)} " +
+            "tracked=${"%.1f".format(thrust.speedLimit)} " +
+            "limiter=${if (gs.limitingBody >= 0) system.bodies[gs.limitingBody].name else "-"} " +
             "ref=${system.frameName(refFrame).replace(' ', '_')} fpos=${"%.1f".format(fp.x)},${"%.1f".format(fp.y)},${"%.1f".format(fp.z)} " +
-            "clock=${"%.3f".format(system.clock)} rocks=${debris.visible} rhits=$debrisHits rheat=${"%.3f".format(debrisHeat)}"
+            "clock=${"%.3f".format(system.clock)} rocks=${debris.visible} rhits=$debrisHits rheat=${"%.3f".format(debrisHeat)} " +
+            "ship=${profile.id} mass=${"%.1f".format(handling.mass)} top=${"%.2f".format(handling.topSpeed)} agility=${"%.3f".format(handling.agility)} " +
+            "rates=${"%.2f".format(rates.x)},${"%.2f".format(rates.y)},${"%.2f".format(rates.z)} " +
+            "heat=${"%.4f".format(systems.heat)} starHeat=${"%.3f".format(gs.starHeat)} fuel=${"%.3f".format(systems.fuelFraction)} " +
+            "scooping=${systems.scooping} g=${"%.2f".format(systems.gForce)} strain=${"%.2f".format(systems.strainG)} " +
+            "redout=${"%.2f".format(systems.redout)} dark=${"%.3f".format(systems.darkness)} " +
+            "gravity=${"%.4f".format(gs.gravity.length())} ap=${autopilot.status.replace(' ', '_')} apOn=${autopilot.engaged} " +
+            "crashing=${mode.crashing} crashes=$crashes cause=${crashCause.ifEmpty { "-" }} " +
+            "aimArrow=${"%.2f".format(pilotAimX)},${"%.2f".format(pilotAimY)} cursor=$cursorShown attitude=$attitudeShown " +
+            "tti=${if (gs.timeToImpact.isInfinite()) "inf" else "%.1f".format(gs.timeToImpact)}"
     }
 
     companion object {
@@ -1432,30 +1764,26 @@ class Session(
         /** dt cap per frame (F0, `ShipClient.lua:2324`): tab-outs and load pauses must not throw the ship. */
         const val MAX_DT = 0.1f
 
-        /** Autopilot.OverrideDeflection: a deflection beyond this is the pilot steering (C7). */
-        const val OVERRIDE_DEFLECTION = 0.5f
-
         /** Longest flight sub-step, s (the move and its collisions; 02 section 8). */
         const val MAX_STEP = 1f / 120f
         const val LOCK_CONE_COS = 0.951f // 18°
         const val LOCK_CONE_SIN = 0.30920f // sqrt(1 - LOCK_CONE_COS²)
         const val AIM_CONE_COS = 0.9986f // 3°
         const val AIM_CONE_SIN = 0.052896f
-        const val DUST_VISUAL_SPEED = 400f
-        const val LANDING_SPEED = 200f
-        const val TOUCHDOWN_SPEED = 8f
-        const val TOUCHDOWN_MAX_SPEED = 40f
+        const val DUST_VISUAL_SPEED = 400.0
+
+        /** The landing mode can be engaged this low over a solid body (the pre-port LAND range), m. */
+        const val LAND_RANGE = 60_000.0
+
+        /** A touchdown needs the total speed below this, m/s. */
+        const val TOUCHDOWN_MAX_SPEED = 40.0
+
+        /** The HUD shows the sink rate in red above this (Roblox's hard-touchdown callout, 0.6 × 38 m/s). */
+        const val HARD_TOUCHDOWN = 22.8
 
         /** cos of the largest tilt from level that still touches down (~37°). */
         const val TOUCHDOWN_LEVEL = 0.8f
         const val LIFT_TIME = 1.2f
-
-        /** Vertical thruster authority in landing mode: 0.1 x 70 m/s = a 7 m/s descent, under the touchdown limit. */
-        const val LANDING_VERTICAL = 0.1f
-
-        /** The pre-port stick feel (radial dead zone, expo), until `02` brings Roblox's 0.20 / 1.7. */
-        const val STICK_DEAD = 0.06f
-        const val STICK_EXPO = 0.25f
 
         /** Vertical FOV of the chase view at rest (it widens with speed and boost). */
         const val CHASE_FOV = 52f
@@ -1475,5 +1803,28 @@ class Session(
 
         /** How long the message line shows a message, s. */
         const val MESSAGE_TIME = 3f
+
+        /** The barrier's hold message at most this often (`BARRIER_NOTICE_PAUSE`), s. */
+        const val BARRIER_NOTICE_PAUSE = 4f
+
+        /** Crash causes (`startCrash`). */
+        const val CRASH_HEAT = "HEAT"
+        const val CRASH_GROUND = "GROUND"
+        const val CRASH_STATION = "STATION"
+
+        /** `Warnings.Crash`: fade out, black (respawn at its start), fade in, s. */
+        const val CRASH_FADE_OUT = 0.3f
+        const val CRASH_HOLD = 1.6f
+        const val CRASH_FADE_IN = 0.9f
+
+        /** Voice lines as text (D31; `09` A.5). */
+        const val VOICE_AUTOPILOT_ON = "AUTOPILOT ENGAGED."
+        const val VOICE_AUTOPILOT_OFF = "AUTOPILOT DISENGAGED."
+        const val VOICE_NO_TARGET = "NO TARGET SELECTED."
+        const val VOICE_TARGET_REACHED = "TARGET REACHED."
+        const val VOICE_MANUAL_OVERRIDE = "MANUAL OVERRIDE."
+        const val VOICE_AUTOPILOT_ATMOSPHERE = "AUTOPILOT OFF. ATMOSPHERE."
+        const val VOICE_HULL_FAILURE = "HULL FAILURE."
+        const val VOICE_REBOOTING = "REBOOTING."
     }
 }

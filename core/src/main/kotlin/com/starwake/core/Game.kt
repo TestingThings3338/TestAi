@@ -346,15 +346,17 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      *
      * Screens: `launch [space|fade]` (instant docked start / instant free-flight start / the real
      * LAUNCH with fade, LOADING and reveal), `menu`, `settings`, `pause`, `resume`, `map`, `reveal`.
-     * Flight: `fa [on|off]`, `boost`, `throttle v`, `speed v` (velocity along the nose; with FA off it
-     * holds), `stick x y` / `stick off` (held cursor, radius
+     * Flight: `fa [on|off]`, `boost`, `throttle v` (the lever, −0.25..1), `speed v` (velocity along the
+     * nose; with FA off it holds), `stick x y` / `stick off` (held cursor, radius
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
+     * `autopilot` (P), `heat v` (ship heat, 1 = 100 %), `fuel f` (tank 0..1), `cargo t` (tonnes),
+     * `crash [heat|ground|station]`,
      * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz [ux uy uz]]`,
      * `near <body> [alt]`, `face <body>` (nose on a body), `teleport-low`, `teleport-surface`,
      * `lock-station [s]` (locks a station, TRANQUILITY by default), `lock-body <body>`, `dock [s]`, `docked [s]`,
-     * `behind-station [s]`, `ram-station [s]`; a station [s] is its index, id or name (`ares`,
-     * `SOL-ARES`), MERIDIAN when left out.
+     * `behind-station [s]`, `ram-station [s] [speed]` (FA off, at the hub's back, 120 m/s by default);
+     * a station [s] is its index, id or name (`ares`, `SOL-ARES`), MERIDIAN when left out.
      * World: `clock <s>` (the save-game clock; the ship moves with its frame). Diagnostics: `state`
      * (see [debugInfo]), `trace` (the next frame's step order into [frameTrace]),
      * `branch deck|destroyed|flight`.
@@ -758,9 +760,10 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             // services of a docked start, a map or the LOADING curtain)
             if (flightHudShown(s) && !mode.curtain) hud.updateHints(dt, touch)
         }
-        // the touch controls mirror the session: the latched lever, the action pill, the look strip
+        // the touch controls mirror the session: the latched lever, the action pill, AUTO, the look strip
         touch.throttle = s.throttle
         touch.actionLabel = s.actionLabel
+        touch.autoVisible = s.autopilotOffered
         touch.lookEnabled = mode.view != ShipView.CHASE
     }
 
@@ -776,7 +779,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (owner == InputGate.OWNER_FLIGHT || owner == InputGate.OWNER_NONE) {
             // under the curtain only PAUSE gets through to here (see onPointerDown)
             touch.write(f, dt)
-            if (owner == InputGate.OWNER_FLIGHT) pad.write(f, dt, s.throttle, this)
+            if (owner == InputGate.OWNER_FLIGHT) pad.write(f, dt, this)
         }
         for (i in 0 until Action.COUNT) {
             val n = debugPresses[i]
@@ -910,8 +913,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         fun num(i: Int): Double? = words.getOrNull(i)?.toDoubleOrNull()
         val station = stationTarget(arg, system)
         when (name) {
-            "fa" -> if (arg == null || (arg == "on") != s.ship.flightAssist) s.toggleFlightAssist()
+            "fa" -> if (arg == null || (arg == "on") != s.thrust.flightAssist) s.toggleFlightAssist()
             "boost" -> s.requestBoost()
+            "autopilot" -> s.autopilotButton()
+            "heat" -> num(1)?.let { s.systems.setHeat(it) }
+            "fuel" -> num(1)?.let { s.systems.setFuelFraction(it) }
+            "cargo" -> num(1)?.let { s.cargoMass = it.coerceAtLeast(0.0) }
+            "crash" -> s.startCrash((arg ?: Session.CRASH_GROUND).uppercase())
             "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
             "speed" -> num(1)?.let { s.debugSpeed(it.toFloat()) }
             "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
@@ -964,7 +972,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "dock" -> s.requestDocking(station ?: 0)
             "docked" -> s.debugDocked(station ?: 0)
             "behind-station" -> s.debugBehindStation(station ?: 0, 1500.0, 0f)
-            "ram-station" -> s.debugBehindStation(station ?: 0, 400.0, 120f)
+            "ram-station" -> s.debugBehindStation(station ?: 0, 400.0, (num(2) ?: 120.0).toFloat())
         }
     }
 
@@ -1006,6 +1014,11 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // the message line over an overlay that leaves room for it (the services: the welcome lines
         // of a docked start show there, D31); with no overlay the HUD draws it
         if (world && overlay != Overlay.NONE && overlay.showsMessages) hud.drawMessage(ui, s!!, 1f)
+        // a crash fades the picture to black and back (Warnings.Crash; `05` brings the cinematic)
+        if (world) {
+            val black = s!!.crashFade
+            if (black > 0.003f) ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(Theme.BLACK, black))
+        }
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
             ui.text(buf, frame.w - frame.sr - 14f * u, frame.st + 66f * u, 10f * u, withAlpha(Theme.OK, 0.9f), UiRenderer.RIGHT, shadow = 0.7f)

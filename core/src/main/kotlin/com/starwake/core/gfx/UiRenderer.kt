@@ -237,6 +237,32 @@ class UiRenderer(private val gl: Gl, val font: FontData, atlas: ByteArray) {
         stream.endQuad()
     }
 
+    /**
+     * An anti-aliased isosceles triangle of base [width] and height [length] centred on ([cx], [cy]),
+     * its tip pointing up and the whole turned [angle] radians clockwise (screen Y down: 0 = tip up,
+     * π/2 = tip right). [half] draws only the triangle's left (-1) or right (+1) half, cut hard
+     * along its axis so two halves of different colours meet without a seam; 0 draws it whole.
+     */
+    fun triangle(cx: Float, cy: Float, width: Float, length: Float, angle: Float, color: Int, half: Int = 0, soft: Float = 1f) {
+        if ((color ushr 24) == 0) return
+        flushIfFull()
+        val hw = width * 0.5f
+        val hh = length * 0.5f
+        val pad = soft + 1f
+        val ex = hw + pad
+        val ey = hh + pad
+        val c = kotlin.math.cos(angle)
+        val s = kotlin.math.sin(angle)
+        val col = QuadStream.abgr(color)
+        val sel = half.toFloat()
+        // local (lx, ly) → screen (cx + lx·c − ly·s, cy + lx·s + ly·c): clockwise on a Y-down screen
+        vertex(cx - ex * c + ey * s, cy - ex * s - ey * c, -ex, -ey, col, 3f, hw, length, sel, 0f, soft)
+        vertex(cx + ex * c + ey * s, cy + ex * s - ey * c, ex, -ey, col, 3f, hw, length, sel, 0f, soft)
+        vertex(cx - ex * c - ey * s, cy - ex * s + ey * c, -ex, ey, col, 3f, hw, length, sel, 0f, soft)
+        vertex(cx + ex * c - ey * s, cy + ex * s + ey * c, ex, ey, col, 3f, hw, length, sel, 0f, soft)
+        stream.endQuad()
+    }
+
     fun line(x0: Float, y0: Float, x1: Float, y1: Float, width: Float, color: Int) {
         if ((color ushr 24) == 0) return
         val dx = x1 - x0
