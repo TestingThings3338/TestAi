@@ -15,8 +15,8 @@ import kotlin.test.assertTrue
 
 /**
  * The flight port inside the session (02-flight.md section 2, 3.7 glue, 5.7): the autopilot and its
- * override rules, the collision response (slide, crash thresholds, the plain crash and its
- * respawn), heat death, the gear command, the near band on a real planet, and no allocation in
+ * override rules, the collision response (slide, the crash thresholds and the crash contract),
+ * heat death, the gear command, the near band on a real planet, and no allocation in
  * the flight frame.
  */
 class FlightSessionTest {
@@ -157,7 +157,7 @@ class FlightSessionTest {
             if (alt < s.spec.reach + 0.5) break
         }
         println("dive: lowest %.1f m, gear down at %.1f m, at most %.1f m/s below 100 m".format(minAlt, gearAt, maxBelow100))
-        assertFalse(s.mode.crashing, "no crash")
+        assertEquals(0, s.crashes, "no crash")
         assertTrue(minAlt > -1.0, "never through the surface")
         assertTrue(maxBelow100 <= 51.0, "the approach law near the ground: $maxBelow100 m/s")
         assertTrue(gearAt in 0.0..61.0, "the gear is commanded down below 60 m: $gearAt")
@@ -165,39 +165,39 @@ class FlightSessionTest {
     }
 
     @Test
-    fun hittingTheGroundFasterThan38MetresPerSecondCrashesAndRespawnsAtAStation() {
-        val s = session()
+    fun hittingTheGroundFasterThan38MetresPerSecondCrashes() {
         val earth = system.bodyIndex("Earth")
-        s.near(earth, 300.0)
-        // straight down at 60 m/s with Flight Assist off (the brake still applies: start inside the hull reach)
-        s.toggleFlightAssist()
-        val b = system.bodies[earth]
-        val ux = (s.ship.pos.x - b.pos.x) / (b.radius + 300.0)
-        val uy = (s.ship.pos.y - b.pos.y) / (b.radius + 300.0)
-        val uz = (s.ship.pos.z - b.pos.z) / (b.radius + 300.0)
-        s.debugDrop(0.5)
-        s.ship.vel.set(-ux * 60.0, -uy * 60.0, -uz * 60.0)
+        fun drop(speed: Double): Session {
+            val s = session()
+            s.near(earth, 300.0)
+            // straight down with Flight Assist off (the brake still applies: start inside the hull reach)
+            s.toggleFlightAssist()
+            s.debugDrop(0.5)
+            val b = system.bodies[earth]
+            val dx = s.ship.pos.x - b.pos.x
+            val dy = s.ship.pos.y - b.pos.y
+            val dz = s.ship.pos.z - b.pos.z
+            val d = sqrt(dx * dx + dy * dy + dz * dz)
+            s.ship.vel.set(-dx / d * speed, -dy / d * speed, -dz / d * speed)
+            return s
+        }
+        val s = drop(60.0)
+        val nearest = SpawnRules.nearestStation(system, s.ship.pos)
         fly(s, 2)
-        assertTrue(s.mode.crashing, "60 m/s into the ground")
-        assertEquals(Session.CRASH_GROUND, s.crashCause)
-        assertTrue(s.crashFade > 0f)
-        // the plain crash: black at 0.3 s, respawn in front of the nearest station, back at 2.8 s
-        fly(s, 30)
-        assertTrue(s.crashFade >= 1f)
-        val st = system.stations[SpawnRules.nearestStation(system, s.ship.pos)]
-        val dx = s.ship.pos.x - st.pos.x
-        val dy = s.ship.pos.y - st.pos.y
-        val dz = s.ship.pos.z - st.pos.z
-        assertTrue(sqrt(dx * dx + dy * dy + dz * dz) < 3000.0, "in front of a station")
+        assertEquals(1, s.crashes, "60 m/s into the ground")
+        assertEquals(CrashCause.GROUND, s.crashCause)
+        // the contract's placeholder: SHIP DESTROYED, then the docked start at the nearest station
+        assertEquals(Session.SHIP_DESTROYED, s.message)
+        assertTrue(s.mode.docked)
+        assertEquals(nearest, s.dockStation)
         assertEquals(0.0, s.ship.speed)
         assertEquals(1.0, s.systems.fuelFraction)
-        // flight input is blocked until the crash ends
-        fly(s, 10) { it.leverSet = true; it.lever = 1f }
-        assertEquals(0f, s.throttle)
-        fly(s, 60 * 3)
-        assertFalse(s.mode.crashing)
-        assertEquals(0f, s.crashFade)
-        assertEquals(1, s.crashes)
+        assertEquals(0.0, s.shipHeat)
+        // 30 m/s is below Surface.SafeLandingSpeed (38): the ground takes the velocity into it
+        val t = drop(30.0)
+        fly(t, 2)
+        assertEquals(0, t.crashes, "30 m/s is no crash")
+        assertFalse(t.mode.docked)
     }
 
     @Test
@@ -217,7 +217,7 @@ class FlightSessionTest {
             n++
         }
         assertTrue(s.mode.landed, "touched down")
-        assertFalse(s.mode.crashing)
+        assertEquals(0, s.crashes)
         assertEquals(0.0, s.ship.speed)
     }
 
@@ -236,7 +236,7 @@ class FlightSessionTest {
             minAlt = minOf(minAlt, altitude(s, jupiter))
             if (s.message == Session.LANDING_BLOCKED_GAS) blocked = true
         }
-        assertFalse(s.mode.crashing, "no solid ground: the barrier holds")
+        assertEquals(0, s.crashes, "no solid ground: the barrier holds")
         assertTrue(minAlt > -1.0, "never through the cloud tops: $minAlt")
         assertTrue(minAlt < 20.0, "the dive reached the cloud tops: $minAlt")
         assertTrue(blocked, "LANDING BLOCKED at the barrier")
@@ -249,17 +249,18 @@ class FlightSessionTest {
         val slow = session()
         slow.debugBehindStation(0, 400.0, 30f)
         fly(slow, 60 * 20)
-        assertFalse(slow.mode.crashing, "30 m/s slides")
+        assertEquals(0, slow.crashes, "30 m/s slides")
         assertTrue(slow.stationClearance() > -2.5f && slow.stationClearance() < 5f, "at the hull: ${slow.stationClearance()}")
         val fast = session()
         fast.debugBehindStation(0, 400.0, 120f)
         var crashed = false
         repeat(60 * 6) {
             fly(fast, 1)
-            if (fast.mode.crashing) crashed = true
+            if (fast.crashes > 0) crashed = true
         }
         assertTrue(crashed, "120 m/s into the hull")
-        assertEquals(Session.CRASH_STATION, fast.crashCause)
+        assertEquals(CrashCause.STATION, fast.crashCause)
+        assertTrue(fast.mode.docked, "the placeholder docks the ship at the nearest station")
     }
 
     // ------------------------------------------------------------------ heat (3.6)
@@ -269,17 +270,19 @@ class FlightSessionTest {
         val s = session()
         s.systems.setHeat(1.99)
         fly(s, 1)
-        assertFalse(s.mode.crashing)
+        assertEquals(0, s.crashes)
+        // the warnings read the ship's heat from the gravity state (Roblox gravityState.heat)
+        assertEquals(s.systems.heat, s.gs.heat)
+        assertEquals(s.systems.heat, s.shipHeat)
         // Roblox's order: the systems cool the ship (about 0.003 a frame here), then the check
         s.systems.setHeat(2.0)
         fly(s, 1)
-        assertFalse(s.mode.crashing, "cooled below 200 % before the check")
+        assertEquals(0, s.crashes, "cooled below 200 % before the check")
         s.systems.setHeat(2.01)
         fly(s, 1)
-        assertTrue(s.mode.crashing)
-        assertEquals(Session.CRASH_HEAT, s.crashCause)
-        fly(s, 60)
-        assertEquals(0.0, s.systems.heat, "the respawn cools the ship")
+        assertEquals(1, s.crashes)
+        assertEquals(CrashCause.HEAT, s.crashCause)
+        assertEquals(0.0, s.systems.heat, "the docked start cools the ship")
     }
 
     @Test

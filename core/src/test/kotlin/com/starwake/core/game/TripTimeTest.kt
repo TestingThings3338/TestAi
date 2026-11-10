@@ -73,7 +73,7 @@ class TripTimeTest {
             if (trip.shadow.isNaN() && d < shadowEdge(s, target)) trip.shadow = t
             if (trip.approach.isNaN() && d < target.radius * 12.0) trip.approach = t
             if (trip.low.isNaN() && d - target.radius < 60_000.0) trip.low = t
-            if (s.mode.crashing) {
+            if (s.crashes > 0) {
                 trip.crashed = true
                 break
             }

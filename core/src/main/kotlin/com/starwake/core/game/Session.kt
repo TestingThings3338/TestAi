@@ -56,8 +56,8 @@ interface SessionHost : UiHost {
  * the [gravity] field with the S-classified speed law and its station and edge composition,
  * [thrust], the [systems] (fuel, heat, G) and the gear command, each in its Roblox slot. The move
  * is sub-stepped (≤ 1/120 s) with the collisions: the ship slides along surfaces and station hulls
- * and crashes above their thresholds (a plain Roblox crash: fade, respawn in front of the nearest
- * station; `05` brings the cinematic). The world runs in its slots: C14 moves the bodies on their
+ * and crashes above Roblox's thresholds ([startCrash], the crash contract: a placeholder until `05`
+ * brings the crash flow). The world runs in its slots: C14 moves the bodies on their
  * orbits, C15 carries the ship with its reference frame (03-world.md 2.9.4, DECISIONS 6). The
  * landing mode (L) and the auto-dock (K) are still the pre-port ones (`05`, `08` replace them).
  *
@@ -189,20 +189,6 @@ class Session(
     /** Gear position forced by debug commands (null = follow the flight), like ShipHull.gearForce. */
     var gearForce: Boolean? = null
 
-    // ---- the crash (a plain Roblox crash, `Warnings.Crash`; `05` brings the cinematic)
-    /** Seconds since the crash started, -1 without one. */
-    var crashTime = -1f
-        private set
-
-    /** What destroyed the ship last: "HEAT", "GROUND", "STATION" ("" before any crash). */
-    var crashCause = ""
-        private set
-    var crashes = 0
-        private set
-    private var respawned = false
-    private var pendingCrash: String? = null
-    private val crashPos = DVec3()
-
     // ---- docking (K): the pre-port auto-dock into the slot
     var dockStation = -1
         private set
@@ -308,7 +294,6 @@ class Session(
         wasTravelling = false
         lastFlightAssist = true
         stickHold = false
-        crashTime = -1f
         pendingCrash = null
         camera.lookHold = false
         camera.resetLook()
@@ -544,7 +529,7 @@ class Session(
         // ---- C23-C25 thrust and the move: sub-stepped with the collisions
         mark(FrameStep.C23)
         if (liftTime > 0f) liftTime -= dt
-        if (!mode.docked && !mode.docking && !mode.crashing) {
+        if (!mode.docked && !mode.docking) {
             thrust.update(dtd, ship.rot, ship.vel, handling)
             move(dt)
         }
@@ -563,13 +548,11 @@ class Session(
         mark(FrameStep.C27)
         thrust.localFelt(ship.rot, feltLocal)
         systems.update(dtd, gs.starHeat, thrust.throttle, feltLocal.x, feltLocal.y, feltLocal.z, profile.fuelBurn, profile.scoopRate)
+        // Roblox `gravityState.heat = systems:getHeat()`: from here on the state carries the ship's heat
+        gs.heat = systems.heat
         mark(FrameStep.C28)
-        if (!mode.crashing) {
-            if (systems.heat >= FlightConfig.Systems.FATAL_HEAT) startCrash(CRASH_HEAT)
-            else pendingCrash?.let { startCrash(it) }
-        }
-        pendingCrash = null
-        if (mode.landed && !mode.crashing) holdLanded(dt)
+        checkCrash()
+        if (mode.landed) holdLanded(dt)
         mark(FrameStep.C30)
         if (mode.docking) {
             // the pilot's deflection takes the ship back from the docking computer
@@ -588,7 +571,7 @@ class Session(
         ship.boosting = thrust.boosting
         ship.engineOutput = if (mode.docking) 0.3f else clamp(abs(thrust.throttle).toFloat(), 0f, 1f)
         mark(FrameStep.C35)
-        cursorShown = !mode.looking && !mode.docked && !mode.onFoot && !mode.crashing
+        cursorShown = !mode.looking && !mode.docked && !mode.onFoot
         mark(FrameStep.C36) // 06: cockpit state
         mark(FrameStep.C37)
         mark(FrameStep.C38)
@@ -605,7 +588,6 @@ class Session(
         if (thrust.flightAssist != lastFlightAssist) lastFlightAssist = thrust.flightAssist // 09: FA voice
         mark(FrameStep.C45)
         updateProximity()
-        updateCrash(dt)
         mark(FrameStep.C46) // 09: callouts
         mark(FrameStep.C47)
         validateLock()
@@ -708,7 +690,7 @@ class Session(
             autopilot.disengage(Autopilot.STANDBY)
             voice.say(VOICE_AUTOPILOT_OFF)
             host.haptic(Haptics.TICK)
-        } else if (!mode.travelling && !mode.landing && !mode.landed && !mode.docked && !mode.docking && !mode.crashing &&
+        } else if (!mode.travelling && !mode.landing && !mode.landed && !mode.docked && !mode.docking &&
             lockKind != LOCK_NONE && autopilot.engage(lockKind, lockIndex)
         ) {
             stickHold = false
@@ -1047,7 +1029,8 @@ class Session(
         if (i < 0) return
         val hit = stationCollision.collide(ship, system.stations[i])
         if (hit > FlightConfig.Stations.CRASH_SPEED) {
-            pendingCrash = CRASH_STATION
+            val n = stationCollision.hitNormal
+            crashAt(CrashCause.STATION, n.x.toDouble(), n.y.toDouble(), n.z.toDouble())
             return
         }
         if (hit > 4f && bumpCooldown <= 0f) {
@@ -1081,7 +1064,7 @@ class Session(
                 ship.rot.rotate(0f, 1f, 0f, tmp)
                 val level = tmp.dot(upV)
                 if (-radial > FlightConfig.Surface.SAFE_LANDING_SPEED) {
-                    pendingCrash = CRASH_GROUND
+                    crashAt(CrashCause.GROUND, dx / d, dy / d, dz / d)
                     return
                 }
                 if (gearRig.downFraction >= 1f && level > TOUCHDOWN_LEVEL && ship.speed < TOUCHDOWN_MAX_SPEED) {
@@ -1102,7 +1085,7 @@ class Session(
         if (!contact.sphere(ship, spec, b.pos.x, b.pos.y, b.pos.z, b.radius)) return
         val hit = contact.impact
         if (solid && hit > FlightConfig.Surface.SAFE_LANDING_SPEED) {
-            pendingCrash = CRASH_GROUND
+            crashAt(CrashCause.GROUND, contact.nx, contact.ny, contact.nz)
             return
         }
         if (!solid && time - barrierNoticeAt > BARRIER_NOTICE_PAUSE) {
@@ -1132,76 +1115,67 @@ class Session(
         showMessage("TOUCHDOWN  ·  " + b.displayName)
     }
 
-    // ================================================================== the crash (Warnings.Crash)
+    // ================================================================== the crash contract (02 5.7, 05 4.7)
+    //
+    // The flight calls [startCrash] (heat death at C28, the ground and the station hulls during the
+    // move); the crash-flow port (05: warnings, the destruction cinematic, the recovery) replaces its
+    // placeholder body. The warnings read [shipHeat] and [timeToImpact].
+
+    /** What destroyed the ship last, null before any crash (harness, tests). */
+    var crashCause: CrashCause? = null
+        private set
+
+    /** Crashes in this session (harness, tests). */
+    var crashes = 0
+        private set
+
+    /** A crash the move found (C23-C25: ground, station hull), started at C28 with the hit's outward normal. */
+    private var pendingCrash: CrashCause? = null
+    private val pendingNormal = Vec3()
+
+    /** The ship's heat, 0..2.2 (1 = 100 %; Roblox `gravityState.heat` after `systems:update`): the overheat warnings read it. */
+    val shipHeat: Double get() = systems.heat
 
     /**
-     * `startCrash(cause)` without the cinematic (the plain `Warnings.Crash` of 05 4.7: fade 0.3 s,
-     * respawn in the black, black 1.6 s, fade-in 0.9 s): "Hull failure.", the ship stops where it
-     * is, flight input blocked until the fade-in starts. A crash while one runs is ignored. `05`
-     * brings the cinematic and the losses.
+     * Seconds until the ship hits the nearest body's ground at its closing speed (+∞ while not
+     * closing; Roblox `gravityState.timeToImpact`, against the ground: DECISIONS 16): the impact
+     * warnings read it.
      */
-    fun startCrash(cause: String) {
-        if (mode.crashing || destruction.isActive()) return
-        mode.crashing = true
-        crashTime = 0f
+    val timeToImpact: Double get() = gs.timeToImpact
+
+    /**
+     * `startCrash(cause)` (Roblox `ShipClient.lua:1474-1666`): the ship is destroyed by [cause];
+     * [hitNormal] is the outward normal of the ground or hull it hit (null for heat). Placeholder
+     * until the crash-flow port brings the Roblox one: the toast SHIP DESTROYED, then the docked
+     * start at the station nearest to the crash.
+     */
+    fun startCrash(cause: CrashCause, hitNormal: Vec3? = null) {
         crashCause = cause
         crashes++
-        respawned = false
-        crashPos.set(ship.pos)
-        ship.vel.zero()
-        ship.angVel.zero()
-        mode.landing = false
-        mode.docking = false
-        autopilot.disengage(Autopilot.STANDBY)
-        voice.interrupt()
-        voice.say(VOICE_HULL_FAILURE)
-        message = null
-        host.haptic(Haptics.HEAVY)
-        addShake(1.2f)
+        val revealed = mode.revealed
+        val nearest = SpawnRules.nearestStation(system, ship.pos)
+        startDocked(if (nearest >= 0) nearest else SpawnRules.startStation(system))
+        if (revealed) afterReveal(false)
+        showMessage(SHIP_DESTROYED)
     }
 
-    /** The crash timeline: the respawn in the black, the end after the fade-in ("All systems online."). */
-    private fun updateCrash(dt: Float) {
-        if (crashTime < 0f) return
-        crashTime += dt
-        if (!respawned && crashTime >= CRASH_FADE_OUT) respawnAfterCrash()
-        if (crashTime >= CRASH_FADE_OUT + CRASH_HOLD + CRASH_FADE_IN) {
-            crashTime = -1f
-            mode.crashing = false
-            voice.say(Voice.SYSTEMS_ONLINE)
-        }
+    /** A hit during the move that destroys the ship: [cause] with the surface's outward normal (nx, ny, nz). */
+    private fun crashAt(cause: CrashCause, nx: Double, ny: Double, nz: Double) {
+        pendingCrash = cause
+        pendingNormal.set(nx.toFloat(), ny.toFloat(), nz.toFloat())
     }
-
-    /** Opacity of the crash's black (0 without a crash): 0.3 s in, 1.6 s black, 0.9 s out. */
-    val crashFade: Float
-        get() {
-            val t = crashTime
-            return when {
-                t < 0f -> 0f
-                t < CRASH_FADE_OUT -> t / CRASH_FADE_OUT
-                t < CRASH_FADE_OUT + CRASH_HOLD -> 1f
-                else -> clamp(1f - (t - CRASH_FADE_OUT - CRASH_HOLD) / CRASH_FADE_IN, 0f, 1f)
-            }
-        }
 
     /**
-     * `respawnAfterCrash` in the black: thrust and systems reset, autopilot off, the landing and
-     * docking states cleared, the ship in front of the station nearest the crash ("Rebooting.").
+     * C28 (`ShipClient.lua:2594-2699`): heat death at `Warnings.Overheat.FatalHeat` (200 %), checked
+     * after the systems cooled the ship this frame, then a crash the move found; not while a crash
+     * runs (Roblox `warnings:isBusy()`).
      */
-    private fun respawnAfterCrash() {
-        respawned = true
-        thrust.reset(ship.vel)
-        systems.reset()
-        autopilot.disengage(Autopilot.STANDBY)
-        mode.landed = false
-        mode.landing = false
-        mode.docking = false
-        liftTime = 0f
-        stickHold = false
-        SpawnRules.recoveryPose(system, crashPos, ship.pos, ship.rot)
-        ship.angVel.zero()
-        voice.say(VOICE_REBOOTING)
-        snapAfterJump()
+    private fun checkCrash() {
+        val cause = pendingCrash
+        pendingCrash = null
+        if (mode.crashing) return
+        if (systems.heat >= FlightConfig.Systems.FATAL_HEAT) startCrash(CrashCause.HEAT)
+        else if (cause != null) startCrash(cause, pendingNormal)
     }
 
     // ================================================================== landing mode (L), ground (C28)
@@ -1471,7 +1445,7 @@ class Session(
 
     /** The AUTO button shows: a target is locked (or the autopilot flies), in free flight. */
     val autopilotOffered: Boolean
-        get() = (lockKind != LOCK_NONE || autopilot.engaged) && !mode.docked && !mode.docking && !mode.landed && !mode.crashing
+        get() = (lockKind != LOCK_NONE || autopilot.engaged) && !mode.docked && !mode.docking && !mode.landed
 
     /**
      * C64: the voice queue; the welcome lines once per app run, [Voice.WELCOME_DELAY] after the
@@ -1748,7 +1722,7 @@ class Session(
             "scooping=${systems.scooping} g=${"%.2f".format(systems.gForce)} strain=${"%.2f".format(systems.strainG)} " +
             "redout=${"%.2f".format(systems.redout)} dark=${"%.3f".format(systems.darkness)} " +
             "gravity=${"%.4f".format(gs.gravity.length())} ap=${autopilot.status.replace(' ', '_')} apOn=${autopilot.engaged} " +
-            "crashing=${mode.crashing} crashes=$crashes cause=${crashCause.ifEmpty { "-" }} " +
+            "crashing=${mode.crashing} crashes=$crashes cause=${crashCause ?: "-"} " +
             "aimArrow=${"%.2f".format(pilotAimX)},${"%.2f".format(pilotAimY)} cursor=$cursorShown attitude=$attitudeShown " +
             "tti=${if (gs.timeToImpact.isInfinite()) "inf" else "%.1f".format(gs.timeToImpact)}"
     }
@@ -1807,15 +1781,8 @@ class Session(
         /** The barrier's hold message at most this often (`BARRIER_NOTICE_PAUSE`), s. */
         const val BARRIER_NOTICE_PAUSE = 4f
 
-        /** Crash causes (`startCrash`). */
-        const val CRASH_HEAT = "HEAT"
-        const val CRASH_GROUND = "GROUND"
-        const val CRASH_STATION = "STATION"
-
-        /** `Warnings.Crash`: fade out, black (respawn at its start), fade in, s. */
-        const val CRASH_FADE_OUT = 0.3f
-        const val CRASH_HOLD = 1.6f
-        const val CRASH_FADE_IN = 0.9f
+        /** The placeholder crash's toast ([startCrash]). */
+        const val SHIP_DESTROYED = "SHIP DESTROYED"
 
         /** Voice lines as text (D31; `09` A.5). */
         const val VOICE_AUTOPILOT_ON = "AUTOPILOT ENGAGED."
@@ -1824,7 +1791,5 @@ class Session(
         const val VOICE_TARGET_REACHED = "TARGET REACHED."
         const val VOICE_MANUAL_OVERRIDE = "MANUAL OVERRIDE."
         const val VOICE_AUTOPILOT_ATMOSPHERE = "AUTOPILOT OFF. ATMOSPHERE."
-        const val VOICE_HULL_FAILURE = "HULL FAILURE."
-        const val VOICE_REBOOTING = "REBOOTING."
     }
 }

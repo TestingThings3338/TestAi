@@ -39,12 +39,9 @@ object InputGate {
         else -> OWNER_FLIGHT
     }
 
-    /**
-     * The thrust reads its inputs (C4): not in warp travel, not controlled, not on foot, flying; and
-     * not while a crash runs (flight input is blocked through the crash fade, DECISIONS 21d).
-     */
+    /** The thrust reads its inputs (C4): not in warp travel, not controlled, not on foot, flying. */
     fun thrustEnabled(m: PlayerMode): Boolean =
-        m.branch == Branch.FLIGHT && !m.travelling && !m.controlled && !m.onFoot && !m.curtain && !m.overlay.pauses && !m.crashing
+        m.branch == Branch.FLIGHT && !m.travelling && !m.controlled && !m.onFoot && !m.curtain && !m.overlay.pauses
 
     /** The pilot's aim and key axis reach the ship (C7: zeroed while travelling, controlled or on foot). */
     fun steeringEnabled(m: PlayerMode): Boolean = thrustEnabled(m)

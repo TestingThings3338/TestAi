@@ -4,6 +4,7 @@ import com.starwake.core.content.Content
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
 import com.starwake.core.game.Branch
+import com.starwake.core.game.CrashCause
 import com.starwake.core.game.FrameTrace
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.OrbitCamera
@@ -919,7 +920,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "heat" -> num(1)?.let { s.systems.setHeat(it) }
             "fuel" -> num(1)?.let { s.systems.setFuelFraction(it) }
             "cargo" -> num(1)?.let { s.cargoMass = it.coerceAtLeast(0.0) }
-            "crash" -> s.startCrash((arg ?: Session.CRASH_GROUND).uppercase())
+            "crash" -> s.startCrash(
+                when (arg) {
+                    "heat" -> CrashCause.HEAT
+                    "station" -> CrashCause.STATION
+                    else -> CrashCause.GROUND
+                },
+            )
             "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
             "speed" -> num(1)?.let { s.debugSpeed(it.toFloat()) }
             "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
@@ -1014,11 +1021,6 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         // the message line over an overlay that leaves room for it (the services: the welcome lines
         // of a docked start show there, D31); with no overlay the HUD draws it
         if (world && overlay != Overlay.NONE && overlay.showsMessages) hud.drawMessage(ui, s!!, 1f)
-        // a crash fades the picture to black and back (Warnings.Crash; `05` brings the cinematic)
-        if (world) {
-            val black = s!!.crashFade
-            if (black > 0.003f) ui.rect(-2f, -2f, frame.w + 4f, frame.h + 4f, withAlpha(Theme.BLACK, black))
-        }
         if (settings.showFps) {
             buf.clear().append(fpsValue.toInt()).append(" FPS  ").append(cpuMsAvg, 1).append(" MS CPU")
             ui.text(buf, frame.w - frame.sr - 14f * u, frame.st + 66f * u, 10f * u, withAlpha(Theme.OK, 0.9f), UiRenderer.RIGHT, shadow = 0.7f)

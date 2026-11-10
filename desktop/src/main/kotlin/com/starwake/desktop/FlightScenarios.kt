@@ -26,7 +26,7 @@ import kotlin.math.sqrt
  *  - "flight-dive": 50 Mm straight down at Earth: the near band, the attitude indicator inside the
  *    air, the gear at 60 m, the ground at the minimum approach speed;
  *  - "flight-star": into the star at full throttle: HEAT ZONE at the scaled floor, the approach zone,
- *    the barrier hold, scooping, the heat timeline and heat death;
+ *    scooping, the heat timeline and heat death (the crash contract's HEAT);
  *  - "flight-autopilot": AUTO on a locked Luna from the MERIDIAN spawn: ALIGNING, CRUISING, BRAKING,
  *    ARRIVED with their times;
  *  - "flight-arrow": the Roblox flight arrow for stick deflections 0, 0.1, 0.5 and 1 and with the
@@ -407,6 +407,7 @@ object FlightScenarios {
         val ti = w.bodyIndex(leg.target)
         val tb = w.bodies[ti]
         val edge = tb.radius + GravityField(FlightLaw.PORT).shadowOf(tb)
+        val crashes0 = num("crashes")
         val start = frame
         var markAt = 10.0
         var peakMarked = false
@@ -437,7 +438,7 @@ object FlightScenarios {
                 leg.low = t
                 mark(leg, "60km")
             }
-            if (field("crashing") == "true") fail("${leg.label}: crashed on arrival")
+            if (num("crashes") > crashes0) fail("${leg.label}: crashed on arrival")
             if (alt < 2_000.0 && leg.marks.none { it.name == "2km" }) mark(leg, "2km")
             if (num("alt") < 1.0 && field("body") == leg.target) {
                 leg.ground = t
@@ -510,6 +511,7 @@ object FlightScenarios {
             frames(1)
             val earth = w.bodyIndex("Earth")
             val r = w.bodies[earth].radius
+            val crashes0 = num("crashes")
             val start = frame
             var band = Double.NaN
             var bandZone = ""
@@ -544,7 +546,7 @@ object FlightScenarios {
                     lastLog = sec
                     log("t %5.1f s: alt %s m, speed %s m/s, limit %s, zone %s, gear %s, attitude %s".format(t, f1(alt), field("speed"), field("limit"), field("zone"), field("gear"), field("attitude")))
                 }
-                if (field("crashing") == "true") fail("crashed on the dive")
+                if (num("crashes") > crashes0) fail("crashed on the dive")
                 if (num("alt") < 1.0) {
                     landedSpeed = maxOf(before, num("speed"))
                     report.note(
@@ -603,8 +605,9 @@ object FlightScenarios {
             val fuel0 = num("fuel")
             var fuelMax = fuel0
             var lastLog = -1
+            val crashes0 = num("crashes")
             while (frame - start < 60 * 240) {
-                if ((frame - start) % 30 == 0L && field("crashing") != "true") game.debugCommand("face sol")
+                if ((frame - start) % 30 == 0L) game.debugCommand("face sol")
                 frame()
                 val t = (frame - start) / 60.0
                 val alt = distTo(w, sun) - r
@@ -621,7 +624,7 @@ object FlightScenarios {
                     lastLog = sec
                     log("t %3d s: alt %s m, speed %s m/s, limit %s, zone %s, heat %s, star heat %s, scooping %s, fuel %s".format(sec, f1(alt), field("speed"), field("limit"), field("zone"), field("heat"), field("starHeat"), field("scooping"), field("fuel")))
                 }
-                if (field("crashing") == "true") {
+                if (num("crashes") > crashes0) {
                     dead = t
                     break
                 }
@@ -634,7 +637,7 @@ object FlightScenarios {
             // 02 3.5: the pilot can always leave: the heat zone's floor 1 km/s, x S in the port
             expect(heatLimit >= 1000.0 * 3000.0 * 0.999) { "the HEAT ZONE limit fell to $heatLimit m/s" }
             expect(!warm.isNaN() && !dead.isNaN() && warm < dead) { "no 100 % warning before the heat death" }
-            expect(field("cause") == "HEAT") { "the crash was not the heat" }
+            expect(field("cause") == "HEAT" && field("docked") == "true") { "the crash was not the heat (or no docked restart)" }
             expect(scooped && fuelMax > fuel0 + 0.05) { "no scooping near the star" }
             // the heat builds all the way in (star heat 0.46 at 60 Mm, 1 at the surface): 100 % ->
             // 200 % takes 17.4 s held at the surface (02 3.6), longer while still descending; a dive
@@ -660,16 +663,17 @@ object FlightScenarios {
             frames(20)
             log("star surface: ${field("zone")} speed ${field("speed")} heat ${field("heat")} scooping ${field("scooping")}")
             shot("flight-star-surface-120")
-            // heat death
+            // heat death: the crash contract (Session.startCrash(HEAT)); its placeholder until the
+            // crash flow: SHIP DESTROYED, then the docked start at the station nearest the crash
+            val crashes0 = num("crashes")
             cmd("heat 2.01")
-            frames(10) // the plain crash: half way through its 0.3 s fade to black
-            log("star heat death: crashing ${field("crashing")} cause ${field("cause")}")
-            expect(field("crashing") == "true" && field("cause") == "HEAT") { "no heat death at 201 %" }
+            frames(2)
+            log("star heat death: crashes ${field("crashes")} cause ${field("cause")} docked ${field("docked")} station ${field("station")} message ${game.messageLine}")
+            expect(num("crashes") == crashes0 + 1 && field("cause") == "HEAT") { "no heat death at 201 %" }
+            expect(field("docked") == "true" && game.messageLine == "SHIP DESTROYED") { "no docked restart after the heat death" }
+            expect(num("heat") == 0.0) { "the docked start did not cool the ship" }
+            frames(10)
             shot("flight-star-heat-death")
-            frames(180) // black 1.6 s, the respawn, the 0.9 s fade-in
-            log("after the heat death: crashing ${field("crashing")} heat ${field("heat")} body ${field("body")} ref ${field("ref")}")
-            expect(num("heat") == 0.0) { "the respawn did not cool the ship" }
-            shot("flight-star-respawned")
         }
     }
 
@@ -735,7 +739,7 @@ object FlightScenarios {
             expect(field("ap") == "ARRIVED" && field("apOn") == "false") { "the autopilot did not finish ARRIVED" }
             val alt = distTo(w, luna) - r
             expect(alt <= r * 0.35 + 1000.0 && num("speed") <= 25.5) { "ARRIVED ${f1(alt)} m above Luna at ${field("speed")} m/s" }
-            expect(field("crashing") != "true") { "crashed" }
+            expect(num("crashes") == 0.0) { "crashed" }
         }
         run(half(env)) {
             val w = WorldBuilder.sol()

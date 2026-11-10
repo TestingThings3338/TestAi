@@ -71,6 +71,12 @@ class GravityState {
     /** 0 at the heat zone's edge, 1 at the surface. */
     var starHeat = 0.0
 
+    /**
+     * The ship's heat, 0..2.2 (1 = 100 %): Roblox's `gravityState.heat = systems:getHeat()` after the
+     * systems' update (C27), which the warnings read. The session writes it; [reset] keeps it.
+     */
+    var heat = 0.0
+
     // ---- stations
     /** The nearest station, -1 for none, and the distance to its centre (m). */
     var station = -1

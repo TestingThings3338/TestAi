@@ -210,7 +210,7 @@ object Scenarios {
             shot("gp-launched")
         },
 
-        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; a 30 m/s ram stops at the hull (slide), a 120 m/s ram crashes (above 45 m/s)") {
+        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; a 30 m/s ram stops at the hull (slide), a 120 m/s ram crashes (above 45 m/s: the crash contract's placeholder docks the ship at the nearest station)") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
@@ -259,19 +259,21 @@ object Scenarios {
             log("ram at 30 m/s: closest hull gap %.1f m".format(minHull))
             check(minHull > -2.5f) { "ship sank into the hull (gap $minHull m)" }
             check(minHull < 5f) { "ram never reached the hull (gap $minHull m)" }
-            check(num("crashes") == crashes0 && field("crashing") == "false") { "a 30 m/s ram crashed: ${info()}" }
+            check(num("crashes") == crashes0) { "a 30 m/s ram crashed: ${info()}" }
             cmd("ram-station 0 120")
             frames(1)
             var crashed = false
             for (i in 0 until 300) {
                 frame()
-                if (field("crashing") == "true") {
+                if (num("crashes") > crashes0) {
                     crashed = true
                     break
                 }
             }
             info()
             check(crashed && field("cause") == "STATION") { "a 120 m/s ram did not crash on the hull: ${info()}" }
+            // the crash contract's placeholder (until the crash flow): SHIP DESTROYED, docked at the nearest station
+            check(field("docked") == "true" && game.messageLine == "SHIP DESTROYED") { "no docked restart after the crash: ${info()}" }
             frames(8)
             shot("st-ram-crash")
         },

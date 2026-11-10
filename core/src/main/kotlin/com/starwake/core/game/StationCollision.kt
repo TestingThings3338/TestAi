@@ -25,6 +25,9 @@ class StationCollision {
     /** The hull that collides (the session sets it on a ship switch). */
     var spec: ShipSpec = ShipSpec.STANDARD
 
+    /** World unit normal (out of the hull) of the hardest contact of the last [collide] (the crash's `hitNormal`). */
+    val hitNormal = Vec3()
+
     // scratch (no per-frame allocation)
     private val local = Vec3()
     private val world = Vec3()
@@ -115,7 +118,10 @@ class StationCollision {
                 val push = r - d
                 st.rot.rotate(nx, ny, nz, world)
                 val hit = HullContact.slide(ship, world.x.toDouble(), world.y.toDouble(), world.z.toDouble(), push.toDouble()).toFloat()
-                if (hit > impact) impact = hit
+                if (hit > impact) {
+                    impact = hit
+                    hitNormal.set(world)
+                }
                 // keep the local position in step with the push, so later proxies see the moved ship
                 px += nx * push
                 py += ny * push
