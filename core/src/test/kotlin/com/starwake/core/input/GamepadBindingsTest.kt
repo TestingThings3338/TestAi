@@ -138,6 +138,39 @@ class GamepadBindingsTest {
     }
 
     @Test
+    fun aFullStickIsTheRimAndTheFullKeyAxisAtTheLowestSensitivity() {
+        // SENSITIVITY 0.5 shapes the sticks through the touch stick's response (02 9.1): a full left
+        // stick is still the cursor's rim (the full turn rate, the 0.5 override), a full twist of the
+        // right stick still the full yaw
+        settings.sensitivity = 0.5f
+        pad.setSticks(1f, 0f, 0f, 0f, 0f, 0f)
+        frame()
+        assertNear(1f, f.aimX, 1e-6f, "full right")
+        pad.setSticks(-1f, -1f, 0f, 0f, 0f, 0f) // a square pad's corner: clamped to the rim, direction kept
+        frame()
+        assertNear(1f, f.aimMagnitude, 1e-5f)
+        assertNear(f.aimX, f.aimY, 1e-6f, "diagonal kept")
+        assertTrue(f.aimX < 0f && f.aimY < 0f)
+        pad.setSticks(0.5f, 0f, 0f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.25f, f.aimX, 1e-6f, "half a deflection: 0.5^(1/0.5)")
+        pad.setSticks(0f, 0f, 1f, 0f, 0f, 0f)
+        frame()
+        assertNear(-1f, f.keyAxis, 1e-6f, "full right twist = full yaw right")
+        pad.setSticks(0f, 0f, -0.5f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.25f, f.keyAxis, 1e-6f, "half a twist left")
+        // and at 1.5 the gain: 0.4 -> 0.6, saturating at the rim
+        settings.sensitivity = 1.5f
+        pad.setSticks(0.4f, 0f, 0.8f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.6f, f.aimX, 1e-6f)
+        assertNear(-1f, f.keyAxis, 1e-6f)
+        settings.sensitivity = 1f
+        pad.setSticks(0f, 0f, 0f, 0f, 0f, 0f)
+    }
+
+    @Test
     fun shouldersStrafeAndR3StopsFully() {
         pad.buttonDown(GamepadState.LB)
         frame()

@@ -90,6 +90,43 @@ class FlightSessionTest {
     }
 
     @Test
+    fun atTheLowestSensitivityAFullStickStillTakesTheShipBackAndTurnsAtTheFullRate() {
+        // SENSITIVITY 0.5, the right thumb pushes the touch stick to its rim (the reviewer's probe)
+        val settings = Settings().also { it.sensitivity = 0.5f }
+        val s = Session(system, settings, host, GearRig()).also { it.startInSpace() }
+        val touch = com.starwake.core.input.TouchFlightControls(settings, host).also { it.layout(2670f, 1200f, 2.75f, 0f, 0f, 0f, 0f) }
+        fun thumb(frames: Int, dx: Float, dy: Float) {
+            touch.onDown(7, 2670f * 0.75f, 1200f * 0.6f)
+            touch.onMove(7, 2670f * 0.75f + dx * 2.75f, 1200f * 0.6f + dy * 2.75f)
+            repeat(frames) {
+                input.begin()
+                touch.write(input, 1f / 60f)
+                s.frame(1f / 60f, input)
+            }
+            touch.onUp(7, 0f, 0f, false)
+        }
+        s.lock(Session.LOCK_BODY, system.bodyIndex("Luna"))
+        s.autopilotButton()
+        fly(s, 5)
+        assertTrue(s.autopilot.engaged)
+        // a light thumb (0.6 of the radius: 0.36 after the curve) leaves the autopilot flying
+        thumb(5, 0.6f * 52f, 0f)
+        assertTrue(s.autopilot.engaged, "a partial deflection is no override")
+        thumb(1, 80f, 0f)
+        assertEquals(Autopilot.MANUAL_OVERRIDE, s.autopilot.status, "the full stick at sensitivity 0.5")
+        // the full pitch command: the stick's rim through the 0.20 dead zone and curve 1.7 is 1
+        thumb(1, 0f, -80f)
+        assertEquals(1f, s.rotation.command.x, 1e-5f, "full pitch up")
+        // the docking computer hands over the same way
+        assertTrue(s.requestDocking(s.gs.station))
+        fly(s, 5)
+        assertTrue(s.mode.docking)
+        thumb(1, -80f, 0f)
+        assertFalse(s.mode.docking, "the full stick cancels the auto-dock")
+        assertEquals("DOCKING CANCELLED", s.message)
+    }
+
+    @Test
     fun theAutopilotFliesToLunaAndArrives() {
         // MERIDIAN -> Luna: ALIGNING, CRUISING (and BRAKING), ARRIVED 0.2 Luna radii above the surface
         val s = session()

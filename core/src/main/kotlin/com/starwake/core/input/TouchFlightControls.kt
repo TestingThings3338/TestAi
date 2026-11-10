@@ -430,9 +430,9 @@ class TouchFlightControls(private val settings: Settings, private val host: UiHo
      */
     fun write(f: InputFrame, dt: Float) {
         time += dt
-        val sens = settings.sensitivity
         val pitchSign = if (settings.pitchUpClimb) 1f else -1f
-        if (stickId >= 0) f.addAim(stickOutX * sens, stickOutY * sens * pitchSign)
+        // SENSITIVITY shapes the deflection; a full one is the cursor's rim at every setting
+        if (stickId >= 0) f.addStick(stickOutX, stickOutY, settings.sensitivity, pitchSign)
         if (rudder != 0f) f.keyAxis = clamp(f.keyAxis - rudder, -1f, 1f)
         if (leverDirty) {
             leverDirty = false

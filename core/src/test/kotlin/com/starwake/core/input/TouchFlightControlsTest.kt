@@ -79,6 +79,58 @@ class TouchFlightControlsTest {
     }
 
     @Test
+    fun aFullDeflectionReachesTheRimAtEverySensitivity() {
+        // SENSITIVITY shapes the stick, it does not shorten it (02 9.1; Roblox's mouse gain never stops
+        // the cursor short of its radius): full deflection is 1 from 0.5 to 1.5, the direction kept,
+        // so the full turn rate and the 0.5 override stay in reach
+        for (k in 0..20) {
+            val sens = 0.5f + k * 0.05f
+            val c = controls(Settings().also { it.sensitivity = sens })
+            c.onDown(1, w * 0.75f, h * 0.6f)
+            // past the rim down-right (the floating base follows): the deflection is the unit vector (0.6, 0.8)
+            c.onMove(1, w * 0.75f + 0.6f * 80f * u, h * 0.6f + 0.8f * 80f * u)
+            write(c)
+            assertNear(1f, f.aimMagnitude, 1e-4f, "full deflection at sensitivity $sens")
+            assertNear(0.6f, f.aimX, 1e-4f, "direction at $sens")
+            assertNear(0.8f, f.aimY, 1e-4f, "direction at $sens")
+            // half the radius to the right: less turn below 1, the old gain at and above 1
+            val half = controls(Settings().also { it.sensitivity = sens })
+            half.onDown(1, w * 0.75f, h * 0.6f)
+            half.onMove(1, w * 0.75f + 26f * u, h * 0.6f)
+            write(half)
+            val expected = if (sens >= 1f) minOf(1f, 0.5f * sens) else Math.pow(0.5, 1.0 / sens).toFloat()
+            assertNear(expected, f.aimX, 1e-4f, "half deflection at $sens")
+            assertEquals(0f, f.aimY)
+        }
+    }
+
+    @Test
+    fun theSensitivityResponseIsMonotonicAndKeepsTheEnds() {
+        for (k in 0..20) {
+            val sens = 0.5f + k * 0.05f
+            assertEquals(0f, InputFrame.stickResponse(0f, sens))
+            assertEquals(1f, InputFrame.stickResponse(1f, sens), "the rim at $sens")
+            assertEquals(1f, InputFrame.stickResponse(1.4f, sens), "a square pad's corner at $sens")
+            var last = 0f
+            for (i in 1..100) {
+                val d = i / 100f
+                val v = InputFrame.stickResponse(d, sens)
+                assertTrue(v >= last, "monotonic in the deflection at $sens, $d")
+                if (sens < 1f) assertTrue(v <= d, "below 1 it turns less: $sens, $d -> $v")
+                if (sens > 1f) assertTrue(v >= d, "above 1 it turns more: $sens, $d -> $v")
+                if (k > 0) assertTrue(v >= InputFrame.stickResponse(d, sens - 0.05f), "monotonic in the setting at $sens, $d")
+                last = v
+            }
+        }
+        // 1 is the identity; the old gain above 1
+        for (i in 0..100) assertEquals(i / 100f, InputFrame.stickResponse(i / 100f, 1f))
+        assertNear(0.6f, InputFrame.stickResponse(0.4f, 1.5f), 1e-6f)
+        // at 0.5 the override's 0.5 is a 0.71 deflection, the 0.20 dead zone a 0.45 one
+        assertNear(0.5f, InputFrame.stickResponse(0.70711f, 0.5f), 1e-4f)
+        assertNear(0.2f, InputFrame.stickResponse(0.44721f, 0.5f), 1e-4f)
+    }
+
+    @Test
     fun throttleZeroDetentIsSymmetricAndTheLeverLatches() {
         val c = controls()
         val gx = c.gauge.cx

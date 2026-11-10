@@ -1177,7 +1177,7 @@ Two-thumb landscape layout stays (it exists in `TouchFlightControls`); what it f
 | V | external view | VIEW (exists) | |
 | Right mouse | look around | drag in a look zone (top centre band) or a two-finger drag; returns in 0.12 s on release | camera doc |
 | Left Alt | free the mouse | not needed | |
-| Mouse sensitivity / invert / X axis | settings | stick sensitivity / pitch direction / stick X axis | Roblox range 0.25–2 for the mouse; for the stick keep 0.5–1.5 scaling the deflection |
+| Mouse sensitivity / invert / X axis | settings | stick sensitivity / pitch direction / stick X axis | Roblox range 0.25–2 for the mouse; for the stick keep 0.5–1.5 shaping the deflection: `min(1, d·s)` from 1 up, `d^(1/s)` below, so a full deflection is 1 at every setting (Roblox's cursor reaches its radius at any mouse sensitivity; a plain gain of 0.5 never passed the 0.5 override) |
 
 Haptics: tick on FA toggle and lever detents; heavy on boost ignition; light on autopilot engage/disengage and gear commands.
 

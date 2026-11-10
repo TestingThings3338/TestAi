@@ -5,6 +5,7 @@ import com.starwake.core.Settings
 import com.starwake.core.math.clamp
 import com.starwake.core.ui.UiHost
 import kotlin.math.abs
+import kotlin.math.sign
 
 /**
  * The one gamepad map of 01-core-loop.md 8.2 (reconciled from 02, 06, 07, 08, 09) for flight:
@@ -75,7 +76,8 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
         val rx = pad.rightX
         val ry = pad.rightY
         if (lx != 0f || ly != 0f) {
-            f.addAim(lx * sens, ly * sens * pitchSign)
+            // SENSITIVITY shapes the deflection (the touch stick's helper); full is the rim at every setting
+            f.addStick(lx, ly, sens, pitchSign)
             used = true
         }
         if (pad.isHeld(GamepadState.L3)) {
@@ -86,7 +88,8 @@ class GamepadBindings(private val pad: GamepadState, private val settings: Setti
             f.lookY += -ry * LOOK_RATE * dt * pitchSign
             used = true
         } else {
-            if (rx != 0f) f.keyAxis = clamp(f.keyAxis - rx * sens, -1f, 1f)
+            // the key axis takes the same response: a full twist is the full yaw (Q/E) at every setting
+            if (rx != 0f) f.keyAxis = clamp(f.keyAxis - sign(rx) * InputFrame.stickResponse(abs(rx), sens), -1f, 1f)
             if (ry != 0f) f.lateralY = clamp(f.lateralY - ry, -1f, 1f)
             if (rx != 0f || ry != 0f) used = true
         }

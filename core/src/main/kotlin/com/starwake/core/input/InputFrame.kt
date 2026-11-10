@@ -1,5 +1,6 @@
 package com.starwake.core.input
 
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
@@ -10,8 +11,8 @@ import kotlin.math.sqrt
  * does not allow, the session reads it. No allocation.
  *
  * Conventions follow Roblox: the aim is the pilot's cursor inside the unit circle with X right and
- * Y **down** (ShipInput.getNormalizedCursor), sensitivity and INVERT PITCH applied, no dead zone (the
- * flight model applies its own); the key axis is +1 for YawLeft (Q).
+ * Y **down** (ShipInput.getNormalizedCursor), sensitivity ([stickResponse]) and INVERT PITCH
+ * applied, no dead zone (the flight model applies its own); the key axis is +1 for YawLeft (Q).
  */
 class InputFrame {
     /** Device the pilot used last ([TOUCH], [GAMEPAD], [KEYBOARD]); texts with button names follow it. */
@@ -108,6 +109,18 @@ class InputFrame {
         }
     }
 
+    /**
+     * Adds a stick's deflection to the aim (the touch stick and the pad's left stick): [x] right,
+     * [y] down, its length 0..1 (a square pad's corners are clamped to the rim), shaped by the
+     * SENSITIVITY setting ([stickResponse], the direction kept), then [pitchSign] (INVERT PITCH).
+     */
+    fun addStick(x: Float, y: Float, sensitivity: Float, pitchSign: Float) {
+        val d = sqrt(x * x + y * y)
+        if (d <= 0f) return
+        val k = stickResponse(d, sensitivity) / d
+        addAim(x * k, y * k * pitchSign)
+    }
+
     /** Zeroes the flight axes (aim, key axis, lever, ramp, lateral thrust); actions stay. */
     fun clearFlightAxes() {
         aimX = 0f; aimY = 0f; keyAxis = 0f
@@ -119,5 +132,25 @@ class InputFrame {
         const val TOUCH = 0
         const val GAMEPAD = 1
         const val KEYBOARD = 2
+
+        /**
+         * The SENSITIVITY setting (0.5..1.5, 1 the default; 02-flight.md 9.1) as a response shape on
+         * a stick deflection's length [d] (clamped to 0..1): at 1 and above a gain, `min(1, d · s)`,
+         * that reaches the rim sooner; below 1 a curve, `d^(1/s)`, that turns less for the same
+         * partial deflection. A full deflection is 1 at every setting. Roblox's MOUSE SENSITIVITY is
+         * a gain on the mouse deltas and its cursor still reaches the full radius
+         * (`ShipInput.lua:193`); a plain gain on an absolute stick would not: at 0.5 a full
+         * deflection was 0.5, 19 % of every turn rate through the 0.20 dead zone and curve 1.7, and
+         * never past the 0.5 that takes the ship back from the autopilot or the docking computer
+         * (`Autopilot.OverrideDeflection`).
+         */
+        fun stickResponse(d: Float, sensitivity: Float): Float {
+            val m = if (d > 1f) 1f else d
+            if (m <= 0f) return 0f
+            return if (sensitivity >= 1f) minOf(1f, m * sensitivity) else m.pow(1f / maxOf(sensitivity, MIN_SENSITIVITY))
+        }
+
+        /** Below this the response curve is not defined (the setting's own range starts at 0.5). */
+        private const val MIN_SENSITIVITY = 0.05f
     }
 }
