@@ -294,6 +294,80 @@ class FlightSessionTest {
         assertEquals(s.profile.boostHeat, s.systems.heat, 1e-3)
     }
 
+    // ------------------------------------------------------------------ the docking computer flies (C23 idle)
+
+    @Test
+    fun theDockingComputerFliesWithoutTheLastTurnsLoadAndTheBoostClocksRun() {
+        // a boost and a hard pull at TopSpeed inside MERIDIAN's lock: several g on the meter
+        val s = session()
+        s.setThrottle(1f)
+        fly(s, 60 * 3)
+        s.requestBoost()
+        fly(s, 1)
+        assertTrue(s.thrust.boosting)
+        fly(s, 30) { it.aimX = 1f; it.aimY = -1f }
+        val pulled = s.systems.gForce
+        assertTrue(pulled > 2.0, "the pull loads the pilot: $pulled g")
+        val station = s.gs.station
+        assertTrue(station >= 0)
+        // the docking computer takes the ship (Roblox: the thrusters push nothing it does not override)
+        assertTrue(s.requestDocking(station))
+        val cooldown0 = s.thrust.boostCooldown
+        val timer0 = s.thrust.boostTimer
+        assertTrue(timer0 > 0.5, "still burning when the docking computer takes over: $timer0 s")
+        fly(s, 30)
+        assertTrue(s.mode.docking)
+        // no load from the first docking frame on: the meter falls with its own smoothing (τ 0.12 s)
+        val decayed = pulled * kotlin.math.exp(-0.5 / FlightConfig.Systems.G_SMOOTHING)
+        assertEquals(decayed, s.systems.gForce, decayed * 1e-3 + 1e-9, "0.5 s into the auto-dock (was $pulled g)")
+        assertEquals(0.0, s.thrust.felt.length(), "felt")
+        assertEquals(0.0, s.thrust.acceleration.length(), "acceleration")
+        assertFalse(s.thrust.cruising)
+        // the boost burns out and its cooldown runs on while the docking computer flies
+        assertEquals(cooldown0 - 30.0 / 60.0, s.thrust.boostCooldown, 1e-4)
+        assertEquals(timer0 - 30.0 / 60.0, s.thrust.boostTimer, 1e-4)
+        assertTrue(s.thrust.boosting)
+        fly(s, 60)
+        assertTrue(s.systems.gForce < 1e-3 && s.systems.strainG < 1e-3, "1.5 s in: ${s.systems.gForce} g, strain ${s.systems.strainG}")
+        assertTrue(s.systems.darkness < 1e-3, "the blackout overlay faded: ${s.systems.darkness}")
+        assertFalse(s.thrust.boosting, "the 2 s burn ended during the auto-dock")
+        // into the slot and docked: no load at any time
+        var maxG = 0.0
+        var n = 0
+        while (!s.mode.docked && n < 60 * 90) {
+            fly(s, 1)
+            maxG = maxOf(maxG, s.systems.gForce)
+            n++
+        }
+        println("auto-dock after a %.2f g pull: %.4f g 0.5 s in, docked after %.1f s more, at most %.5f g on the way".format(pulled, decayed, n / 60.0, maxG))
+        assertTrue(s.mode.docked, "docked after ${n / 60.0} s")
+        assertTrue(maxG < 0.01, "the docking computer's flight loaded the pilot: $maxG g")
+        assertEquals(0.0, s.thrust.boostCooldown, "the cooldown ran out")
+        fly(s, 60)
+        assertEquals(0.0, s.systems.gForce, 1e-9)
+        assertEquals(0.0, s.thrust.felt.length(), "docked: felt")
+    }
+
+    @Test
+    fun aPushOverIntoTheAutoDockLetsTheRedoutFade() {
+        // a push-over at TopSpeed tints the screen red; the docking computer takes the ship mid-push
+        val s = session()
+        s.setThrottle(1f)
+        fly(s, 60 * 3)
+        fly(s, 45) { it.aimY = 1f }
+        val dark = s.systems.darkness
+        assertTrue(s.systems.strainG > FlightConfig.Physics.BLACKOUT_START_G, "strain ${s.systems.strainG}")
+        assertTrue(dark > 0.02 && s.systems.redout > 0.5, "darkness $dark, redout ${s.systems.redout}")
+        assertTrue(s.requestDocking(s.gs.station))
+        fly(s, 60)
+        assertTrue(s.mode.docking)
+        // the strain falls with its 0.12 s smoothing from the first docking frame, the overlay with its 0.35 s
+        assertTrue(s.systems.strainG < 0.01, "strain ${s.systems.strainG}")
+        assertTrue(s.systems.darkness < dark * 0.1, "darkness ${s.systems.darkness} (was $dark)")
+        fly(s, 120)
+        assertTrue(s.systems.darkness < 1e-3, "the overlay still covers the auto-dock: ${s.systems.darkness}")
+    }
+
     // ------------------------------------------------------------------ the attitude indicator (DECISIONS 15)
 
     @Test

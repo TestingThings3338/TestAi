@@ -310,6 +310,26 @@ class ShipThrust(private val law: FlightLaw = FlightLaw.PORT) {
         }
     }
 
+    /**
+     * A frame the thrusters do not fly: the docking computer, the clamps or the slot hold the ship.
+     * Roblox runs [update] on every frame and then overrides the pose and the velocity
+     * (`ShipClient.lua:2541`, `:2723-2727`); the port's docking skips the update, so this keeps
+     * what lives on: the limit is tracked, a boost burns out and its cooldown runs, a request is
+     * refused (the input is off), and no cruise. The thrusters push nothing, so [felt] and
+     * [acceleration] are zero: the G meter, the blackout and the engine sound do not hold the last
+     * flown frame. The lever stays where it is.
+     */
+    fun idle(dt: Double) {
+        advanceSpeedLimit(dt)
+        boostRequested = false
+        boostCooldown = max(0.0, boostCooldown - dt)
+        boostTimer = max(0.0, boostTimer - dt)
+        boosting = boostTimer > 0.0
+        cruising = false
+        felt.zero()
+        acceleration.zero()
+    }
+
     /** `reset` (crash respawn): velocity, accelerations, lever, boost timer, cruise and boost off; keeps the cooldown and FA. */
     fun reset(vel: DVec3) {
         vel.zero()

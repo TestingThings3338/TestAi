@@ -194,6 +194,49 @@ class ThrustTest {
     }
 
     @Test
+    fun anIdleFrameFeelsNothingWhileTheBoostClocksAndTheLimitRunOn() {
+        // a boost from TopSpeed and a hard brake: felt and true acceleration are large
+        val f = Flyer()
+        f.t.setThrottle(0.26)
+        f.t.setSpeedLimit(1000.0, false)
+        f.fly(10.0)
+        f.t.boostRequested = true
+        f.step()
+        f.t.boostStarted = false
+        f.fly(0.5)
+        f.t.setThrottle(-0.25)
+        f.step()
+        assertTrue(f.t.felt.length() > 10.0 && f.t.acceleration.length() > 10.0, "felt ${f.t.felt.length()}")
+        val timer = f.t.boostTimer
+        val cooldown = f.t.boostCooldown
+        val velBefore = f.vel.length()
+        // the docking computer holds the ship: nothing pushes, the clocks run, the lever stays
+        f.t.boostRequested = true
+        f.t.setSpeedLimit(260.0, false)
+        f.t.idle(dt)
+        assertEquals(0.0, f.t.felt.length())
+        assertEquals(0.0, f.t.acceleration.length())
+        assertFalse(f.t.cruising)
+        assertFalse(f.t.boostRequested, "refused: the input is off")
+        assertFalse(f.t.boostStarted)
+        near("burn", timer - dt, f.t.boostTimer, 1e-12)
+        near("cooldown", cooldown - dt, f.t.boostCooldown, 1e-12)
+        assertTrue(f.t.boosting)
+        assertEquals(-0.25, f.t.throttle)
+        assertEquals(velBefore, f.vel.length(), "idle does not touch the velocity")
+        // the falling limit is smoothed (τ 1.6 s) through the idle frames, as in flight
+        near("limit", 260.0 + 740.0 * kotlin.math.exp(-dt / 1.6), f.t.speedLimit, 1e-9)
+        var t = dt
+        while (t < 2.0) {
+            f.t.idle(dt)
+            t += dt
+        }
+        assertFalse(f.t.boosting, "the 2 s burn ended")
+        near("cooldown after 2 s", cooldown - t, f.t.boostCooldown, 1e-9)
+        near("limit after 2 s", 260.0 + 740.0 * kotlin.math.exp(-t / 1.6), f.t.speedLimit, 1e-6)
+    }
+
+    @Test
     fun theExcessOverTopSpeedDecaysExponentiallyAboveAndLinearlyBelow1_02TopSpeed() {
         // with FA the speed above 1.02 x top is cruise towards the lever: τ 1.8 s towards 260
         val f = Flyer()

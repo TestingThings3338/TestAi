@@ -540,6 +540,10 @@ class Session(
         if (!mode.docked && !mode.docking) {
             thrust.update(dtd, ship.rot, ship.vel, handling)
             move(dt)
+        } else {
+            // the docking computer or the slot holds the ship: the thrusters push nothing (C27 feels
+            // no load), the limit and the boost clocks run on
+            thrust.idle(dtd)
         }
         mark(FrameStep.C24)
         if (thrust.boostStarted) {
