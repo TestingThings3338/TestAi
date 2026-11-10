@@ -35,8 +35,8 @@ class GameActivity : Activity() {
     private lateinit var gamepad: GamepadInput
     private var inputManager: InputManager? = null
 
-    /** Queued to the GL thread in [onPause]; preallocated. */
-    private val flushSettingsEvent = Runnable { game.flushSettings() }
+    /** Queued to the GL thread in [onPause] (pause menu, sound held, settings saved); preallocated. */
+    private val backgroundEvent = Runnable { game.onBackground() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,15 +80,17 @@ class GameActivity : Activity() {
         game.onPause()
         gamepad.reset() // releases arriving while paused would be lost
         view.pacer.stop()
-        // Persist settings changed since the last save. Queued before view.onPause(): the GL thread
-        // drains its event queue before it honours the pause, and onPause() blocks until it has.
-        view.queueEvent(flushSettingsEvent)
+        // Open the pause menu, hold the ship's sound and persist changed settings now. Queued before
+        // view.onPause(): the GL thread drains its event queue before it honours the pause, and
+        // onPause() blocks until it has, so the sound is held before the platform pauses the output.
+        view.queueEvent(backgroundEvent)
         view.onPause()
         platform.onPause()
     }
 
     override fun onDestroy() {
         inputManager?.unregisterInputDeviceListener(gamepad)
+        platform.onDestroy()
         val hint = view.perfHint
         view.queueEvent { hint.close() } // GL thread owns the session; finalizer covers the rest
         super.onDestroy()

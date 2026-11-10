@@ -1,5 +1,6 @@
 package com.starwake.core
 
+import com.starwake.core.audio.VoiceLine
 import com.starwake.core.content.Content
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
@@ -9,6 +10,7 @@ import com.starwake.core.game.GearRig
 import com.starwake.core.game.OrbitCamera
 import com.starwake.core.game.Overlay
 import com.starwake.core.game.Session
+import com.starwake.core.game.SessionAudio
 import com.starwake.core.game.SessionHost
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.ShipState
@@ -97,6 +99,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     /** The text on the message line ("" without one; harness read-out, it may contain spaces). */
     val messageLine: String get() = session?.message ?: ""
+
+    /** The sound: ship audio, voice, callouts, music (`09` 9.3); outlives the sessions. */
+    val audio = SessionAudio(platform.audio, settings)
+
+    /** The last "audio" debug status (harness read-out). */
+    var audioReport = ""
+        private set
 
     /** The step order of the last frame traced with the "trace" command ("F0 C1 C2 ..."), "" before. */
     var frameTrace = ""
@@ -340,6 +349,20 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     /**
+     * The app leaves the screen: GL thread, queued by the activity before the GL thread pauses. The
+     * pause request is handled now instead of at the next frame, and the ship's sound and the
+     * announcer are held now, so they fade out before the activity stops and nothing of them plays on
+     * the return before the pause menu holds them (DECISIONS 40). Persists pending settings.
+     */
+    fun onBackground() {
+        pauseRequested = false
+        touch.releaseAll()
+        if (inWorld && !overlay.pauses) openPause()
+        saveSettingsIfDirty()
+        audio.tick(0f, phase == PHASE_MENU, inWorld && !overlay.pauses && phase != PHASE_QUITTING)
+    }
+
+    /**
      * Scripting hook for tests and the preview harness (Roblox ShipDebug equivalents, 01 9.6). Words
      * separated by spaces; "x=y" forms of the older commands still work. Any thread (applied next
      * frame, parsed off the frame path).
@@ -357,7 +380,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      * `SOL-ARES`), MERIDIAN when left out.
      * World: `clock <s>` (the save-game clock; the ship moves with its frame). Diagnostics: `state`
      * (see [debugInfo]), `trace` (the next frame's step order into [frameTrace]),
-     * `branch deck|destroyed|flight`.
+     * `branch deck|destroyed|flight`. Sound (`09` 9.3): `audio` (status into [audioReport]),
+     * `music [skip|on|off]`, `say <VoiceKey>`, `mute [on|off]`, `volume master|effects|music <0..1>`.
      */
     fun debugCommand(cmd: String) {
         debugQueue.add(cmd)
@@ -639,6 +663,8 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         val s = Session(system, settings, this, gearRig)
         s.setShip(ShipCatalog.get(shipIndex.coerceAtLeast(0)), spec, model)
         if (space) s.startInSpace() else s.startDocked()
+        s.audio = audio
+        audio.begin(s)
         session = s
         buildFrame = frameCount
         overlay = Overlay.NONE
@@ -676,6 +702,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     }
 
     private fun enterMenu() {
+        audio.end()
         session = null
         buildFrame = -1L
         setPhase(PHASE_MENU)
@@ -693,6 +720,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
 
     private fun update(dt: Float) {
         phaseTime += dt
+        audio.tick(dt, phase == PHASE_MENU, inWorld && !overlay.pauses && phase != PHASE_QUITTING)
         when (phase) {
             PHASE_MENU -> {
                 menuTime += dt
@@ -892,6 +920,24 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "quality" -> num(1)?.let {
                 settings.quality = it.toInt().coerceIn(0, 2)
                 settingsChanged(display = true, renderer = true)
+            }
+            "audio" -> audioReport = audio.status()
+            "music" -> when (arg) {
+                "on", "off" -> {
+                    settings.musicOn = arg == "on"
+                    settingsDirty = true
+                }
+                else -> audio.skipMusic()
+            }
+            "say" -> VoiceLine.parse(arg ?: "")?.let { audio.say(it) }
+            "mute" -> audio.mutedByDebug = if (arg == null) !audio.mutedByDebug else arg != "off"
+            "volume" -> num(2)?.let {
+                when (arg) {
+                    "master" -> settings.masterVolume = it.toFloat()
+                    "effects", "fx" -> settings.effectsVolume = it.toFloat()
+                    "music" -> settings.musicVolume = it.toFloat()
+                }
+                settingsDirty = true
             }
             "branch" -> if (s != null) when (arg) {
                 "deck" -> s.decks.begin()

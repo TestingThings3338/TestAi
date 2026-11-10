@@ -28,4 +28,6 @@ tasks.test {
     // the station tests read the converted Roblox stations (tools/roblox/convert_stations.py) and the font
     inputs.dir(rootProject.file("app/src/main/assets/stations")).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(rootProject.file("app/src/main/assets/font")).withPathSensitivity(PathSensitivity.RELATIVE)
+    // SoundBankTest checks the sound files (tools/audio/synth_sfx.py, compose_music.py)
+    inputs.dir(rootProject.file("app/src/main/assets/audio")).withPathSensitivity(PathSensitivity.RELATIVE)
 }

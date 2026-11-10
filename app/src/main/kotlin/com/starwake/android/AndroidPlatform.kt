@@ -11,6 +11,7 @@ import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import com.starwake.core.Haptics
 import com.starwake.core.Platform
+import com.starwake.core.audio.AudioOut
 import com.starwake.core.save.AsyncSaveStorage
 import com.starwake.core.save.FileSaveStorage
 import java.io.File
@@ -59,6 +60,11 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     private val hapticHeavy = HapticRunnable(HapticFeedbackConstants.LONG_PRESS)
 
     override val deviceInfo: String = buildDeviceInfo()
+
+    /** The sound: AudioTrack mixer, decoded effects, streamed music, the device's voice (`09` 8.4). */
+    private val sound = AndroidAudio(activity)
+
+    override val audio: AudioOut get() = sound
 
     /** Must be called (UI thread) before the GL thread starts. */
     fun attach(view: GameSurfaceView) {
@@ -135,10 +141,16 @@ internal class AndroidPlatform(private val activity: Activity) : Platform, Displ
     fun onResume() {
         displayManager?.registerDisplayListener(this, mainHandler)
         applyDisplayOnUiThread(force = true) // the display may have changed while we were away
+        sound.onResume()
     }
 
     fun onPause() {
         displayManager?.unregisterDisplayListener(this)
+        sound.onPause() // every sound holds where it is
+    }
+
+    fun onDestroy() {
+        sound.release()
     }
 
     fun onConfigurationChanged() {

@@ -229,6 +229,8 @@ class GameDriver(
         o?.afterDraw()
         session?.endFrame(frame)
         o?.afterPresent()
+        // the mixer thread's share of this frame, in step with the simulated clock (not measured)
+        platform.recorder.advance(frameNanos)
         val s = game.stateName
         if (s != lastState) {
             if (!platform.quiet) log("state ${lastState} -> $s")

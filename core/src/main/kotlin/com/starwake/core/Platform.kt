@@ -1,5 +1,7 @@
 package com.starwake.core
 
+import com.starwake.core.audio.AudioOut
+import com.starwake.core.audio.NullAudioOut
 import com.starwake.core.save.SaveStorage
 
 /** Services the host platform (Android, desktop harness) provides to the game. */
@@ -35,6 +37,9 @@ interface Platform : SaveStorage {
 
     /** Short device description for the settings screen, e.g. "Xiaomi 24129PN74G · Android 15". */
     val deviceInfo: String
+
+    /** The sound output (`09` 8.4): mixer slots, buses, loading. Default: none (silent). */
+    val audio: AudioOut get() = NullAudioOut
 
     /**
      * Reads save file [name] ("profile.json", "galaxy.json" or its ".bak"), null when missing or

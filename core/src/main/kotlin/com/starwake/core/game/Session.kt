@@ -64,7 +64,9 @@ class Session(
     private var entry: ShipCatalog.Entry = ShipCatalog.all[ShipCatalog.DEFAULT]
     private var model: ShipModel? = null
     private val flight = FlightModel(spec)
-    private val controls = ControlInput()
+
+    /** The pilot's commands this frame (internal: the audio adapter reads the stick amounts). */
+    internal val controls = ControlInput()
     val here = StarSystem.Locality()
 
     /** Rocks in the ring plane around the ship (C65, 03-world.md 2.12). */
@@ -93,6 +95,9 @@ class Session(
     val decks = DeckSession()
     val destruction = Destruction()
     val voice = Voice()
+
+    /** The sound of the flight (`09` 9.3), set by the game; null = silent (tests). */
+    var audio: SessionAudio? = null
 
     /** Set to record the next frame's steps (debug "trace", the frame-order test); null = off. */
     var trace: FrameTrace? = null
@@ -345,6 +350,7 @@ class Session(
         mark(FrameStep.A13) // input owner: the game releases the flight controls
         mark(FrameStep.A14)
         updateMessages()
+        audio?.voiceFrame()
     }
 
     /** Branch B (`ShipClient.lua:2337-2342`, `destructionFrame`): the crash cinematic. */
@@ -358,6 +364,7 @@ class Session(
         mark(FrameStep.B9) // 05: warnings run the blackout timeline
         mark(FrameStep.B10)
         updateMessages()
+        audio?.voiceFrame()
     }
 
     /** Branch C: the flight frame in Roblox order (`ShipClient.lua:2344-3195`). */
@@ -456,12 +463,15 @@ class Session(
 
         // ---- C41-C69 effects, warnings, markers, maps, HUD
         mark(FrameStep.C41) // 05: entry effects
-        mark(FrameStep.C43) // 09: audio
+        mark(FrameStep.C43)
+        audio?.flightFrame(dt)
         mark(FrameStep.C44)
-        if (ship.flightAssist != lastFlightAssist) lastFlightAssist = ship.flightAssist // 09: FA voice
+        if (ship.flightAssist != lastFlightAssist) lastFlightAssist = ship.flightAssist
+        audio?.assistFrame()
         mark(FrameStep.C45)
         updateProximity()
-        mark(FrameStep.C46) // 09: callouts
+        mark(FrameStep.C46)
+        audio?.calloutFrame(dt)
         mark(FrameStep.C47)
         validateLock()
         mark(FrameStep.C48)
@@ -834,6 +844,8 @@ class Session(
         if (hits <= 0) return
         debrisHits += hits
         debrisHeat += debris.heat
+        // Roblox audio:playHit(0.3 + clamp(speed / 400, 0, 1.1), Rings.HitCooldownSeconds)
+        audio?.debrisHit(ship.speed)
         if (debrisHitCooldown <= 0f) {
             debrisHitCooldown = RingDebris.HIT_COOLDOWN
             host.haptic(Haptics.BUMP)
@@ -850,6 +862,7 @@ class Session(
             bumpCooldown = 0.25f
             host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
             addShake(clamp(hit / 50f, 0.2f, 1.2f))
+            audio?.hullHit(hit)
         }
     }
 
@@ -903,6 +916,7 @@ class Session(
             bumpCooldown = 0.25f
             host.haptic(if (hit > 40f) Haptics.HEAVY else Haptics.BUMP)
             addShake(clamp(hit / 50f, 0.2f, 1.2f))
+            audio?.hullHit(hit)
         }
     }
 
@@ -1166,10 +1180,12 @@ class Session(
             if (welcomeIn <= 0f) {
                 voice.say(Voice.WELCOME)
                 voice.say(Voice.SYSTEMS_ONLINE)
+                audio?.welcome()
             }
         }
         val line = voice.next(message == null && messageShown())
         if (line != null) showMessage(line)
+        audio?.voiceFrame()
     }
 
     /** The message line is on screen this frame (the game draws it on these terms). */

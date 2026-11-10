@@ -39,6 +39,27 @@ class Settings {
     /** VIEW also cycles to the lagging chase view of the pre-port game (DECISIONS 21a: off by default). */
     var chaseView = false
 
+    /** MASTER volume, 0–1 (the port's; scales every bus). */
+    var masterVolume = 1f
+        set(v) {
+            field = snap(v, 0f, 1f, 0.05f, 1f)
+        }
+
+    /** EFFECTS volume, 0–1 (Roblox EffectsVolume: engines, thrusters, warnings, voice, interface). */
+    var effectsVolume = 1f
+        set(v) {
+            field = snap(v, 0f, 1f, 0.05f, 1f)
+        }
+
+    /** MUSIC volume, 0–1 (Roblox MusicVolume: the menu and the flight music). */
+    var musicVolume = 1f
+        set(v) {
+            field = snap(v, 0f, 1f, 0.05f, 1f)
+        }
+
+    /** MUSIC on/off (Roblox key J; the pause menu's MUSIC button). */
+    var musicOn = true
+
     val renderScale: Float
         get() = when (quality) {
             0 -> 0.7f
@@ -56,7 +77,8 @@ class Settings {
     fun serialize(): String =
         "q=$quality;fps=$fpsMode;roll=${b(stickXRoll)};climb=${b(pitchUpClimb)};sens=$sensitivity;" +
             "left=${b(leftHanded)};hap=${b(haptics)};showfps=${b(showFps)};ship=$ship;" +
-            "fov=${fmt(fovDeg)};shake=${fmt(cameraShake)};chase=${b(chaseView)}"
+            "fov=${fmt(fovDeg)};shake=${fmt(cameraShake)};chase=${b(chaseView)};" +
+            "vol=${fmt(masterVolume)};fx=${fmt(effectsVolume)};mus=${fmt(musicVolume)};music=${b(musicOn)}"
 
     fun deserialize(data: String?) {
         if (data.isNullOrEmpty()) return
@@ -79,6 +101,10 @@ class Settings {
                     "fov" -> v.toFloat().let { if (!it.isNaN()) fovDeg = it }
                     "shake" -> v.toFloat().let { if (!it.isNaN()) cameraShake = it }
                     "chase" -> chaseView = v == "1"
+                    "vol" -> v.toFloat().let { if (!it.isNaN()) masterVolume = it }
+                    "fx" -> v.toFloat().let { if (!it.isNaN()) effectsVolume = it }
+                    "mus" -> v.toFloat().let { if (!it.isNaN()) musicVolume = it }
+                    "music" -> musicOn = v == "1"
                 }
             } catch (_: NumberFormatException) {
                 // ignore corrupt values, keep defaults
