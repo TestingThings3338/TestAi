@@ -46,8 +46,9 @@ jobs:
 
       # Rolling pre-release so the newest APK is always one tap away on the phone:
       # https://github.com/<owner>/<repo>/releases/tag/dev-latest
+      # Only the main line publishes it, so a build from another branch never replaces it.
       - name: Publish dev-latest pre-release
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref_name == 'claude/cloud-xiaomi-15-compat-p860ky'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
