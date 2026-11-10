@@ -849,7 +849,8 @@ object FlightScenarios {
 
     /**
      * One pass over every flight path with its instruments, [n] frames a phase: cruise towards 0.5 c
-     * with the right thumb circling on the stick (the arrow), a boost in the external view, the
+     * with the right thumb circling on the stick (the arrow), a boost in the external view (the
+     * thumb at SENSITIVITY 0.75, the response curve), the
      * autopilot on a locked Luna (AUTO and its status line), a push-over at 200 m/s 3 km above Earth
      * (the redout overlay, the attitude indicator, the near band), the gear coming down 40 m up, the
      * star's heat zone over 80 % (the overheat line, scooping). [meter] records only [Game.drawFrame];
@@ -891,7 +892,10 @@ object FlightScenarios {
         cmd("speed ${f1(num("top"))}")
         frames(2)
         cmd("boost")
+        // this thumb at SENSITIVITY 0.75: the stick's response curve below 1 (review fix) is measured too
+        game.settings.sensitivity = 0.75f
         measure(n, true)
+        game.settings.sensitivity = 1f
         cmd("view cockpit")
         flying()
         cmd("near earth 5e7")
