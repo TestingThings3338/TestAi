@@ -157,7 +157,7 @@ class SessionOrderTest {
         val dy = p1.y - p0.y
         val dz = p1.z - p0.z
         val travelled = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
-        assertTrue(travelled > 0.3f * s.spec.maxSpeed * 2.5f, "flew $travelled m in 3 s under the map")
+        assertTrue(travelled > 0.3 * s.handling.topSpeed * 2.5, "flew $travelled m in 3 s under the map")
     }
 
     @Test
@@ -168,7 +168,7 @@ class SessionOrderTest {
         input.press(Action.TOGGLE_FLIGHT_ASSIST)
         input.press(Action.EXTERNAL_VIEW)
         s.frame(1f / 60f, input)
-        assertFalse(s.ship.flightAssist)
+        assertFalse(s.thrust.flightAssist)
         assertEquals(ShipView.EXTERNAL, s.mode.view)
         // docked: the thrust keys and the lever do not reach the ship, K launches
         s.startDocked()

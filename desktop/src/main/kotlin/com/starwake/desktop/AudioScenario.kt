@@ -70,10 +70,13 @@ object AudioScenario {
         mark("on to cruise speed")
         val cruiseAt = rec.logCount
         var waited = 0f
-        while (d.num("speed") < 260.0 && waited < 90f) {
+        // the flight model's station lock (6 km) holds TopSpeed: the cruise engages once the ship
+        // is out of MERIDIAN's lock and above 1.02 x TopSpeed (ShipThrust.cruising)
+        while (d.field("cruising") != "true" && waited < 90f) {
             run(1f)
             waited += 1f
         }
+        check(d.field("cruising") == "true") { "never cruised: ${game.debugInfo}" }
         run(6f) // in cruise
         val engineFull = rec.slotGain[SoundBank.SLOT_LAYER0]
         mark("throttle down: out of cruise")

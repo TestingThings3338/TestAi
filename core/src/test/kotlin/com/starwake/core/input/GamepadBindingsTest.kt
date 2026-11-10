@@ -21,12 +21,13 @@ class GamepadBindingsTest {
             ticks[type]++
         }
     }
+    /** The lever as the thrust ramps it with the pad's W/S ([InputFrame.throttleAxis]): 25 %/s. */
     private var throttle = 0f
 
     private fun frame(dt: Float = 1f / 60f): InputFrame {
         f.begin()
-        bindings.write(f, dt, throttle, host)
-        if (f.leverSet) throttle = f.lever
+        bindings.write(f, dt, host)
+        throttle = (throttle + f.throttleAxis * dt / 4f).coerceIn(-0.25f, 1f)
         return f
     }
 
@@ -94,14 +95,14 @@ class GamepadBindingsTest {
         f.contextAction = Action.DOCK
         pad.buttonDown(GamepadState.DPAD_DOWN)
         f.begin()
-        bindings.write(f, 1f / 60f, 0f, host)
+        bindings.write(f, 1f / 60f, host)
         assertEquals(1, f.presses(Action.DOCK))
         pad.buttonUp(GamepadState.DPAD_DOWN)
         // nothing to do: nothing sent
         f.contextAction = null
         pad.buttonDown(GamepadState.DPAD_DOWN)
         f.begin()
-        bindings.write(f, 1f / 60f, 0f, host)
+        bindings.write(f, 1f / 60f, host)
         for (i in 0 until Action.COUNT) assertEquals(0, f.presses(Action.of(i)))
         f.contextAction = null
     }
@@ -137,6 +138,39 @@ class GamepadBindingsTest {
     }
 
     @Test
+    fun aFullStickIsTheRimAndTheFullKeyAxisAtTheLowestSensitivity() {
+        // SENSITIVITY 0.5 shapes the sticks through the touch stick's response (02 9.1): a full left
+        // stick is still the cursor's rim (the full turn rate, the 0.5 override), a full twist of the
+        // right stick still the full yaw
+        settings.sensitivity = 0.5f
+        pad.setSticks(1f, 0f, 0f, 0f, 0f, 0f)
+        frame()
+        assertNear(1f, f.aimX, 1e-6f, "full right")
+        pad.setSticks(-1f, -1f, 0f, 0f, 0f, 0f) // a square pad's corner: clamped to the rim, direction kept
+        frame()
+        assertNear(1f, f.aimMagnitude, 1e-5f)
+        assertNear(f.aimX, f.aimY, 1e-6f, "diagonal kept")
+        assertTrue(f.aimX < 0f && f.aimY < 0f)
+        pad.setSticks(0.5f, 0f, 0f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.25f, f.aimX, 1e-6f, "half a deflection: 0.5^(1/0.5)")
+        pad.setSticks(0f, 0f, 1f, 0f, 0f, 0f)
+        frame()
+        assertNear(-1f, f.keyAxis, 1e-6f, "full right twist = full yaw right")
+        pad.setSticks(0f, 0f, -0.5f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.25f, f.keyAxis, 1e-6f, "half a twist left")
+        // and at 1.5 the gain: 0.4 -> 0.6, saturating at the rim
+        settings.sensitivity = 1.5f
+        pad.setSticks(0.4f, 0f, 0.8f, 0f, 0f, 0f)
+        frame()
+        assertNear(0.6f, f.aimX, 1e-6f)
+        assertNear(-1f, f.keyAxis, 1e-6f)
+        settings.sensitivity = 1f
+        pad.setSticks(0f, 0f, 0f, 0f, 0f, 0f)
+    }
+
+    @Test
     fun shouldersStrafeAndR3StopsFully() {
         pad.buttonDown(GamepadState.LB)
         frame()
@@ -155,27 +189,25 @@ class GamepadBindingsTest {
     }
 
     @Test
-    fun triggersRampTheLeverWithAZeroDetent() {
+    fun triggersAreTheRobloxThrottleRamp() {
+        // RT / LT are W / S (02 9.2): the axis is the trigger difference, the thrust ramps the
+        // lever by it at 25 %/s (ThrottleRampTime 4 s), from -25 % to 100 %
         throttle = 0f
         pad.setSticks(0f, 0f, 0f, 0f, 0f, 1f) // RT
-        repeat(30) { frame() }
-        assertNear(0.4f, throttle, 1e-3f, "0.8 per second at full trigger")
-        // down through zero: it stops at zero until both triggers are released
+        assertEquals(1f, frame().throttleAxis)
+        assertTrue(f.held(Action.THROTTLE_UP))
+        repeat(59) { frame() }
+        assertNear(0.25f, throttle, 1e-3f, "25 % per second at full trigger")
+        pad.setSticks(0f, 0f, 0f, 0f, 0f, 0.5f) // half RT
+        assertEquals(0.5f, frame().throttleAxis)
         pad.setSticks(0f, 0f, 0f, 0f, 1f, 0f) // LT
-        val ticksBefore = ticks[Haptics.TICK]
-        repeat(60) { frame() }
-        assertEquals(0f, throttle)
-        assertEquals(ticksBefore + 1, ticks[Haptics.TICK], "one detent tick")
+        assertEquals(-1f, frame().throttleAxis)
+        assertTrue(f.held(Action.THROTTLE_DOWN))
+        repeat(240) { frame() }
+        assertEquals(-0.25f, throttle, "full reverse is -25 %")
         pad.setSticks(0f, 0f, 0f, 0f, 0f, 0f)
-        frame()
-        pad.setSticks(0f, 0f, 0f, 0f, 1f, 0f)
-        repeat(30) { frame() }
-        assertNear(-0.4f, throttle, 1e-3f, "after a release it goes on into reverse")
-        pad.setSticks(0f, 0f, 0f, 0f, 0f, 0f)
-        // a lever left just off zero settles on zero
-        throttle = 0.02f
-        frame()
-        assertEquals(0f, throttle)
+        assertEquals(0f, frame().throttleAxis)
+        assertFalse(f.leverSet, "the pad never sets the lever directly")
     }
 
     @Test
@@ -184,9 +216,10 @@ class GamepadBindingsTest {
         pad.buttonDown(GamepadState.A)
         pad.connected = false
         f.begin()
-        bindings.write(f, 1f / 60f, 0.5f, host)
+        bindings.write(f, 1f / 60f, host)
         assertFalse(f.pressed(Action.BOOST))
         assertFalse(f.leverSet)
+        assertEquals(0f, f.throttleAxis)
     }
 
     @Test

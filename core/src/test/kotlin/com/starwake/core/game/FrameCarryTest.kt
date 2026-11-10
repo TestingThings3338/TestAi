@@ -133,38 +133,41 @@ class FrameCarryTest {
     fun theVelocityIsRelativeToTheFrameAndNeverJumps() {
         val s = session()
         s.startInSpace()
+        val earth = idx("Earth")
+        val e = system.bodies[earth]
+        // coasting at 100 m/s in Earth's frame, beyond the pull's reach (3.5 radii) and with Flight
+        // Assist off (Newtonian, no thrust at a zero lever): the frame-relative position moves v·t
+        s.teleport(e.pos.x, e.pos.y + e.frameRadius * 0.8, e.pos.z, 0f, 1f, 0f, true)
         s.setThrottle(0f)
-        s.toggleFlightAssist() // Newtonian: no thrust, the velocity stays as set
-        // coasting at 100 m/s in Earth's frame: the frame-relative position moves v·t
-        s.ship.vel.set(0f, 100f, 0f)
+        s.toggleFlightAssist()
+        s.ship.vel.set(0.0, 100.0, 0.0)
         fly(s, 2)
         val p0 = s.framePosition(DVec3())
         fly(s, 600)
         val p1 = s.framePosition(DVec3())
-        assertEquals(StarSystem.bodyFrame(idx("Earth")), s.refFrame)
+        assertEquals(StarSystem.bodyFrame(earth), s.refFrame)
         assertEquals(1000.0, len(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), 1.0)
-        assertEquals(100f, s.ship.vel.y, 1e-3f)
-        // out across the frame's edge at 2 Mm/s straight up: past the radius the frame holds on
-        // (×1.25 hysteresis), then drops; the velocity never changes (translation-only carry)
-        val earth = idx("Earth")
-        val e = system.bodies[earth]
+        assertEquals(100.0, s.ship.vel.y, 1e-6)
+        // out across the frame's edge at Mm/s straight up, cruising with the nose along the flight:
+        // past the radius the frame holds on (×1.25 hysteresis), then drops; the velocity never
+        // takes the planet's 11 km/s sideways (translation-only carry): it stays straight up
+        s.toggleFlightAssist()
         s.teleport(e.pos.x, e.pos.y + e.frameRadius * 0.95, e.pos.z, 0f, 1f, 0f, true)
         assertEquals(StarSystem.bodyFrame(earth), s.refFrame)
-        s.ship.vel.set(0f, 2.0e6f, 0f)
+        s.ship.vel.set(0.0, 2.0e6, 0.0)
+        s.setThrottle(1f)
         var heldBeyond = false
         var leftAt = -1.0
         repeat(60 * 10) {
-            val v0 = s.ship.vel.y
-            val f0 = s.refFrame
             input.begin()
             s.frame(1f / 60f, input)
             val h = (s.ship.pos.y - e.pos.y) / e.frameRadius
             if (h > 1.1 && h < 1.2 && s.refFrame == StarSystem.bodyFrame(earth)) heldBeyond = true
             if (leftAt < 0.0 && s.refFrame == StarSystem.FRAME_NONE) leftAt = h
-            // no step at the switch (the pre-port flight model's float round trips through the
-            // hull frame drift a coasting speed by ~1e-4 over the run, never by the planet's 11 km/s)
-            if (s.refFrame != f0) assertEquals(v0, s.ship.vel.y, 5f)
-            assertEquals(2.0e6f, s.ship.vel.y, 2000f)
+            // a step would be the planet's 11 km/s; the float attitude leaves ~1e-6 of 2 Mm/s
+            assertEquals(0.0, s.ship.vel.x, 20.0, "no sideways step (frame ${s.refFrame})")
+            assertEquals(0.0, s.ship.vel.z, 20.0, "no sideways step (frame ${s.refFrame})")
+            assertTrue(s.ship.vel.y > 1.9e6, "still flying straight up: ${s.ship.vel.y}")
         }
         assertTrue(heldBeyond, "the frame holds beyond its radius (hysteresis)")
         assertEquals(StarSystem.FRAME_HYSTERESIS, leftAt, 0.02, "left Earth's frame at x1.25 its radius")

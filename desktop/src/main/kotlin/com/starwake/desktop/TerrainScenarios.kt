@@ -571,17 +571,19 @@ object TerrainScenarios {
         sr.dispose()
     }
 
+    private val shipVelF = com.starwake.core.math.Vec3()
+
     /** Streams the tiles for camera [c] until nothing is wanted (the game would call update every frame). */
     private fun streamScene(sc: Scene, gpu: TerrainGpu, c: Camera, ship: ShipState?) {
         val end = System.currentTimeMillis() + 20_000
         var quiet = 0
         while (System.currentTimeMillis() < end) {
-            sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel)
+            sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel?.toFloat(shipVelF))
             sc.planet.processCompletions(64, gpu)
             if (sc.planet.tree.wantedCount == 0 && sc.planet.pool.idle()) { if (++quiet > 3) break } else quiet = 0
             Thread.sleep(1)
         }
-        sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel)
+        sc.planet.update(c.pos, 1.0 / 60, ship?.pos, ship?.vel?.toFloat(shipVelF))
     }
 
     /** Two frames 2 s apart (the hand-over fade completes), the second one stays on screen. */

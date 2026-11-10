@@ -215,7 +215,7 @@ object Scenarios {
             shot("gp-launched")
         },
 
-        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; ramming the hull stops at it") {
+        "station-game" to gameScenario("station-game", "Checks in the real Game: auto-dock from behind MERIDIAN STATION routes round the hull; a 30 m/s ram stops at the hull (slide), a 120 m/s ram crashes (above 45 m/s: the crash contract's placeholder docks the ship at the nearest station)") {
             fun info() = game.debugInfo.also { log(it) }
             cmd("launch space")
             frames(30)
@@ -248,19 +248,39 @@ object Scenarios {
             for (i in 0 until 60) { frame(); minProx = minOf(minProx, num("prox").toFloat()) }
             info()
             check(minProx >= 60f) { "PROXIMITY flashed after a launch + pause (prox $minProx m)" }
-            // --- ram the back of the hub at 120 m/s with the throttle held: must stop at the hull
-            cmd("ram-station")
+            // --- ram the back of the hub, coasting with FA off (the flight port's collision response,
+            // 02 5.7): below Roblox's 45 m/s the hull slides the ship off (only the inward velocity
+            // goes) and it stops at the hull; at 120 m/s the hull wins: a crash
+            val crashes0 = num("crashes")
+            cmd("ram-station 0 30")
             frames(1)
             minHull = Float.MAX_VALUE
-            for (i in 0 until 360) {
+            for (i in 0 until 900) {
                 frame()
                 minHull = minOf(minHull, num("hull").toFloat())
-                if (i == 200) shot("st-ram")
+                if (i == 840) shot("st-ram")
             }
             info()
-            log("ram: closest hull gap %.1f m".format(minHull))
+            log("ram at 30 m/s: closest hull gap %.1f m".format(minHull))
             check(minHull > -2.5f) { "ship sank into the hull (gap $minHull m)" }
             check(minHull < 5f) { "ram never reached the hull (gap $minHull m)" }
+            check(num("crashes") == crashes0) { "a 30 m/s ram crashed: ${info()}" }
+            cmd("ram-station 0 120")
+            frames(1)
+            var crashed = false
+            for (i in 0 until 300) {
+                frame()
+                if (num("crashes") > crashes0) {
+                    crashed = true
+                    break
+                }
+            }
+            info()
+            check(crashed && field("cause") == "STATION") { "a 120 m/s ram did not crash on the hull: ${info()}" }
+            // the crash contract's placeholder (until the crash flow): SHIP DESTROYED, docked at the nearest station
+            check(field("docked") == "true" && game.messageLine == "SHIP DESTROYED") { "no docked restart after the crash: ${info()}" }
+            frames(8)
+            shot("st-ram-crash")
         },
 
         "boost" to gameScenario("boost", "Flight with throttle up, then boost") {
@@ -355,12 +375,12 @@ object Scenarios {
 
         "sol-trip" to Scenario(
             "sol-trip",
-            "Sol: MERIDIAN to Mars at full throttle with the nose on Mars, timed to Mars's mass-shadow edge (about a minute) and to 60 km; peak speed at most 0.5 c; shots on the way",
+            "Sol: MERIDIAN to Mars at full throttle with the nose on Mars, timed to Mars's mass-shadow edge (about two minutes from the slot at clock 0: the station's lock, then Earth's shadow on the way) and to 60 km; peak speed at most 0.5 c; shots on the way",
         ) { SolScenarios.trip(it) },
 
         "sol-moon" to Scenario(
             "sol-moon",
-            "Sol: GALILEAN REFINERY to Io at full throttle with the nose on Io; Io limits the speed while Jupiter is the nearest body (the limit is the minimum over all bodies), so the ship comes within 1 km of Io at landing speeds (at most 400 m/s) and the zone 12 radii out is an APPROACH (to Io); shots on the way",
+            "Sol: GALILEAN REFINERY to Io at full throttle with the nose on Io; the limit is the minimum over all bodies (Jupiter's mass shadow limits while Io is already the nearest body by altitude), and the ship comes within 1 km of Io at landing speeds (at most 400 m/s); 12 radii out the zone is an APPROACH to Io or Jupiter's GRAVITY WELL (its 4.19 Mm/s floor), never a departure; shots on the way",
         ) { SolScenarios.moon(it) },
 
         "sol-docking" to Scenario(
@@ -382,6 +402,66 @@ object Scenarios {
             "audio-flight",
             "09 audio: docked start, launch, throttle, boost, FA off/on, cruise on/off, auto-dock with every sound decoded and mixed; cue order and voice lines from the log, no voice overlap, WAV mix + spectrogram, mixer and allocation numbers (no-op GL)",
         ) { AudioScenario.run(it) },
+
+        "flight-throttle" to Scenario(
+            "flight-throttle",
+            "02 10.5: open space, the lever to 100 % from rest: 175 m/s after 5 s (the combat band), the cruise from 7.28 s, Roblox's doubling-limited curve (5.1, ±2 %) to 1.16 Mm/s at 17 s, on towards 0.5 c; OPEN SPACE all the way; shots at 5, 12, 18 s",
+        ) { FlightScenarios.throttle(it) },
+
+        "flight-handling" to Scenario(
+            "flight-handling",
+            "02 10.5: all 8 ships, full pitch from rest (agility 0.65), at half TopSpeed (1.0) and in cruise (0.42) against ShipHandling, the FA-off spin (1.1x cap, no decay); one external shot per ship pitching in cruise",
+        ) { FlightScenarios.handling(it) },
+
+        "flight-boost" to Scenario(
+            "flight-boost",
+            "02 10.5: a boost from TopSpeed to 340 m/s, 2 s burn, +6 % heat per ignition, the 1.8 s decay after the burn; a second request at 2 s refused (cooldown 4 s from the ignition), at 4.1 s refused too (still cruising down above 1.02 TopSpeed: Roblox ignites only out of cruise), accepted back in the band (6.9 s); external shots",
+        ) { FlightScenarios.boost(it) },
+
+        "flight-trip" to Scenario(
+            "flight-trip",
+            "02 10.5: Earth to Luna and Earth to Mars (closest approach) from half a barrier radius above Earth's barrier at S = 3000, full throttle: 9.4's times to the shadow edge and the ground (±10 %), peak speed, at most 0.5 c, no tunnelling, landing speed; re-staged shots on the way",
+        ) { FlightScenarios.trip(it) },
+
+        "flight-dive" to Scenario(
+            "flight-dive",
+            "02 10.5: 50 Mm straight down at Earth at full throttle: the near band below 11.4 km, the attitude indicator inside the air (DECISIONS 15), the gear at 60 m, the ground at 14 m/s; re-staged shots on the way down",
+        ) { FlightScenarios.dive(it) },
+
+        "flight-star" to Scenario(
+            "flight-star",
+            "02 10.5: into the star from 60 Mm at full throttle: HEAT ZONE at the scaled 1 km/s floor, the approach zone, the barrier hold, scooping, 100 % heat, heat death; shots of the heat zone, the surface over 100 % and the heat death",
+        ) { FlightScenarios.star(it) },
+
+        "flight-autopilot" to Scenario(
+            "flight-autopilot",
+            "02 10.5: AUTO on a locked Luna from the MERIDIAN spawn: ALIGNING -> CRUISING -> BRAKING -> ARRIVED (within 0.35 R at 25 m/s at most) with times; the HUD's autopilot line at Roblox's 10 Hz text cadence (shown in the frame it engages, gone in the frame it arrives, changes at least 6 frames apart while the live status flips every frame near 1.05 x the desired speed); shots of each phase",
+        ) { FlightScenarios.autopilot(it) },
+
+        "flight-dock-load" to Scenario(
+            "flight-dock-load",
+            "Flight review: a boost and a hard pull at TopSpeed by MERIDIAN, then K: the G meter falls from the first docking frame (1.6 % left after 0.5 s), zero through the auto-dock and docked, the boost cooldown runs down meanwhile; shots of the pull and of the auto-dock (no G line)",
+        ) { FlightScenarios.dockLoad(it) },
+
+        "flight-sensitivity" to Scenario(
+            "flight-sensitivity",
+            "Flight review: SENSITIVITY 0.5 with a real thumb on the touch stick: a drag past the rim is the whole cursor (full arrow), takes the ship back from the autopilot (MANUAL OVERRIDE) and from the docking computer (DOCKING CANCELLED); shot of the full arrow",
+        ) { FlightScenarios.sensitivity(it) },
+
+        "flight-arrow" to Scenario(
+            "flight-arrow",
+            "02 10.5: the Roblox flight arrow for stick deflections 0, 0.1 (dead zone), 0.5 and 1 and with the head turned; the 8 directions at full deflection steer the right way",
+        ) { FlightScenarios.arrow(it) },
+
+        "flight-alloc" to Scenario(
+            "flight-alloc",
+            "02 10.5: every flight path with its instruments on the no-op GL (cruise and the arrow, boost, autopilot and AUTO, a push-over with the redout overlay, the gear, the star's heat zone): no frame allocates (with -Pnoea; CPU ms per frame)",
+        ) { FlightScenarios.alloc(it) },
+
+        "gear" to Scenario(
+            "gear",
+            "02 10.5: the gear in the external view: down (doors 0.6 s, legs 1.6 s: shots at 0, 0.6, 1.6, 2.2 s) and up (legs, then doors and covers)",
+        ) { FlightScenarios.gear(it) },
 
         "perf" to Scenario(
             "perf",

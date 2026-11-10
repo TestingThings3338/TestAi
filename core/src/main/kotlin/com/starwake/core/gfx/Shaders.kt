@@ -481,12 +481,24 @@ void main() {
                 float dc = (abs(p.x) + abs(p.y) - (b.x + b.y + r)) * 0.70710678;
                 d = max(db, dc);
             }
-        } else {
+        } else if (shape < 2.5) {
             d = length(v_local) - v_p0.y;
+        } else {
+            // isosceles triangle, tip up (-y): half base p0.y, height p0.z, centred on the local
+            // origin (iq's sdTriangleIsosceles with the tip at (0, -h/2))
+            vec2 q = v_p0.yz;
+            vec2 p = vec2(abs(v_local.x), v_local.y + q.y * 0.5);
+            vec2 e = p - q * clamp(dot(p, q) / dot(q, q), 0.0, 1.0);
+            vec2 f = p - q * vec2(clamp(p.x / q.x, 0.0, 1.0), 1.0);
+            vec2 m = min(vec2(dot(e, e), -(p.x * q.y - p.y * q.x)), vec2(dot(f, f), -(p.y - q.y)));
+            d = -sqrt(m.x) * sign(m.y);
         }
         float s = v_p1.x;
         if (s > 0.0) d = abs(d + s * 0.5) - s * 0.5;
         a = clamp(0.5 - d / max(v_p1.y, 1.0), 0.0, 1.0);
+        // one half of the triangle only (p0.w -1 left, +1 right): a hard cut along the seam, so the
+        // two halves of a two-tone arrow tile without a gap or a double edge
+        if (shape > 2.5 && ((v_p0.w < 0.0 && v_local.x >= 0.0) || (v_p0.w > 0.0 && v_local.x < 0.0))) a = 0.0;
     }
     o_color = vec4(v_color.rgb, v_color.a * a);
 }

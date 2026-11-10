@@ -21,7 +21,13 @@ import kotlin.math.sqrt
  *
  * Everything called per frame is allocation free; the proxies are built once, when the class loads.
  */
-class StationCollision(private val flight: FlightModel) {
+class StationCollision {
+    /** The hull that collides (the session sets it on a ship switch). */
+    var spec: ShipSpec = ShipSpec.STANDARD
+
+    /** World unit normal (out of the hull) of the hardest contact of the last [collide] (the crash's `hitNormal`). */
+    val hitNormal = Vec3()
+
     // scratch (no per-frame allocation)
     private val local = Vec3()
     private val world = Vec3()
@@ -72,12 +78,14 @@ class StationCollision(private val flight: FlightModel) {
     private var nz = 0f
 
     /**
-     * Resolves the ship's collision sphere against [st]'s proxies: every contact goes through
-     * [FlightModel.resolveContact]. Returns the largest impact speed in m/s (0 = no contact).
-     * Cheap when the ship is more than the station radius + 50 m from its centre.
+     * Resolves the ship's collision spheres against [st]'s proxies: every contact slides the ship
+     * ([HullContact.slide]: Roblox `cancelVelocityAlong(-normal)`, no bounce). Returns the largest
+     * impact speed (the closing speed into a wall) in m/s, 0 = no contact; the session crashes the
+     * ship above `Stations.CrashSpeed`. Cheap when the ship is more than the station radius + 50 m
+     * from its centre.
      */
     fun collide(ship: ShipState, st: StarSystem.Station): Float {
-        val spec = flight.spec
+        val spec = spec
         val reach = st.radius + COLLIDE_RANGE + spec.reach - spec.collisionRadius
         val ex = ship.pos.x - st.pos.x
         val ey = ship.pos.y - st.pos.y
@@ -109,8 +117,11 @@ class StationCollision(private val flight: FlightModel) {
                 if (d >= r) continue
                 val push = r - d
                 st.rot.rotate(nx, ny, nz, world)
-                val hit = flight.resolveContact(ship, world.x, world.y, world.z, push.toDouble())
-                if (hit > impact) impact = hit
+                val hit = HullContact.slide(ship, world.x.toDouble(), world.y.toDouble(), world.z.toDouble(), push.toDouble()).toFloat()
+                if (hit > impact) {
+                    impact = hit
+                    hitNormal.set(world)
+                }
                 // keep the local position in step with the push, so later proxies see the moved ship
                 px += nx * push
                 py += ny * push
@@ -126,7 +137,7 @@ class StationCollision(private val flight: FlightModel) {
      * further out it returns a lower bound that is at least 113 m.
      */
     fun clearance(ship: ShipState, st: StarSystem.Station): Float {
-        val spec = flight.spec
+        val spec = spec
         val r = spec.collisionRadius
         val ex = ship.pos.x - st.pos.x
         val ey = ship.pos.y - st.pos.y
@@ -257,7 +268,7 @@ class StationCollision(private val flight: FlightModel) {
             return true
         }
         legStation = null
-        val r = flight.spec.collisionRadius
+        val r = spec.collisionRadius
         val s0 = sceneDistance(set, lx, ly, lz, Float.MAX_VALUE)
         // the nearest wall's normal, and two ways along that wall: t1 = a x n (round the dock axis),
         // t2 = n x t1 (along the axis); a wall facing along the axis has no t1 (then both are skipped)

@@ -128,7 +128,7 @@ class SpawnRulesTest {
         val pos = DVec3()
         SpawnRules.dockedPose(system.stations[i], s.spec, pos, Quat())
         assertTrue(dist(pos, s.ship.pos) < 1e-6, "parked in the slot")
-        assertEquals(0f, s.ship.speed)
+        assertEquals(0.0, s.ship.speed)
         assertEquals(0f, s.throttle)
         // the services open with the reveal, not before
         assertEquals(-1, host.servicesOpened)

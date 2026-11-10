@@ -17,7 +17,6 @@ import com.starwake.core.audio.VoiceLine
 import com.starwake.core.math.Rng
 import com.starwake.core.math.clamp
 import com.starwake.core.ui.TextBuf
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -55,10 +54,6 @@ class SessionAudio(
     private val frame = CalloutFrame()
 
     // ---- stand-in state
-    private var prevVelX = 0f
-    private var prevVelY = 0f
-    private var prevVelZ = 0f
-    private var prevKnown = false
     private var lastFlightAssist = true
     private var dockStand = DockState.NONE
     private var dockTimer = 0f
@@ -100,8 +95,7 @@ class SessionAudio(
         callouts = Callouts(voice, clock)
         applyGroups()
         ship.start()
-        prevKnown = false
-        lastFlightAssist = s.ship.flightAssist
+        lastFlightAssist = s.thrust.flightAssist
         dockStand = DockState.NONE
         dockTimer = 0f
         wasDocked = s.mode.docked
@@ -199,30 +193,20 @@ class SessionAudio(
     fun flightFrame(dt: Float) {
         val s = session ?: return
         val sh = s.ship
+        val th = s.thrust
         val st = state
-        st.throttle = s.throttle
-        st.speed = sh.speed
+        st.throttle = th.throttle.toFloat()
+        st.speed = sh.speed.toFloat()
         st.maxSpeed = AudioConfig.THRUST_MAX_SPEED
-        // stand-in: thrust:getForwardAcceleration() as the change of velocity along the nose
-        if (prevKnown && dt > 0f) {
-            sh.rot.rotate(0f, 0f, -1f, fwd)
-            st.forwardAccel = ((sh.vel.x - prevVelX) * fwd.x + (sh.vel.y - prevVelY) * fwd.y + (sh.vel.z - prevVelZ) * fwd.z) / dt
-        } else {
-            st.forwardAccel = 0f
-        }
-        prevVelX = sh.vel.x
-        prevVelY = sh.vel.y
-        prevVelZ = sh.vel.z
-        prevKnown = true
-        // stand-in: rotation:getInputAmount() / getRollAmount() from the pre-port stick commands
-        val c = s.controls
-        st.rotationAmount = clamp(max(abs(c.pitch), abs(c.yaw)), 0f, 1f)
-        st.rollAmount = clamp(abs(c.roll), 0f, 1f)
-        st.topSpeed = s.spec.maxSpeed
-        st.sinkRate = max(-s.here.radialSpeed, 0f)
-        st.boosting = sh.boosting
-        st.cruising = cruisingStandIn(s)
-        st.flightAssist = sh.flightAssist
+        st.forwardAccel = th.forwardAcceleration(sh.vel).toFloat() // thrust:getForwardAcceleration()
+        st.rotationAmount = s.rotation.inputAmount // rotation:getInputAmount()
+        st.rollAmount = s.rotation.rollAmount // rotation:getRollAmount()
+        st.topSpeed = s.handling.topSpeed.toFloat()
+        // the sink rate: the closing speed on the nearest body's ground
+        st.sinkRate = max(s.gs.closingSpeed, 0.0).toFloat()
+        st.boosting = th.boosting
+        st.cruising = th.cruising
+        st.flightAssist = th.flightAssist
         st.hasFlightAssist = true
         st.dockState = dockStateStandIn(s, dt)
         st.landed = s.mode.landed
@@ -234,7 +218,7 @@ class SessionAudio(
     /** C44: "Flight assist on/off." (the click and the chirp come from ShipAudio). */
     fun assistFrame() {
         val s = session ?: return
-        val fa = s.ship.flightAssist
+        val fa = s.thrust.flightAssist
         if (fa != lastFlightAssist) {
             lastFlightAssist = fa
             voice.say(if (fa) VoiceLine.FlightAssistOn else VoiceLine.FlightAssistOff)
@@ -245,44 +229,49 @@ class SessionAudio(
     fun calloutFrame(dt: Float) {
         val s = session ?: return
         val sh = s.ship
+        val th = s.thrust
+        val sys = s.systems
+        val gs = s.gs
         val f = frame
-        val here = s.here
         f.posX = sh.pos.x
         f.posY = sh.pos.y
         f.posZ = sh.pos.z
-        f.velX = sh.vel.x
-        f.velY = sh.vel.y
-        f.velZ = sh.vel.z
+        f.velX = sh.vel.x.toFloat()
+        f.velY = sh.vel.y.toFloat()
+        f.velZ = sh.vel.z.toFloat()
         upFrom(s, f)
-        f.speed = sh.speed
-        f.topSpeed = s.spec.maxSpeed
+        f.speed = sh.speed.toFloat()
+        f.topSpeed = s.handling.topSpeed.toFloat()
         f.onFoot = s.mode.onFoot
         f.crashing = s.mode.crashing
         f.controlled = s.mode.controlled
-        f.stationLock = here.zone == StarSystem.Zone.STATION_ZONE // stand-in: ShipStation getLimit's lock
+        f.stationLock = gs.stationLock // ShipStation getLimit's lock
         f.clearance = s.spec.groundClearance
         f.probeRadius = s.spec.collisionRadius
-        // flight block: the pre-port model's equivalents (stand-ins)
+        // flight block (ShipThrust)
         f.hasThrust = true
-        f.cruising = cruisingStandIn(s)
-        f.flightAssist = sh.flightAssist
-        f.boosting = sh.boosting
-        f.throttle = s.throttle
-        f.speedLimit = here.speedLimit
-        f.rawSpeedLimit = Float.POSITIVE_INFINITY // off: the speed block waits for the flight port's raw limit
-        f.boostCooldown = boostCooldownStandIn(s)
+        f.cruising = th.cruising
+        f.flightAssist = th.flightAssist
+        f.boosting = th.boosting
+        f.throttle = th.throttle.toFloat()
+        f.speedLimit = th.speedLimit.toFloat()
+        f.rawSpeedLimit = th.rawSpeedLimit.toFloat()
+        f.boostCooldown = th.boostCooldown.toFloat()
         f.hasGear = true
         f.gearDown = s.gearWanted()
-        // systems: only the gravity well exists (stand-in: within GRAVITY_WELL_RADII of the nearest body)
-        f.hasHeat = false
-        f.hasFuel = false
-        f.hasScoop = false
-        f.hasG = false
-        f.hasGravity = here.nearestBody >= 0
-        if (f.hasGravity) {
-            val b = s.system.bodies[here.nearestBody]
-            f.inInfluence = here.bodyDistance < b.radius * StarSystem.GRAVITY_WELL_RADII
-        }
+        // systems (ShipSystems); the overheat stages come from ShipWarnings (crash flow), 0 until it lands
+        f.hasHeat = true
+        f.heat = sys.heat.toFloat()
+        f.heatPhase = s.heatPhase
+        f.hasFuel = true
+        f.fuel = sys.fuelFraction.toFloat()
+        f.hasScoop = true
+        f.scooping = sys.scooping
+        f.hasG = true
+        f.strainG = sys.strainG.toFloat()
+        f.redout = sys.redout.toFloat()
+        f.hasGravity = gs.body >= 0
+        f.inInfluence = gs.inInfluence
         // off until their ports land: atmosphere, landing (terrain altitude), warp, collision, survey, mining
         f.hasAtmosphere = false
         f.surfaceActive = false
@@ -394,29 +383,6 @@ class SessionAudio(
     // ================================================================== stand-ins
 
     /**
-     * Stand-in for ShipThrust.cruising: Flight Assist on, not boosting, nobody else flying, above
-     * 1.02 x TopSpeed, and only where the speed law allows more than TopSpeed. Near a station the
-     * pre-port limit is TopSpeed itself, so being above it there is only a boost dying away, which
-     * Roblox never lets become a cruise: its station limit (`ShipClient.lua:2491`) brakes the boost
-     * at TopSpeed (`ShipThrust.lua:390`), below the cruise test of `ShipThrust.lua:279`.
-     */
-    private fun cruisingStandIn(s: Session): Boolean {
-        val above = s.spec.maxSpeed * 1.02f
-        // inside a station's zone the interim (pre-flight-port) law may sit a little above TopSpeed
-        // (the world's station hold); Roblox's station lock keeps it at TopSpeed there, so no cruise
-        return s.ship.flightAssist && !s.ship.boosting && !s.mode.controlled && s.here.zone != StarSystem.Zone.STATION_ZONE &&
-            s.here.speedLimit > above && s.ship.speed > above
-    }
-
-    /** Stand-in for ShipThrust.boostCooldown: the boost's remaining time, then the capacitor's recharge to one boost. */
-    private fun boostCooldownStandIn(s: Session): Float {
-        val sh = s.ship
-        if (sh.boosting) return sh.boostTime
-        val need = s.spec.boostCost - sh.capacitor
-        return if (need > 0f) need / max(s.spec.capacitorRecharge, 1e-3f) else 0f
-    }
-
-    /**
      * Stand-in for ShipDocking's state from the pre-port auto-dock: AUTO while it flies, CLAMPING for
      * the Roblox clamp time (1.6 s) once it parks, then DOCKED; LAUNCHING for a moment after a
      * launch; FREE otherwise. A start in the slot is DOCKED from the first frame (silent).
@@ -454,7 +420,7 @@ class SessionAudio(
 
     /** The local vertical: away from the nearest body (the surface block's frame, unused while it is off). */
     private fun upFrom(s: Session, f: CalloutFrame) {
-        val i = s.here.nearestBody
+        val i = s.gs.body
         if (i < 0) {
             f.upX = 0f; f.upY = 1f; f.upZ = 0f
             return
@@ -470,8 +436,6 @@ class SessionAudio(
             f.upX = (dx / d).toFloat(); f.upY = (dy / d).toFloat(); f.upZ = (dz / d).toFloat()
         }
     }
-
-    private val fwd = com.starwake.core.math.Vec3()
 
     // ================================================================== debug
 

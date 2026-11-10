@@ -5,6 +5,7 @@ import com.starwake.core.content.Content
 import com.starwake.core.content.ShipCatalog
 import com.starwake.core.content.ShipModel
 import com.starwake.core.game.Branch
+import com.starwake.core.game.CrashCause
 import com.starwake.core.game.FrameTrace
 import com.starwake.core.game.GearRig
 import com.starwake.core.game.OrbitCamera
@@ -110,6 +111,9 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
     /** The step order of the last frame traced with the "trace" command ("F0 C1 C2 ..."), "" before. */
     var frameTrace = ""
         private set
+
+    /** The autopilot status as the HUD shows it, latched at 10 Hz ("" while it is off; harness read-out). */
+    val hudAutopilot: String get() = if (hud.autopilotLine.visible) hud.autopilotLine.text else ""
 
     /** Frame counter (rendered frames since the start). */
     var frameCount = 0L
@@ -369,15 +373,17 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
      *
      * Screens: `launch [space|fade]` (instant docked start / instant free-flight start / the real
      * LAUNCH with fade, LOADING and reveal), `menu`, `settings`, `pause`, `resume`, `map`, `reveal`.
-     * Flight: `fa [on|off]`, `boost`, `throttle v`, `speed v` (velocity along the nose; with FA off it
-     * holds), `stick x y` / `stick off` (held cursor, radius
+     * Flight: `fa [on|off]`, `boost`, `throttle v` (the lever, −0.25..1), `speed v` (velocity along the
+     * nose; with FA off it holds), `stick x y` / `stick off` (held cursor, radius
      * fractions, Y down), `look x y` / `look off` (held head, degrees), `view cockpit|external|chase`,
      * `camera` (next view), `fov deg`, `key <Action>` (an action edge), `lock [next|clear]`, `action`,
+     * `autopilot` (P), `heat v` (ship heat, 1 = 100 %), `fuel f` (tank 0..1), `cargo t` (tonnes),
+     * `crash [heat|ground|station]`,
      * `undock`, `gear down|up|auto`, `ship [id]`, `quality 0|1|2`. Places: `teleport x y z [lx ly lz [ux uy uz]]`,
      * `near <body> [alt]`, `face <body>` (nose on a body), `teleport-low`, `teleport-surface`,
      * `lock-station [s]` (locks a station, TRANQUILITY by default), `lock-body <body>`, `dock [s]`, `docked [s]`,
-     * `behind-station [s]`, `ram-station [s]`; a station [s] is its index, id or name (`ares`,
-     * `SOL-ARES`), MERIDIAN when left out.
+     * `behind-station [s]`, `ram-station [s] [speed]` (FA off, at the hub's back, 120 m/s by default);
+     * a station [s] is its index, id or name (`ares`, `SOL-ARES`), MERIDIAN when left out.
      * World: `clock <s>` (the save-game clock; the ship moves with its frame). Diagnostics: `state`
      * (see [debugInfo]), `trace` (the next frame's step order into [frameTrace]),
      * `branch deck|destroyed|flight`. Sound (`09` 9.3): `audio` (status into [audioReport]),
@@ -785,10 +791,13 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             // the first-flight hints count only the time the pilot can see them (not under the
             // services of a docked start, a map or the LOADING curtain)
             if (flightHudShown(s) && !mode.curtain) hud.updateHints(dt, touch)
+            // the HUD's texts follow the frame at Roblox's 10 Hz text cadence (02 9.6)
+            hud.updateTexts(dt, s)
         }
-        // the touch controls mirror the session: the latched lever, the action pill, the look strip
+        // the touch controls mirror the session: the latched lever, the action pill, AUTO, the look strip
         touch.throttle = s.throttle
         touch.actionLabel = s.actionLabel
+        touch.autoVisible = s.autopilotOffered
         touch.lookEnabled = mode.view != ShipView.CHASE
     }
 
@@ -804,7 +813,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         if (owner == InputGate.OWNER_FLIGHT || owner == InputGate.OWNER_NONE) {
             // under the curtain only PAUSE gets through to here (see onPointerDown)
             touch.write(f, dt)
-            if (owner == InputGate.OWNER_FLIGHT) pad.write(f, dt, s.throttle, this)
+            if (owner == InputGate.OWNER_FLIGHT) pad.write(f, dt, this)
         }
         for (i in 0 until Action.COUNT) {
             val n = debugPresses[i]
@@ -956,8 +965,19 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
         fun num(i: Int): Double? = words.getOrNull(i)?.toDoubleOrNull()
         val station = stationTarget(arg, system)
         when (name) {
-            "fa" -> if (arg == null || (arg == "on") != s.ship.flightAssist) s.toggleFlightAssist()
+            "fa" -> if (arg == null || (arg == "on") != s.thrust.flightAssist) s.toggleFlightAssist()
             "boost" -> s.requestBoost()
+            "autopilot" -> s.autopilotButton()
+            "heat" -> num(1)?.let { s.systems.setHeat(it) }
+            "fuel" -> num(1)?.let { s.systems.setFuelFraction(it) }
+            "cargo" -> num(1)?.let { s.cargoMass = it.coerceAtLeast(0.0) }
+            "crash" -> s.startCrash(
+                when (arg) {
+                    "heat" -> CrashCause.HEAT
+                    "station" -> CrashCause.STATION
+                    else -> CrashCause.GROUND
+                },
+            )
             "throttle" -> num(1)?.let { s.setThrottle(it.toFloat()) }
             "speed" -> num(1)?.let { s.debugSpeed(it.toFloat()) }
             "stick" -> if (arg == "off" || arg == null) s.debugStick(false, 0f, 0f) else s.debugStick(true, (num(1) ?: 0.0).toFloat(), (num(2) ?: 0.0).toFloat())
@@ -1010,7 +1030,7 @@ class Game(private val platform: Platform) : GameActions, MapHost, PointerHandle
             "dock" -> s.requestDocking(station ?: 0)
             "docked" -> s.debugDocked(station ?: 0)
             "behind-station" -> s.debugBehindStation(station ?: 0, 1500.0, 0f)
-            "ram-station" -> s.debugBehindStation(station ?: 0, 400.0, 120f)
+            "ram-station" -> s.debugBehindStation(station ?: 0, 400.0, (num(2) ?: 120.0).toFloat())
         }
     }
 

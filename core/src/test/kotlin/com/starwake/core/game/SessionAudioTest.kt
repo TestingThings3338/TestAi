@@ -108,9 +108,9 @@ class SessionAudioTest {
     }
 
     /**
-     * Review: near a station the pre-port speed limit is TopSpeed, so being above it there is only
-     * a boost dying away; it read as a cruise (the CruiseEngage swell, "Cruise dropped", then a
-     * stale "Cruise engaged"). Roblox's station speed brake never lets that become a cruise.
+     * Review: inside a station's lock the speed limit holds TopSpeed, so being above it there is only
+     * a boost dying away; it must not read as a cruise (the CruiseEngage swell, "Cruise dropped", then
+     * a stale "Cruise engaged"). Roblox's station speed brake never lets that become a cruise.
      */
     @Test
     fun aBoostNearTheStationIsNoCruise() {
@@ -118,14 +118,16 @@ class SessionAudioTest {
         run(s, 7f) // past the callouts' read-in
         out.clearLog()
         s.requestBoost()
-        var fastest = 0f
+        var boosted = false
+        var cruised = false
         repeat(100) {
             run(s, 0.1f)
-            fastest = maxOf(fastest, s.ship.speed)
+            boosted = boosted || s.thrust.boosting
+            cruised = cruised || s.thrust.cruising
         }
-        assertTrue(SoundBank.BOOST in out.played, out.playedNames().toString())
-        assertTrue(fastest > s.spec.maxSpeed * 1.3f, "the boost went well above TopSpeed: $fastest")
-        assertEquals(StarSystem.Zone.STATION_ZONE, s.here.zone, "still in MERIDIAN's zone, where Roblox's station lock holds TopSpeed")
+        assertTrue(SoundBank.BOOST in out.played && boosted, out.playedNames().toString())
+        assertTrue(s.gs.stationLock, "still in MERIDIAN's lock, where Roblox's station limit holds TopSpeed")
+        assertFalse(cruised, "the station limit brakes the boost before it can become a cruise")
         assertFalse(SoundBank.CRUISE_ON in out.played || SoundBank.CRUISE_OFF in out.played, out.playedNames().toString())
         val said = lines()
         assertTrue(said.none { it == VoiceLine.CruiseOn || it == VoiceLine.CruiseOff || it == VoiceLine.CruiseDropped }, "$said")
@@ -139,11 +141,11 @@ class SessionAudioTest {
         s.teleport(h.x + 200_000.0, h.y, h.z, 0f, 0f, -1f, true) // 200 km from the station, at rest
         s.setThrottle(0f)
         run(s, 7f)
-        assertTrue(s.ship.speed < 1f)
+        assertTrue(s.ship.speed < 1.0)
         out.clearLog()
         s.setThrottle(1f)
-        run(s, 6f)
-        assertTrue(s.here.speedLimit > s.spec.maxSpeed * 1.02f && s.ship.speed > s.spec.maxSpeed * 1.02f, "cruising at ${s.ship.speed}")
+        run(s, 10f) // the cruise engages 7.3 s into a full-throttle start (flight-throttle)
+        assertTrue(s.thrust.cruising && s.ship.speed > s.handling.topSpeed * 1.02, "cruising at ${s.ship.speed}")
         assertTrue(SoundBank.CRUISE_ON in out.played, out.playedNames().toString())
         assertTrue(VoiceLine.CruiseOn in lines(), "${lines()}")
     }
@@ -247,6 +249,12 @@ class SessionAudioTest {
         val mx = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
         if (!mx.isThreadAllocatedMemoryEnabled) mx.isThreadAllocatedMemoryEnabled = true
         run(s, 12f) // warm up: welcome lines, callouts past the grace, music started
+        // and Flight Assist off and back on in the cruise once, so a first use's one-time class
+        // loading (kotlin.Unit when run alone) stays out of the measured frames
+        s.toggleFlightAssist()
+        run(s, 1f)
+        s.toggleFlightAssist()
+        run(s, 1f)
         s.toggleFlightAssist()
         val a = mx.currentThreadAllocatedBytes
         for (i in 0 until 600) {

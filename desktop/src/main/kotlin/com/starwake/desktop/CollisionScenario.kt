@@ -2,7 +2,6 @@ package com.starwake.desktop
 
 import com.starwake.core.content.Content
 import com.starwake.core.content.StationMesh
-import com.starwake.core.game.FlightModel
 import com.starwake.core.game.ShipSpec
 import com.starwake.core.game.StarSystem
 import com.starwake.core.game.StationCollision
@@ -87,7 +86,7 @@ object CollisionScenario {
             val system = content.system
             val scene = SceneRenderer(gl, content, 2)
             val ui = UiRenderer(gl, content.font, content.fontAtlas)
-            val sc = StationCollision(FlightModel(ShipSpec.STANDARD))
+            val sc = StationCollision()
             s.drainErrors(0)
 
             val f = SceneFrame()
