@@ -31,6 +31,8 @@ import kotlin.math.sqrt
  *    ARRIVED with their times;
  *  - "flight-arrow": the Roblox flight arrow for stick deflections 0, 0.1, 0.5 and 1 and with the
  *    head turned; the 8 directions steer the right way;
+ *  - "flight-alloc": every flight path with its instruments, measured on the no-op GL: no frame
+ *    allocates (run it with -Pnoea, as the perf scenario);
  *  - "gear": the gear sequence in the external view (doors 0.6 s, legs 1.6 s, and back).
  * Long flights run on the no-op GL (the game logic at 60 Hz, nothing drawn); their shots are
  * re-staged afterwards in GL at half resolution: the same clock, place, nose and speed, a few frames
@@ -629,9 +631,10 @@ object FlightScenarios {
                     break
                 }
             }
+            fun after(t: Double) = if (t.isNaN()) "never" else "after %.1f s".format(t)
             report.note(
-                "into the star from 60 Mm: HEAT ZONE from %s m at %s m/s at least, at the surface after %.1f s, 100 %% heat after %.1f s, heat death after %.1f s (cause %s), fuel %.3f -> %.3f by scooping"
-                    .format(f1(heatZone), f1(heatLimit), surface, warm, dead, field("cause"), fuel0, fuelMax),
+                "into the star from 60 Mm: HEAT ZONE from %s m at %s m/s at least, at the surface %s, 100 %% heat %s, heat death %s (cause %s), fuel %.3f -> %.3f by scooping"
+                    .format(f1(heatZone), f1(heatLimit), after(surface), after(warm), after(dead), field("cause"), fuel0, fuelMax),
             )
             expect(!heatZone.isNaN()) { "never in the HEAT ZONE" }
             // 02 3.5: the pilot can always leave: the heat zone's floor 1 km/s, x S in the port
@@ -812,14 +815,121 @@ object FlightScenarios {
         }
     }
 
+    // ------------------------------------------------------------------ flight-alloc
+
+    /**
+     * One pass over every flight path with its instruments, [n] frames a phase: cruise towards 0.5 c
+     * with the right thumb circling on the stick (the arrow), a boost in the external view, the
+     * autopilot on a locked Luna (AUTO and its status line), a push-over at 200 m/s 3 km above Earth
+     * (the redout overlay, the attitude indicator, the near band), the gear coming down 40 m up, the
+     * star's heat zone over 80 % (the overheat line, scooping). [meter] records only [Game.drawFrame];
+     * debug commands are processed in the frame after them, so every phase settles for two frames
+     * before it is measured.
+     */
+    private fun GameDriver.allocPass(w: StarSystem, n: Int, meter: PerfMeter?) {
+        val thumb = pointer(1)
+        val cx = 0.72f * this.w
+        val cy = 0.62f * h
+        val radius = 0.08f * h
+        fun measure(frames: Int, circle: Boolean) {
+            frames(2)
+            if (circle) thumb.down(cx + radius, cy)
+            // the desktop platform's log lines (haptics) are the harness's allocations, not the game's
+            platform.quiet = true
+            observer = meter
+            for (i in 0 until frames) {
+                if (circle) {
+                    val a = i * 0.05f
+                    thumb.move(cx + kotlin.math.cos(a) * radius, cy + kotlin.math.sin(a) * radius)
+                }
+                frame()
+                if (meter != null && meter.count > 0 && meter.allocBytes[meter.count - 1] > 0) {
+                    log("allocated ${meter.allocBytes[meter.count - 1]} B: ${game.debugInfo}")
+                }
+            }
+            observer = null
+            platform.quiet = false
+            if (circle) thumb.up()
+        }
+        openSpace(w)
+        cmd("view cockpit")
+        cmd("throttle 1")
+        measure(n, true)
+        openSpace(w)
+        cmd("view external")
+        cmd("throttle ${f3(num("top") / 1000.0)}")
+        cmd("speed ${f1(num("top"))}")
+        frames(2)
+        cmd("boost")
+        measure(n, true)
+        cmd("view cockpit")
+        flying()
+        cmd("near earth 5e7")
+        cmd("lock-body luna")
+        cmd("autopilot")
+        measure(n, false) // the autopilot steers: no thumb
+        expect(field("apOn") == "true") { "the autopilot is not flying" }
+        cmd("autopilot") // off again (P)
+        cmd("near earth 3000")
+        cmd("throttle 0.2")
+        cmd("speed 200")
+        cmd("stick 0 0.9")
+        // the push-over: the FA band kills the climb with doubled vertical thrust (-Gz, redout)
+        measure(n, false)
+        expect(num("redout") > 0.5 && num("dark") > 0.0) { "no redout in the push-over: ${field("redout")}, ${field("dark")}" }
+        cmd("stick off")
+        cmd("near earth 40")
+        measure(n / 2, false) // the gear comes down
+        expect(num("gear") > 0.0) { "the gear did not come down 40 m up" }
+        cmd("near sol 3e7")
+        cmd("heat 0.9")
+        cmd("throttle 1")
+        measure(n, true)
+        expect(field("scooping") == "true" && num("heat") > 0.8) { "not scooping over 80 % heat" }
+    }
+
+    fun alloc(env: ScenarioEnv) {
+        val ea = java.lang.management.ManagementFactory.getRuntimeMXBean().inputArguments
+        val noEa = "-XX:-DoEscapeAnalysis" in ea
+        env.report.note(
+            if (noEa) "escape analysis disabled: allocation counts approximate ART"
+            else "WARNING: escape analysis on (HotSpot may hide allocations ART makes); run ./gradlew :desktop:run -Pnoea --args=\"--scenario flight-alloc\"",
+        )
+        noop(env) {
+            val w = WorldBuilder.sol()
+            flying()
+            // two passes load and compile every path (the same phases and lengths: a path the JIT has not
+            // seen deoptimises, and HotSpot's deoptimisation allocates); the third one is measured
+            val n = 240
+            allocPass(w, n, null)
+            allocPass(w, n, null)
+            val meter = PerfMeter(n * 6) { 0 }
+            meter.game = game
+            allocPass(w, n, meter)
+            meter.summary("flight paths on the no-op GL", 0, report)
+            var allocating = 0
+            var total = 0L
+            for (i in 0 until meter.count) {
+                if (meter.allocBytes[i] > 0) allocating++
+                total += maxOf(0L, meter.allocBytes[i])
+            }
+            report.note("flight-alloc: ${meter.count} measured frames, $allocating allocated ($total B)")
+            // HotSpot installs compiled code and deoptimises on its own schedule, and such a transition
+            // now and then allocates once in a frame (48 B to 1.4 KB at a random frame of a random
+            // phase; never with -Xint; the perf scenario's warm-up shows the same). A flight path that
+            // allocates allocates every frame, or every few: at most two isolated frames pass
+            if (noEa) expect(allocating <= 2) { "$allocating of ${meter.count} flight frames allocated ($total B)" }
+        }
+    }
+
     // ------------------------------------------------------------------ gear
 
     fun gear(env: ScenarioEnv) = run(env) {
         flying()
         cmd("view external")
-        // the external camera swung round under the hull and zoomed in: the gear bays
-        cmd("look 150 60")
-        cmd("fov 40")
+        // the external camera swung round to the left side, a little below the hull: the legs swing
+        // down across the view (straight from below they would swing towards the camera)
+        cmd("look 90 20")
         cmd("throttle 0")
         cmd("gear up")
         frames(200)
@@ -854,6 +964,5 @@ object FlightScenarios {
         }
         cmd("gear auto")
         cmd("look off")
-        cmd("fov 80")
     }
 }

@@ -423,6 +423,11 @@ object Scenarios {
             "02 10.5: the Roblox flight arrow for stick deflections 0, 0.1 (dead zone), 0.5 and 1 and with the head turned; the 8 directions at full deflection steer the right way",
         ) { FlightScenarios.arrow(it) },
 
+        "flight-alloc" to Scenario(
+            "flight-alloc",
+            "02 10.5: every flight path with its instruments on the no-op GL (cruise and the arrow, boost, autopilot and AUTO, a push-over with the redout overlay, the gear, the star's heat zone): no frame allocates (with -Pnoea; CPU ms per frame)",
+        ) { FlightScenarios.alloc(it) },
+
         "gear" to Scenario(
             "gear",
             "02 10.5: the gear in the external view: down (doors 0.6 s, legs 1.6 s: shots at 0, 0.6, 1.6, 2.2 s) and up (legs, then doors and covers)",
